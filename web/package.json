@@ -1,0 +1,33 @@
+{
+	"name": "@veilway/panel-web",
+	"version": "0.1.0",
+	"private": true,
+	"description": "The Veilway panel's web app, embedded in the panel binary",
+	"license": "Apache-2.0",
+	"type": "module",
+	"engines": {
+		"node": ">=22.18"
+	},
+	"scripts": {
+		"generate": "openapi-typescript ../server/openapi.json -o src/schema.ts",
+		"check": "openapi-typescript ../server/openapi.json -o /tmp/veilway-panel-schema.ts && cmp src/schema.ts /tmp/veilway-panel-schema.ts && tsc --noEmit",
+		"dev": "vite --host 0.0.0.0",
+		"build": "vite build",
+		"preview": "vite preview --host 0.0.0.0"
+	},
+	"dependencies": {
+		"@veilway/i18n": "file:../../veilway-ui/packages/i18n",
+		"@veilway/ui": "file:../../veilway-ui/packages/ui",
+		"qrcode-generator": "^1.4.4",
+		"react": "^19.3.0",
+		"react-dom": "^19.3.0"
+	},
+	"devDependencies": {
+		"@types/react": "^19.3.0",
+		"@types/react-dom": "^19.3.0",
+		"@vitejs/plugin-react": "^6.1.2",
+		"openapi-typescript": "^7.13.0",
+		"typescript": "^5.9.3",
+		"vite": "^8.3.4"
+	}
+}

@@ -1,0 +1,51 @@
+/* Layout only. Color, type, glass and controls come from @veilway/ui and are not restyled here. */
+.p-app, .p-gate { min-block-size: 100dvh; }
+.p-page { display: grid; gap: var(--s-5); align-content: start; min-inline-size: 0; }
+.p-stack { display: grid; gap: var(--s-4); align-content: start; min-inline-size: 0; }
+.p-cluster { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.p-row { display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: var(--s-3); }
+.p-pad { padding: var(--s-2) var(--s-3); }
+.p-panel { display: grid; gap: var(--s-4); align-content: start; padding: var(--s-5); min-inline-size: 0; }
+.p-panel > div > .vw-muted, .p-head .vw-muted { max-inline-size: 68ch; }
+.p-form { max-inline-size: 46rem; }
+.p-head { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: var(--s-3) var(--s-4); }
+.p-head > div:first-child { display: grid; gap: var(--s-1); flex: 1 1 20rem; min-inline-size: 0; }
+.p-columns { display: grid; gap: var(--s-5); grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); align-items: start; }
+.p-pair { display: grid; gap: var(--s-4); grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); align-items: start; }
+.p-filters { display: flex; flex-wrap: wrap; align-items: end; gap: var(--s-3) var(--s-4); }
+.p-filters > .vw-field { flex: 1 1 18rem; max-inline-size: 28rem; }
+.p-bulk { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s-3); padding: var(--s-3) var(--s-4); position: sticky; inset-block-start: var(--s-2); z-index: 10; }
+.p-user { display: grid; gap: 2px; min-inline-size: 0; }
+.p-link { color: inherit; font-weight: var(--weight-strong); text-decoration: underline; text-decoration-color: var(--c-line-strong); text-underline-offset: 0.2em; }
+.p-link:hover { text-decoration-color: currentColor; }
+.p-link:focus-visible, .p-back:focus-visible { outline: 2px solid var(--c-focus); outline-offset: 2px; border-radius: var(--r-1); }
+.p-check { inline-size: 18px; block-size: 18px; margin: 0; accent-color: var(--c-accent); cursor: pointer; }
+.p-check:focus-visible { outline: 2px solid var(--c-focus); outline-offset: 2px; }
+.p-back { display: inline-flex; align-items: center; gap: var(--s-1); justify-self: start; color: var(--c-text-muted); text-decoration: none; }
+.p-back:hover { color: var(--c-text); }
+.p-back .vw-icon { transform: scaleX(-1); }
+[dir="rtl"] .p-back .vw-icon[data-flip] { transform: none; }
+.p-facts { display: grid; gap: var(--s-1); padding: 0; margin: 0; list-style: none; color: var(--c-text-muted); }
+.p-dl { display: grid; gap: var(--s-3); margin: 0; }
+.p-dl > div { display: grid; gap: 2px; }
+.p-dl dt { color: var(--c-text-muted); font-size: var(--text-2); }
+.p-dl dd { margin: 0; }
+.p-block { display: block; }
+.p-meta { display: flex; flex-wrap: wrap; gap: 2px var(--s-3); }
+.p-textarea { block-size: auto; min-block-size: 5rem; padding-block: var(--s-2); resize: vertical; line-height: var(--leading); }
+.p-mirror { display: grid; gap: var(--s-3); margin: 0; padding: var(--s-4); border: 1px solid var(--c-line); border-radius: var(--r-2); min-inline-size: 0; }
+.p-mirror legend { display: flex; inline-size: 100%; padding: 0; }
+.p-field-row { display: grid; gap: var(--s-2); justify-items: start; }
+/* Scanners need dark modules on a light ground with a quiet zone, whatever the scheme. */
+.p-qr { justify-self: start; padding: 12px; background: #fff; border-radius: var(--r-2); }
+.p-qr img { display: block; inline-size: 184px; block-size: 184px; image-rendering: pixelated; }
+.p-brand { display: flex; align-items: center; gap: var(--s-3); }
+.p-brand svg { inline-size: 36px; block-size: 36px; flex: none; }
+.p-brand div { display: grid; line-height: var(--leading-tight); }
+.p-gate-main { display: grid; gap: var(--s-5); align-content: center; inline-size: min(100% - 2 * var(--s-4), 30rem); min-block-size: 100dvh; margin-inline: auto; padding-block: var(--s-6); }
+.p-gate-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s-3); }
+.p-gate-card { padding: var(--s-6) var(--s-5); }
+@media (max-width: 480px) {
+	.p-panel { padding: var(--s-4); }
+	.p-gate-card { padding: var(--s-5) var(--s-4); }
+}
