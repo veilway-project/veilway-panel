@@ -1,5 +1,5 @@
 //! The guard in front of every admin route: host and origin checks, rate limits, API tokens, sessions, CSRF and re-authentication.
-use crate::{app::App, crypto::{self, now}, db::audit, http::{Ctx, Failure}};
+use crate::{app::{bucket, App}, crypto::{self, now}, db::audit, http::{Ctx, Failure}};
 use axum::{extract::{ConnectInfo, MatchedPath, Request, State}, http::{header::{AUTHORIZATION, COOKIE, HOST, ORIGIN, USER_AGENT}, Method, StatusCode}, middleware::Next, response::{IntoResponse, Response}};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rusqlite::{params, OptionalExtension};
@@ -39,7 +39,7 @@ pub struct Guard {pub app: Arc<App>, pub access: HashMap<(Method, String), Acces
 fn source(app: &App, request: &Request) -> String {
 	let peer = request.extensions().get::<ConnectInfo<SocketAddr>>().map(|info| info.0.ip().to_string()).unwrap_or_else(|| "unknown".into());
 	if !app.cfg.trusted_proxies.contains(&peer) {return peer}
-	request.headers().get("x-forwarded-for").and_then(|value| value.to_str().ok()).and_then(|value| value.rsplit(',').next()).map(|last| last.trim().to_string()).filter(|last| last.parse::<std::net::IpAddr>().is_ok()).unwrap_or(peer)
+	request.headers().get("x-forwarded-for").and_then(|value| value.to_str().ok()).and_then(|value| value.rsplit(',').next()).and_then(|last| last.trim().parse::<std::net::IpAddr>().ok().or_else(|| last.trim().parse::<SocketAddr>().ok().map(|addr| addr.ip()))).map(|ip| ip.to_string()).unwrap_or(peer)
 }
 
 fn refuse(status: StatusCode, code: &'static str, message: &str) -> Response {Failure::new(status, code, message).into_response()}
@@ -60,11 +60,13 @@ pub async fn guard(State(guard): State<Arc<Guard>>, mut request: Request, next: 
 	let changes = !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS);
 	if changes {
 		if let Some(origin) = request.headers().get(ORIGIN) {
-			let authority = origin.to_str().ok().and_then(|origin| origin.split_once("://")).map(|(_, rest)| rest);
-			if authority != Some(host.as_str()) {return refuse(StatusCode::FORBIDDEN, "bad_origin", "The request comes from another origin.")}
+			// The configured hosts are the public names. Only with none configured does the Host header stand in, for a web server that checks it.
+			let names = if app.cfg.allowed_hosts.is_empty() {vec![host.clone()]} else {app.cfg.allowed_hosts.clone()};
+			let authority = origin.to_str().ok().and_then(|origin| origin.split_once("://")).map(|(_, rest)| rest.to_string());
+			if !authority.is_some_and(|authority| names.contains(&authority)) {return refuse(StatusCode::FORBIDDEN, "bad_origin", "The request comes from another origin.")}
 		}
 	}
-	if !app.limits.hit(&format!("src:{source}"), 600, 60) {return refuse(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many requests from this address.")}
+	if !app.limits.hit(&format!("src:{}", bucket(&source)), 600, 60) {return refuse(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many requests from this address.")}
 	let bearer = request.headers().get(AUTHORIZATION).and_then(|value| value.to_str().ok()).and_then(|value| value.strip_prefix("Bearer ")).map(str::to_string);
 	let agent = request.headers().get(USER_AGENT).and_then(|value| value.to_str().ok()).unwrap_or("").chars().take(200).collect::<String>();
 	if access == Access::Public {

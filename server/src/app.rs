@@ -6,10 +6,21 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::{HashMap, VecDeque}, fs, sync::Mutex};
+use std::{collections::{HashMap, VecDeque}, fs, net::IpAddr, os::unix::fs::PermissionsExt, sync::{atomic::AtomicBool, Mutex}};
 
 /// 365 days, then a retired signing key is destroyed.
 pub const RETIRED_KEPT: i64 = 365 * 86_400;
+
+/// Most keys the limiter holds. Past it, a key it does not hold yet is refused rather than stored.
+const KEYS_MAX: usize = 100_000;
+
+/// The key a source's limit counts under. An IPv6 address counts as its /64, since one host may hold many addresses.
+pub fn bucket(source: &str) -> String {
+	match source.parse::<IpAddr>() {
+		Ok(IpAddr::V6(address)) => ipnet::Ipv6Net::new(address, 64).map_or(source.to_string(), |net| net.trunc().to_string()),
+		_ => source.to_string(),
+	}
+}
 
 /// A sliding window of hits per key. Kept in memory: a restart gives an attacker a fresh allowance, which the web server's own limits cover.
 #[derive(Default)]
@@ -19,7 +30,8 @@ impl Limiter {
 	/// Records a hit and says whether the key is still within `max` hits in `window` seconds.
 	pub fn hit(&self, key: &str, max: usize, window: i64) -> bool {
 		let (mut all, at) = (self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), now());
-		if all.len() > 100_000 {all.retain(|_, hits| hits.back().is_some_and(|last| at - last < 3600))}
+		if all.len() >= KEYS_MAX {all.retain(|_, hits| hits.back().is_some_and(|last| at - last < 3600))}
+		if all.len() >= KEYS_MAX && !all.contains_key(key) {return false}
 		let hits = all.entry(key.to_string()).or_default();
 		while hits.front().is_some_and(|first| at - first >= window) {hits.pop_front();}
 		hits.push_back(at);
@@ -30,6 +42,8 @@ impl Limiter {
 		let (all, at) = (self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), now());
 		all.get(key).map_or(0, |hits| hits.iter().filter(|hit| at - **hit < window).count())
 	}
+	/// When the key was last hit, if it was.
+	pub fn last(&self, key: &str) -> Option<i64> {self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(key).and_then(|hits| hits.back().copied())}
 	pub fn clear(&self, key: &str) {self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(key);}
 }
 
@@ -48,14 +62,21 @@ pub struct Signing {path: std::path::PathBuf, pub entries: Vec<SigningEntry>}
 impl Signing {
 	pub fn load(path: &std::path::Path) -> Result<Self, String> {
 		let entries = match fs::read(path) {
-			Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?,
+			Ok(bytes) => {
+				if fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?.permissions().mode() & 0o077 != 0 {return Err(format!("{}: the signing key file must be mode 600", path.display()))}
+				serde_json::from_slice(&bytes).map_err(|error| format!("{}: {error}", path.display()))?
+			}
 			Err(error) if error.kind() == std::io::ErrorKind::NotFound => vec![SigningEntry {seed: URL_SAFE_NO_PAD.encode(crypto::random::<32>()), created: now(), retired_at: None}],
 			Err(error) => return Err(format!("{}: {error}", path.display())),
 		};
 		let mut signing = Self {path: path.to_path_buf(), entries};
-		signing.entries.retain(|entry| entry.retired_at.is_none_or(|at| now() - at < RETIRED_KEPT));
-		signing.save()?;
+		signing.prune()?;
 		Ok(signing)
+	}
+	/// Destroys retired keys past their year and saves what is left.
+	pub fn prune(&mut self) -> Result<(), String> {
+		self.entries.retain(|entry| entry.retired_at.is_none_or(|at| now() - at < RETIRED_KEPT));
+		self.save()
 	}
 	pub fn save(&self) -> Result<(), String> {crypto::write_private(&self.path, &serde_json::to_vec(&self.entries).unwrap_or_default(), true).map_err(|error| format!("{}: {error}", self.path.display()))}
 	pub fn current(&self) -> Vec<&SigningEntry> {self.entries.iter().filter(|entry| entry.retired_at.is_none()).collect()}
@@ -101,6 +122,8 @@ pub struct App {
 	/// One change of the node's config at a time.
 	pub node_lock: tokio::sync::Mutex<()>,
 	pub last_sync: Mutex<Option<String>>,
+	/// Set when the node's config was not brought up to date, and cleared by the next push that works.
+	pub dirty: AtomicBool,
 }
 
 impl App {

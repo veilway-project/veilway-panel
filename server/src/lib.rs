@@ -14,10 +14,10 @@ pub mod users;
 pub mod web;
 
 use app::{App, Limiter, Signing};
-use axum::{extract::Request, http::{header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS}, HeaderValue}, middleware::{self, Next}, response::Response, routing::{any, get}, Router};
-use auth::Guard;
+use axum::{extract::Request, http::{header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS}, HeaderName, HeaderValue, Method}, middleware::{self, Next}, response::Response, routing::{any, get}, Router};
+use auth::{Access, Guard};
 use config::Config;
-use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, time::Duration};
 
 /// Opens the database and the key files. The first start with no accounts makes the keys and prints a setup token.
 pub fn build(cfg: Config) -> Result<Arc<App>, String> {
@@ -32,18 +32,39 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 	let setup_needed = db.lock().query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0)).map_err(|error| error.to_string())? == 0;
 	let token = setup_needed.then(|| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<20>()));
 	if let Some(token) = &token {println!("Setup token (one time): {token}\nPOST it with a username and password to {}/api/setup", cfg.prefix);}
-	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None)}))
+	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: AtomicBool::new(false)}))
 }
 
-/// Ends old sessions and says so loudly, once an hour, when the panel has accounts and no key file.
+/// What the upkeep loop remembers between passes.
+#[derive(Default)]
+pub struct Upkeep {pub cleaned_at: i64, pub retry_at: i64, pub wait: i64}
+
+/// Runs upkeep every few seconds. The clean-up is hourly; a failed node push is retried, waiting twice as long each time up to ten minutes.
 pub fn spawn_upkeep(app: Arc<App>) {
 	tokio::spawn(async move {
+		let mut state = Upkeep::default();
 		loop {
-			let _ = app.db.lock().execute("delete from sessions where last_seen < ? or created < ?", [crypto::now() - auth::IDLE, crypto::now() - auth::ABSOLUTE]);
-			if app.keys.is_none() {tracing::error!("the key file is missing: the subscription endpoint answers every request as an unknown path and no secret can be opened")}
-			tokio::time::sleep(Duration::from_secs(3600)).await;
+			upkeep_once(&app, &mut state).await;
+			tokio::time::sleep(Duration::from_secs(5)).await;
 		}
 	});
+}
+
+pub async fn upkeep_once(app: &Arc<App>, state: &mut Upkeep) {
+	let at = crypto::now();
+	if at - state.cleaned_at >= 3600 {
+		state.cleaned_at = at;
+		let db = app.db.lock();
+		let _ = db.execute("delete from sessions where last_seen < ? or created < ?", [at - auth::IDLE, at - auth::ABSOLUTE]);
+		let _ = subs::expire_pending(&db, at);
+		drop(db);
+		if let Err(error) = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).prune() {tracing::error!("the signing keys could not be pruned: {error}")}
+		if app.keys.is_none() {tracing::error!("the key file is missing: the subscription endpoint answers every request as an unknown path and no secret can be opened")}
+	}
+	if app.dirty.load(Ordering::Relaxed) && at >= state.retry_at {
+		state.wait = if node::sync(app).await.is_ok() {0} else {(state.wait * 2).clamp(5, 600)};
+		state.retry_at = at + state.wait;
+	}
 }
 
 async fn headers(request: Request, next: Next) -> Response {
@@ -54,6 +75,7 @@ async fn headers(request: Request, next: Next) -> Response {
 	map.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
 	map.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
 	map.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+	map.insert(HeaderName::from_static("x-robots-tag"), HeaderValue::from_static("noindex"));
 	response
 }
 
@@ -65,7 +87,10 @@ pub fn router(app: Arc<App>) -> Router {
 		access.insert((route.method.clone(), path.clone()), route.access);
 		api = api.route(&path, route.handler);
 	}
+	// The web app is served without a session, since its login page is what a logged-out browser needs.
+	let pages = [app.cfg.prefix.clone(), format!("{}/", app.cfg.prefix), format!("{}/{{*path}}", app.cfg.prefix)];
+	for page in &pages {for method in [Method::GET, Method::HEAD] {access.insert((method, page.clone()), Access::Public);}}
 	let guard = Arc::new(Guard {app: app.clone(), access});
-	let admin = api.route(&app.cfg.prefix, get(web::index)).route(&format!("{}/", app.cfg.prefix), get(web::index)).route(&format!("{}/{{*path}}", app.cfg.prefix), get(web::asset)).route_layer(middleware::from_fn_with_state(guard, auth::guard)).layer(middleware::from_fn(headers));
-	Router::new().merge(admin).route(&app.cfg.sub_path, any(subs::endpoint)).fallback(routes::not_found).with_state(app)
+	let admin = api.route(&pages[0], get(web::index)).route(&pages[1], get(web::index)).route(&pages[2], get(web::asset)).route_layer(middleware::from_fn_with_state(guard, auth::guard)).method_not_allowed_fallback(routes::not_found).layer(middleware::from_fn(headers));
+	Router::new().merge(admin).route(&app.cfg.sub_path, any(subs::endpoint)).route("/robots.txt", get(web::robots)).fallback(routes::not_found).with_state(app)
 }

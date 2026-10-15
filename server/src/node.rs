@@ -1,10 +1,10 @@
 //! The node's control API over its unix socket, and the one place the panel's users become the node's `users`.
-use crate::{app::App, crypto::now};
+use crate::{app::App, crypto::now, subs};
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Bytes, Request};
 use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
-use std::{collections::HashMap, path::Path, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::Path, sync::{atomic::Ordering, Arc}, time::Duration};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::net::UnixStream;
 
@@ -35,12 +35,13 @@ pub async fn usage(app: &App) -> HashMap<String, Value> {
 fn users(app: &App) -> Result<Value, String> {
 	let keys = app.keys.as_ref().ok_or("the key file is missing, so no secret can be opened")?;
 	let db = app.db.lock();
+	subs::expire_pending(&db, now()).map_err(|error| error.to_string())?;
 	let mut statement = db.prepare("select id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, record_id from users order by id").map_err(|error| error.to_string())?;
 	let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<i64>>(7)?, row.get::<_, Vec<u8>>(8)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
 	let mut out = Vec::new();
 	for (id, name, enabled, groups, exits, quota, period, expires, record) in rows {
 		let record: [u8; 16] = record.try_into().map_err(|_| "a user record id is not 16 bytes")?;
-		let mut devices = db.prepare("select id, public_key, address, transport_secret from devices where user_id = ? order by id").map_err(|error| error.to_string())?;
+		let mut devices = db.prepare("select id, public_key, address, transport_secret from devices where user_id = ? and state = 'enrolled' order by id").map_err(|error| error.to_string())?;
 		let devices = devices.query_map([id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
 		if devices.is_empty() {continue}
 		let devices: Vec<Value> = devices.into_iter().map(|(device, public_key, address, sealed)| {
@@ -76,6 +77,7 @@ pub async fn sync(app: &Arc<App>) -> Result<(), String> {
 		Err("the node's config kept changing underneath the panel".into())
 	}.await;
 	*app.last_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(match &result {Ok(()) => format!("ok at {}", now()), Err(error) => format!("failed at {}: {error}", now())});
+	app.dirty.store(result.is_err(), Ordering::Relaxed);
 	if let Err(error) = &result {tracing::warn!("the node was not updated: {error}")}
 	result
 }

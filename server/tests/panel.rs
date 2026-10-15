@@ -2,9 +2,9 @@ use axum::{body::Body, extract::ConnectInfo, http::{header::{CONTENT_TYPE, COOKI
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use std::{net::SocketAddr, path::PathBuf, sync::{Arc, Mutex}};
+use std::{net::SocketAddr, path::PathBuf, sync::{atomic::Ordering, Arc, Mutex}};
 use tower::ServiceExt;
-use veilway_panel::{app::App, build, config::Config, crypto, openapi, router};
+use veilway_panel::{app::{bucket, App, Limiter, Signing}, build, config::Config, crypto, openapi, router, upkeep_once, Upkeep};
 use veilway_proto::subscription::{envelope::{self, Kid}, link::Link, payload::{self, Payload, Reason}, BODY_MAX};
 
 const PASSWORD: &str = "correct horse battery";
@@ -26,10 +26,12 @@ impl Answer {
 
 impl Harness {
 	async fn new() -> Self {Self::with_socket(None).await}
-	async fn with_socket(socket: Option<PathBuf>) -> Self {
+	async fn with_socket(socket: Option<PathBuf>) -> Self {Self::with_config(socket, |_| {}).await}
+	async fn with_config(socket: Option<PathBuf>, edit: impl FnOnce(&mut Config)) -> Self {
 		let dir = std::env::temp_dir().join(format!("vwpanel-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
 		std::fs::create_dir_all(&dir).unwrap();
-		let cfg = Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), node_socket: socket.unwrap_or(dir.join("none.sock")), ..Config::default()};
+		let mut cfg = Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), node_socket: socket.unwrap_or(dir.join("none.sock")), ..Config::default()};
+		edit(&mut cfg);
 		let app = build(cfg).unwrap();
 		let router = router(app.clone());
 		let mut harness = Self {app, router, totp: Vec::new(), dir};
@@ -144,11 +146,13 @@ async fn login_totp_rate_limit_and_csrf() {
 	let other_id = h.call(Method::GET, "/p/api/session", Some(&other), None, "10.0.0.4").await.json()["session_id"].as_str().unwrap().to_string();
 	assert_eq!(h.call(Method::DELETE, &format!("/p/api/sessions/{other_id}"), Some(&session), None, "10.0.0.3").await.status, StatusCode::OK);
 	assert_eq!(h.call(Method::GET, "/p/api/users", Some(&other), None, "10.0.0.4").await.status, StatusCode::UNAUTHORIZED);
-	// The account locks after five failures, even for the right password.
-	for _ in 0..5 {h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": "nope nope nope", "totp": "000000"})), "10.0.0.9").await;}
+	// Twenty wrong tries put the account on a wait of 15 minutes. A wrong try waits, a right password and code pass.
+	for index in 1..=20 {h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": "nope nope nope", "totp": "000000"})), &format!("10.1.0.{index}")).await;}
+	let waiting = h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": "nope nope nope", "totp": "000000"})), "10.0.2.1").await;
+	assert_eq!(waiting.status, StatusCode::TOO_MANY_REQUESTS);
 	h.app.db.lock().execute("update admins set totp_last_step = 0", []).unwrap();
-	let locked = h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD, "totp": h.code(0)})), "10.0.0.5").await;
-	assert_eq!(locked.status, StatusCode::TOO_MANY_REQUESTS);
+	let right = h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD, "totp": h.code(0)})), "10.0.2.2").await;
+	assert_eq!(right.status, StatusCode::OK);
 	// And one source is limited on its own, whatever the account.
 	let mut limited = false;
 	for _ in 0..12 {limited |= h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "someone", "password": "nope nope nope", "totp": "000000"})), "10.0.0.6").await.status == StatusCode::TOO_MANY_REQUESTS;}
@@ -402,4 +406,103 @@ async fn bulk_actions_and_setup_once() {
 	let second = h.call(Method::POST, "/p/api/setup", None, Some(json!({"token": "anything", "username": "other", "password": PASSWORD})), "10.0.0.1").await;
 	assert_eq!(second.status, StatusCode::FORBIDDEN);
 	assert_eq!(h.call(Method::POST, "/p/api/users", Some(&session), Some(json!({"name": "Bad Name"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn web_pages_load_without_a_session() {
+	let h = Harness::new().await;
+	let page = h.call(Method::GET, "/p/", None, None, "10.0.0.1").await;
+	assert_eq!((page.status, page.headers.get("x-robots-tag").map(|value| value.to_str().unwrap().to_string())), (StatusCode::OK, Some("noindex".to_string())));
+	assert_eq!(h.call(Method::GET, "/p", None, None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::GET, "/p/login/deep", None, None, "10.0.0.1").await.status, StatusCode::OK);
+	let robots = h.call(Method::GET, "/robots.txt", None, None, "10.0.0.1").await;
+	assert_eq!(robots.body, b"User-agent: *\nDisallow: /p/\n".to_vec());
+	assert_eq!(h.call(Method::DELETE, "/p/api/status", None, None, "10.0.0.1").await.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn forwarded_sources_keep_their_address_and_origins_follow_allowed_hosts() {
+	let h = Harness::with_config(None, |cfg| {cfg.trusted_proxies = vec!["10.0.0.9".into()]; cfg.allowed_hosts = vec!["panel.test".into()];}).await;
+	let session = h.login("10.0.0.1").await;
+	let forwarded = h.send(Request::builder().method(Method::POST).uri("/p/api/login").header(HOST, "panel.test").header(CONTENT_TYPE, "application/json").header("x-forwarded-for", "198.51.100.4, 203.0.113.5:4433"), Some(json!({"username": "owner", "password": "nope nope nope", "totp": "000000"})), "10.0.0.9").await;
+	assert_eq!(forwarded.status, StatusCode::UNAUTHORIZED);
+	let logged: i64 = h.app.db.lock().query_row("select count(*) from audit where source = '203.0.113.5' and action = 'login.failed'", [], |row| row.get(0)).unwrap();
+	assert_eq!(logged, 1);
+	let same_host = h.send(Request::builder().method(Method::POST).uri("/p/api/users").header(HOST, "panel.test").header(ORIGIN, "https://panel.test").header(COOKIE, &session.cookie).header("x-csrf-token", &session.csrf).header(CONTENT_TYPE, "application/json"), Some(json!({"name": "zed"})), "10.0.0.1").await;
+	assert_eq!(same_host.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn failed_logins_name_only_accounts_that_exist() {
+	let h = Harness::new().await;
+	h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "ghost", "password": "nope nope nope", "totp": "000000"})), "10.0.0.2").await;
+	let names: Vec<String> = h.app.db.lock().prepare("select actor from audit where action = 'login.failed'").unwrap().query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+	assert_eq!(names, vec!["unknown".to_string()]);
+}
+
+#[tokio::test]
+async fn node_push_is_retried_after_an_outage() {
+	let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+	let dir = std::env::temp_dir().join(format!("vwretry-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
+	std::fs::create_dir_all(&dir).unwrap();
+	let socket = dir.join("control.sock");
+	let put = seen.clone();
+	let node = Router::new().route("/v1/config", get(|| async {Json(json!({"revision": "rev1", "generation": 1, "document": {"version": 1, "users": []}}))}).put(move |Json(document): Json<Value>| async move {
+		put.lock().unwrap().push(document);
+		Json(json!({}))
+	}));
+	let h = Harness::with_socket(Some(socket.clone())).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (id, link) = h.user(&session, "ann", json!({})).await;
+	assert_eq!(h.call(Method::POST, "/p/api/node/sync", Some(&session), None, "10.0.0.1").await.json()["synced"], false);
+	assert!(h.app.dirty.load(Ordering::Relaxed), "the push failed with the node down");
+	let mut state = Upkeep::default();
+	upkeep_once(&h.app, &mut state).await;
+	assert!(h.app.dirty.load(Ordering::Relaxed) && state.wait == 5);
+	let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+	tokio::spawn(async move {axum::serve(listener, node).await.unwrap();});
+	// The retry is due after its wait. Forgetting when it was due stands in for the wait.
+	state.retry_at = 0;
+	upkeep_once(&h.app, &mut state).await;
+	assert!(!h.app.dirty.load(Ordering::Relaxed));
+	assert_eq!(seen.lock().unwrap().last().unwrap()["users"], json!([]), "ann has no enrolled device yet");
+	let made = h.call(Method::POST, &format!("/p/api/users/{id}/devices"), Some(&session), Some(json!({"name": "phone"})), "10.0.0.1").await.json();
+	assert_eq!(made["device"]["state"], "enrolled");
+	assert_eq!(h.fetch(&link, &[key_of(&link).kid()], 9, "fetch", None).await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::POST, "/p/api/node/sync", Some(&session), None, "10.0.0.1").await.json()["synced"], true);
+	let pushed = seen.lock().unwrap().last().unwrap()["users"][0]["devices"].clone();
+	assert_eq!(pushed.as_array().unwrap().len(), 1, "a pending device is not pushed");
+	let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn config_refuses_what_the_panel_cannot_serve_safely() {
+	assert!(Config {listen: "0.0.0.0:8480".parse().unwrap(), trusted_proxies: vec!["127.0.0.1".into()], ..Config::default()}.check().unwrap_err().contains("loopback"));
+	assert!(Config::default().check().unwrap_err().contains("trusted_proxies"));
+	assert!(Config {direct: true, ..Config::default()}.check().is_ok());
+	assert!(Config {trusted_proxies: vec!["127.0.0.1".into()], ..Config::default()}.check().is_ok());
+}
+
+#[test]
+fn ipv6_hosts_share_a_limit_and_the_limiter_stays_bounded() {
+	assert_eq!(bucket("2001:db8:1:2::1"), bucket("2001:db8:1:2:ffff::9"));
+	assert_ne!(bucket("2001:db8:1:2::1"), bucket("2001:db8:1:3::1"));
+	assert_eq!(bucket("192.0.2.7"), "192.0.2.7");
+	let limiter = Limiter::default();
+	for index in 0..100_000 {limiter.hit(&index.to_string(), 1, 3600);}
+	assert!(!limiter.hit("one more", 1, 3600));
+	assert!(limiter.hit("7", 2, 3600));
+}
+
+#[test]
+fn signing_keys_must_be_private() {
+	use std::os::unix::fs::PermissionsExt;
+	let dir = std::env::temp_dir().join(format!("vwsign-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
+	std::fs::create_dir_all(&dir).unwrap();
+	let path = dir.join("signing.keys");
+	std::fs::write(&path, "[]").unwrap();
+	std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+	assert!(Signing::load(&path).is_err());
+	let _ = std::fs::remove_dir_all(dir);
 }

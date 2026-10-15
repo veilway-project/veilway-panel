@@ -1,6 +1,6 @@
 //! The React app, embedded at build time from `web/dist`, and a placeholder while that folder is empty.
 use crate::app::App;
-use axum::{body::Body, extract::{Path, State}, http::{header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE}, HeaderValue, StatusCode}, response::Response};
+use axum::{body::Body, extract::{Path, State}, http::{header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE}, HeaderName, HeaderValue, StatusCode}, response::Response};
 use rust_embed::RustEmbed;
 use std::sync::Arc;
 
@@ -22,11 +22,19 @@ pub async fn index(State(app): State<Arc<App>>) -> Response {file(&app, "index.h
 
 pub async fn asset(State(app): State<Arc<App>>, Path(path): Path<String>) -> Response {file(&app, &path)}
 
+/// Keeps crawlers out of the panel. The operator's web server must forward this path to the root.
+pub async fn robots(State(app): State<Arc<App>>) -> Response {
+	let mut response = Response::new(Body::from(format!("User-agent: *\nDisallow: {}/\n", app.cfg.prefix)));
+	response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+	response.headers_mut().insert(HeaderName::from_static("x-robots-tag"), HeaderValue::from_static("noindex"));
+	response
+}
+
 fn file(app: &App, path: &str) -> Response {
 	let (name, body) = match Dist::get(path) {
 		Some(found) => (path.to_string(), found.data.to_vec()),
-		// A path that is no file is a route of the single-page app.
-		None if !path.contains('.') => match Dist::get("index.html") {Some(found) => ("index.html".to_string(), found.data.to_vec()), None => ("index.html".to_string(), PLACEHOLDER.as_bytes().to_vec())},
+		// A path that is no file is a route of the single-page app, and the index is the placeholder while nothing is built.
+		None if !path.contains('.') || path == "index.html" => match Dist::get("index.html") {Some(found) => ("index.html".to_string(), found.data.to_vec()), None => ("index.html".to_string(), PLACEHOLDER.as_bytes().to_vec())},
 		None => return app.not_found(),
 	};
 	let mut response = Response::new(Body::from(body));

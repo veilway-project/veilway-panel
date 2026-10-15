@@ -38,19 +38,28 @@ pub struct Config {
 	pub not_found: NotFound,
 	/// Off only for tests and for a panel reached over plain HTTP on localhost.
 	pub secure_cookies: bool,
+	/// Set when no proxy is in front of the panel. Without one, trusted_proxies stays empty and every request counts from the socket.
+	pub direct: bool,
 }
 
 impl Default for Config {
 	fn default() -> Self {
-		Self {listen: "127.0.0.1:8480".parse().unwrap(), prefix: "/panel".into(), sub_path: "/sub".into(), database: "panel.db".into(), keys: "panel.keys".into(), signing: "signing.keys".into(), node_socket: "/run/veilway/control.sock".into(), allowed_hosts: Vec::new(), trusted_proxies: Vec::new(), not_found: NotFound::default(), secure_cookies: true}
+		Self {listen: "127.0.0.1:8480".parse().unwrap(), prefix: "/panel".into(), sub_path: "/sub".into(), database: "panel.db".into(), keys: "panel.keys".into(), signing: "signing.keys".into(), node_socket: "/run/veilway/control.sock".into(), allowed_hosts: Vec::new(), trusted_proxies: Vec::new(), not_found: NotFound::default(), secure_cookies: true, direct: false}
 	}
 }
 
 impl Config {
 	pub fn load(path: &str) -> Result<Self, String> {
 		let config: Config = serde_json::from_slice(&fs::read(path).map_err(|error| format!("{path}: {error}"))?).map_err(|error| format!("{path}: {error}"))?;
-		let path_ok = |path: &str| path.starts_with('/') && path.len() > 1 && !path.ends_with('/') && path.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/-_.".contains(&byte));
-		if !path_ok(&config.prefix) || !path_ok(&config.sub_path) || config.prefix == config.sub_path || config.sub_path.starts_with(&format!("{}/", config.prefix)) || config.prefix.starts_with(&format!("{}/", config.sub_path)) {return Err("prefix and sub_path must be two different paths, each with a leading slash, no trailing slash and only letters, digits and - _ . /".into())}
+		config.check().map_err(|error| format!("{path}: {error}"))?;
 		Ok(config)
+	}
+	/// What the panel refuses to start with. It has no TLS of its own, so it listens on loopback behind the operator's web server, and that server is named in trusted_proxies unless the panel is `direct`.
+	pub fn check(&self) -> Result<(), String> {
+		let path_ok = |path: &str| path.starts_with('/') && path.len() > 1 && !path.ends_with('/') && path.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"/-_.".contains(&byte));
+		if !path_ok(&self.prefix) || !path_ok(&self.sub_path) || self.prefix == self.sub_path || self.sub_path.starts_with(&format!("{}/", self.prefix)) || self.prefix.starts_with(&format!("{}/", self.sub_path)) {return Err("prefix and sub_path must be two different paths, each with a leading slash, no trailing slash and only letters, digits and - _ . /".into())}
+		if !self.listen.ip().is_loopback() {return Err(format!("listen is {}, which is not a loopback address. The panel has no TLS of its own yet, so it listens on 127.0.0.1 or ::1 behind the operator's web server, which terminates TLS", self.listen))}
+		if self.trusted_proxies.is_empty() && !self.direct {return Err("trusted_proxies is empty, so behind the web server every request would count as one source. List the web server's address in trusted_proxies, or set \"direct\": true when no proxy is in front".into())}
+		Ok(())
 	}
 }

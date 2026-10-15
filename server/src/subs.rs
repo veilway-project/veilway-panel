@@ -39,6 +39,9 @@ impl DeviceRow {
 	}
 }
 
+/// Drops the pending devices that were not confirmed within the lapse. Pending devices are never pushed to the node.
+pub fn expire_pending(db: &Connection, at: i64) -> rusqlite::Result<usize> {db.execute("delete from devices where state = 'pending' and created < ?", [at - PENDING_LAPSE])}
+
 /// The lowest free host address of the pool, leaving the first one to the gateway.
 pub fn allocate(db: &Connection, pool: &str) -> Option<String> {
 	let pool: Ipv4Net = pool.parse().ok()?;
@@ -123,16 +126,18 @@ fn asked(map: &Map<String, Value>) -> Option<Asked> {
 
 /// Reads the body and says whether it is a valid request. Anything that is not answers as an unknown path.
 pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response {
-	if request.method() != Method::POST {return app.not_found()}
-	let Ok(body) = http_body_util::Limited::new(request.into_body(), 1024).collect().await else {return app.not_found()};
-	let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&body.to_bytes()) else {return app.not_found()};
-	let token: Option<[u8; 16]> = map.get("token").and_then(Value::as_str).filter(|text| text.len() == 22).and_then(|text| URL_SAFE_NO_PAD.decode(text).ok()).and_then(|bytes| bytes.try_into().ok());
+	let post = request.method() == Method::POST;
+	// The body is drained to the cap whatever it holds, and the lookup always runs, so an invalid request costs what a valid one does.
+	let body = http_body_util::Limited::new(request.into_body(), 1024).collect().await.map(|body| body.to_bytes()).unwrap_or_default();
+	let map = match serde_json::from_slice::<Value>(&body) {Ok(Value::Object(map)) => Some(map), _ => None};
+	let token: Option<[u8; 16]> = map.as_ref().and_then(|map| map.get("token")).and_then(Value::as_str).filter(|text| text.len() == 22).and_then(|text| URL_SAFE_NO_PAD.decode(text).ok()).and_then(|bytes| bytes.try_into().ok());
 	let Some(keys) = app.keys.as_ref() else {return app.not_found()};
 	// One HMAC, one lookup and one comparison, against a dummy value when nothing was found.
 	let lookup = keys.token_lookup(&token.unwrap_or([0; 16]));
 	let found = app.db.lock().query_row(&format!("select {USER_COLUMNS}, token_lookup from users where token_lookup = ?"), [lookup.as_slice()], |row| Ok((UserRow::read(row)?, row.get::<_, Vec<u8>>(16)?))).optional().unwrap_or(None);
 	let stored = found.as_ref().map_or(vec![0u8; 32], |(_, stored)| stored.clone());
-	let Some((user, _)) = found.filter(|_| crypto::equal(&stored, &lookup) && token.is_some()) else {return app.not_found()};
+	let Some((user, _)) = found.filter(|_| post && token.is_some() && crypto::equal(&stored, &lookup)) else {return app.not_found()};
+	let Some(map) = map else {return app.not_found()};
 	let at = now();
 	let (signing, retired): (Vec<SigningEntry>, Vec<SigningEntry>) = {
 		let held = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

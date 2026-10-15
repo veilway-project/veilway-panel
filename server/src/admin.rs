@@ -1,5 +1,5 @@
 //! Admin accounts: setup, login, TOTP, sessions, API tokens, the audit log, settings, signing keys and the node.
-use crate::{app::{App, Settings, SigningEntry}, auth::{Agent, COOKIE_NAME, TOKEN_PREFIX}, crypto::{self, now}, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
+use crate::{app::{bucket, App, Settings, SigningEntry}, auth::{Agent, COOKIE_NAME, TOKEN_PREFIX}, crypto::{self, now}, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
 use argon2::{password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
 use axum::{extract::{Path, Query, State}, http::{header::SET_COOKIE, HeaderValue, StatusCode}, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
@@ -10,9 +10,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, OnceLock};
+use tokio::sync::Semaphore;
 
 const LOGIN_PER_SOURCE: (usize, i64) = (10, 900);
-const FAILS_PER_ACCOUNT: (usize, i64) = (5, 900);
+/// Wrong tries count against an account for an hour. From the fifth on, the wait before the next answer doubles, up to 15 minutes.
+const FAILS_WINDOW: i64 = 3600;
+const DELAY_AFTER: usize = 5;
+/// Argon2 is memory-hard, so the checks that run at once are capped.
+static ARGON: Semaphore = Semaphore::const_new(4);
 
 fn hash_password(password: &str) -> Result<String, Failure> {
 	let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
@@ -20,6 +25,7 @@ fn hash_password(password: &str) -> Result<String, Failure> {
 }
 
 async fn check_password(hash: String, password: String) -> bool {
+	let Ok(_permit) = ARGON.acquire().await else {return false};
 	tokio::task::spawn_blocking(move || PasswordHash::new(&hash).is_ok_and(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())).await.unwrap_or(false)
 }
 
@@ -64,7 +70,7 @@ fn new_totp(app: &App, name: &str) -> Result<(Vec<u8>, Vec<u8>, TotpEnrolled), F
 pub struct Setup {pub token: String, pub username: String, pub password: String}
 
 pub async fn setup(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Setup>) -> Result<Response, Failure> {
-	if !app.limits.hit(&format!("setup:{}", ctx.source), 5, 900) {return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries."))}
+	if !app.limits.hit(&format!("setup:{}", bucket(&ctx.source)), 5, 900) {return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries."))}
 	let expected = app.setup_token.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 	if !expected.is_some_and(|expected| crypto::equal(expected.as_bytes(), input.token.as_bytes())) {return Err(Failure::new(StatusCode::FORBIDDEN, "bad_setup_token", "The setup token is wrong, or setup is done."))}
 	username_ok(&input.username)?;
@@ -87,28 +93,47 @@ fn admin_by(app: &App, column: &str, value: rusqlite::types::Value) -> Option<Ad
 	app.db.lock().query_row(&format!("select id, username, password_hash, totp_secret, totp_record, totp_last_step from admins where {column} = ?"), [value], |row| Ok(AdminRow {id: row.get(0)?, username: row.get(1)?, hash: row.get(2)?, secret: row.get(3)?, record: row.get(4)?, last_step: row.get(5)?})).optional().unwrap_or(None)
 }
 
-/// Password and a TOTP code that was not used before. Counted against the account on a failure.
+/// Seconds an account still waits after its wrong tries. None before the fifth in an hour, then 1, 2, 4 and so on up to 15 minutes.
+fn wait_left(app: &App, name: &str) -> i64 {
+	let key = format!("acct:{name}");
+	let fails = app.limits.count(&key, FAILS_WINDOW);
+	match app.limits.last(&key) {
+		Some(last) if fails >= DELAY_AFTER => ((1_i64 << (fails - DELAY_AFTER).min(10)).min(900) - (now() - last)).max(0),
+		_ => 0,
+	}
+}
+
+/// The actor an audit line names for a login. The typed name is written only when that account exists, so the log holds no guesses.
+fn actor_of(app: &App, name: &str) -> String {
+	let known = app.db.lock().query_row("select 1 from admins where username = ?", [name], |_| Ok(())).is_ok();
+	if known {format!("admin:{name}")} else {"unknown".into()}
+}
+
+/// Password and a TOTP code that was not used before. A wrong try counts against the account, and while the account is waiting a wrong try gets a "wait" answer. A right one passes whatever the wait.
 async fn verify(app: &App, admin: Option<AdminRow>, name: &str, password: &str, code: &str) -> Result<AdminRow, Failure> {
+	let waiting = wait_left(app, name) > 0;
 	let good = check_password(admin.as_ref().map_or_else(|| dummy().to_string(), |admin| admin.hash.clone()), password.to_string()).await;
 	let step = admin.as_ref().and_then(|admin| {
 		let record: [u8; 16] = admin.record.clone().try_into().ok()?;
 		let secret = app.keys.as_ref()?.open_secret(&record, "totp", &admin.secret)?;
 		crypto::totp_check(&secret, code, now()).filter(|step| *step > admin.last_step)
 	});
-	match (good, step, admin) {
-		(true, Some(step), Some(admin)) => {
-			let _ = app.db.lock().execute("update admins set totp_last_step = ? where id = ?", params![step, admin.id]);
+	// The step is claimed in the same statement that checks it, so two requests with one code cannot both pass.
+	let claimed = match (good, step, &admin) {
+		(true, Some(step), Some(admin)) => app.db.lock().execute("update admins set totp_last_step = ? where id = ? and totp_last_step < ?", params![step, admin.id, step]).unwrap_or(0) == 1,
+		_ => false,
+	};
+	match admin {
+		Some(admin) if claimed => {
 			app.limits.clear(&format!("acct:{name}"));
 			Ok(admin)
 		}
 		_ => {
-			app.limits.hit(&format!("acct:{name}"), usize::MAX, FAILS_PER_ACCOUNT.1);
-			Err(wrong())
+			app.limits.hit(&format!("acct:{name}"), usize::MAX, FAILS_WINDOW);
+			if waiting {Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries. Wait a while."))} else {Err(wrong())}
 		}
 	}
 }
-
-fn locked(app: &App, name: &str) -> bool {app.limits.count(&format!("acct:{name}"), FAILS_PER_ACCOUNT.1) >= FAILS_PER_ACCOUNT.0}
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -118,15 +143,17 @@ pub struct Login {pub username: String, pub password: String, pub totp: String}
 pub struct LoggedIn {pub username: String, pub session_id: String, pub csrf: String}
 
 pub async fn login(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Extension(agent): Extension<Agent>, Body(input): Body<Login>) -> Result<Response, Failure> {
-	if !app.limits.hit(&format!("login:{}", ctx.source), LOGIN_PER_SOURCE.0, LOGIN_PER_SOURCE.1) || locked(&app, &input.username) {
-		audit(&app.db.lock(), &format!("admin:{}", input.username.chars().take(32).collect::<String>()), &ctx.source, "login.limited", "admin", "");
+	if !app.limits.hit(&format!("login:{}", bucket(&ctx.source)), LOGIN_PER_SOURCE.0, LOGIN_PER_SOURCE.1) {
+		let actor = actor_of(&app, &input.username);
+		audit(&app.db.lock(), &actor, &ctx.source, "login.limited", "admin", "");
 		return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries. Wait a while."));
 	}
 	let admin = admin_by(&app, "username", input.username.clone().into());
 	let admin = match verify(&app, admin, &input.username, &input.password, &input.totp).await {
 		Ok(admin) => admin,
 		Err(error) => {
-			audit(&app.db.lock(), &format!("admin:{}", input.username.chars().take(32).collect::<String>()), &ctx.source, "login.failed", "admin", "");
+			let actor = actor_of(&app, &input.username);
+			audit(&app.db.lock(), &actor, &ctx.source, "login.failed", "admin", "");
 			return Err(error);
 		}
 	};
@@ -173,7 +200,6 @@ pub struct Reauth {pub password: String, pub totp: String}
 
 pub async fn reauth(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Reauth>) -> Result<Response, Failure> {
 	let name = ctx.actor.trim_start_matches("admin:").to_string();
-	if locked(&app, &name) {return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries. Wait a while."))}
 	verify(&app, admin_by(&app, "id", ctx.admin_id.into()), &name, &input.password, &input.totp).await?;
 	let id = ctx.session_id.clone().ok_or_else(|| Failure::bad("This call is for a login session."))?;
 	let db = app.db.lock();
