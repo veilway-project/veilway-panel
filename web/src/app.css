@@ -45,6 +45,47 @@
 .p-gate-main { display: grid; gap: var(--s-5); align-content: center; inline-size: min(100% - 2 * var(--s-4), 30rem); min-block-size: 100dvh; margin-inline: auto; padding-block: var(--s-6); }
 .p-gate-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s-3); }
 .p-gate-card { padding: var(--s-6) var(--s-5); }
+.p-lead { flex: 1 1 24rem; max-inline-size: 68ch; }
+.p-end { justify-content: flex-end; }
+.p-table-head { align-items: center; padding: var(--s-2) var(--s-1) 0; }
+/* A state word on its tone's wash. Small radius like every control: the wash, not a shape, says it is a state. */
+.p-mark { display: inline-flex; align-items: center; gap: var(--s-1); padding: 1px var(--s-2); border: 1px solid color-mix(in srgb, var(--tone-ink, var(--c-line-strong)) 38%, transparent); border-radius: var(--r-1); background: var(--tone-wash, transparent); color: var(--c-text); font-size: var(--text-1); line-height: 1.6; white-space: nowrap; }
+.p-transports { display: grid; gap: var(--s-1); margin: 0; padding: 0; list-style: none; }
+.p-transports li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); }
+.p-transport-row { display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr)); align-items: end; padding-block-end: var(--s-3); border-block-end: 1px solid var(--c-line); }
+.p-cond { display: grid; gap: var(--s-3); grid-template-columns: minmax(8rem, 12rem) minmax(0, 1fr) auto; align-items: start; }
+.p-cond > .vw-icon-button, .p-cond > button { margin-block-start: 1.6rem; }
+.p-issues { display: grid; gap: var(--s-2); margin: 0; padding: var(--s-3) var(--s-4); list-style: none; border: 1px solid color-mix(in srgb, var(--c-danger) 38%, var(--wash-danger)); border-radius: var(--r-2); background: var(--wash-danger); }
+.p-issues li { display: grid; gap: 2px; }
+.p-issues .vw-code { font-size: var(--text-2); color: var(--c-text-muted); }
+.p-changes { display: grid; gap: var(--s-2); margin: 0; padding: 0; list-style: none; }
+.p-changes li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-1) var(--s-2); }
+.p-json { min-block-size: 18rem; font-size: var(--text-2); }
+.p-details { border-block-start: 1px solid var(--c-line); padding-block-start: var(--s-3); }
+.p-details summary { cursor: pointer; font-weight: var(--weight-strong); }
+.p-details summary:focus-visible { outline: 2px solid var(--c-focus); outline-offset: 2px; border-radius: var(--r-1); }
+.p-details[open] summary { margin-block-end: var(--s-3); }
+.p-pre { margin: 0; padding: var(--s-3); max-block-size: 22rem; overflow: auto; border: 1px solid var(--c-line); border-radius: var(--r-2); background: var(--well-bg); font-size: var(--text-2); white-space: pre; }
+.p-inline-form { display: grid; gap: var(--s-3); grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+.p-names { display: flex; flex-wrap: wrap; gap: var(--s-2); margin: 0; padding: 0; list-style: none; }
+.p-names li { padding: 2px var(--s-2); border: 1px solid var(--c-line); border-radius: var(--r-1); }
+.p-pick { padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: pointer; text-decoration: underline; text-decoration-color: var(--c-line-strong); text-underline-offset: 0.2em; }
+.p-pick[aria-pressed="true"] { font-weight: var(--weight-strong); text-decoration-color: var(--c-accent-ink); text-decoration-thickness: 2px; }
+.p-pick:focus-visible { outline: 2px solid var(--c-focus); outline-offset: 2px; border-radius: var(--r-1); }
+/* The fingerprint: eight groups read aloud in order, so each carries its number and the row keeps one reading direction in both languages. Cells are split by hairlines like a row of figures, not boxed. */
+.p-print { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); row-gap: var(--s-4); margin: 0 calc(-1 * var(--s-2)); padding: 0; list-style: none; overflow: hidden; }
+.p-print li { display: grid; gap: var(--s-1); padding-inline: var(--s-2); margin-inline-start: -1px; border-inline-start: 1px solid var(--c-line); min-inline-size: 0; }
+.p-print-n { font-size: var(--text-1); color: var(--c-text-muted); font-variant-numeric: tabular-nums; }
+.p-print-g { font-family: var(--font-mono); font-size: var(--text-6); font-weight: var(--weight-strong); line-height: 1.2; letter-spacing: 0.04em; }
+.p-print-in { inline-size: 100%; block-size: auto; padding: var(--s-1) 0; text-align: center; font-size: var(--text-5); text-transform: lowercase; }
+@media (max-width: 480px) {
+	.p-print-g { font-size: var(--text-5); }
+	.p-print-in { font-size: var(--text-4); }
+	.p-cond { grid-template-columns: minmax(0, 1fr) auto; }
+	.p-cond > :nth-child(2) { grid-column: 1 / -1; grid-row: 2; }
+	.p-cond > button { margin-block-start: 1.6rem; grid-column: 2; grid-row: 1; }
+	.p-inline-form { grid-template-columns: minmax(0, 1fr); justify-items: start; }
+}
 @media (max-width: 480px) {
 	.p-panel { padding: var(--s-4); }
 	.p-gate-card { padding: var(--s-5) var(--s-4); }

@@ -1,4 +1,4 @@
-import {Banner, Button, Dialog, Field, IconButton, TextField, useI18n, useToast} from "@veilway/ui";
+import {Banner, Button, Dialog, Field, IconButton, TextField, useI18n, useToast, type Tone} from "@veilway/ui";
 import qrcode from "qrcode-generator";
 import {createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode} from "react";
 import {api, ApiError, type LinkView, type NodeState, type Totp} from "./api.ts";
@@ -141,3 +141,49 @@ export const lines = (text: string) => text.split("\n").map(line => line.trim())
 export const toDay = (seconds: number | null | undefined) => seconds ? new Date(seconds * 1000).toISOString().slice(0, 10) : "";
 // The end of the chosen day in UTC, so a user set to expire on a day can use all of it.
 export const fromDay = (day: string) => day ? Math.floor(Date.parse(day + "T23:59:59Z") / 1000) : null;
+
+// A state word on its tone's wash, where status colors are allowed. The word says it on its own; the color repeats it.
+export function Mark({tone, title, children}: {tone?: Tone, title?: string, children: ReactNode}) {
+	return <span className="p-mark" data-tone={tone} title={title}>{children}</span>;
+}
+
+// Operator rating of a transport (PLAN "Ratings"). In this release every transport is Detectable: none has passed the probe, length, timing and fingerprint tests that Protected needs. Operators only; apps never show it.
+export function Rating() {
+	const {t} = useP();
+	return <Mark tone="warning" title={t("rating.detectableBody")}>{t("rating.detectable")}</Mark>;
+}
+
+const DIGITS = /[۰-۹٠-٩]/g;
+const latin = (text: string) => text.replace(DIGITS, digit => String("۰۱۲۳۴۵۶۷۸۹".includes(digit) ? "۰۱۲۳۴۵۶۷۸۹".indexOf(digit) : "٠١٢٣٤٥٦٧٨٩".indexOf(digit)));
+const jalali = (time: number) => Object.fromEntries(new Intl.DateTimeFormat("en-u-ca-persian-nu-latn", {timeZone: "UTC", year: "numeric", month: "numeric", day: "numeric"}).formatToParts(new Date(time)).filter(part => part.type === "year" || part.type === "month" || part.type === "day").map(part => [part.type, Number.parseInt(part.value, 10)])) as {year: number, month: number, day: number};
+const dayOfYear = (month: number, day: number) => (month <= 6 ? (month - 1) * 31 : 186 + (month - 7) * 30) + day - 1;
+// A Jalali day as an ISO day. Intl only formats into the Persian calendar, so a guess near Nowruz is moved by the gap it reports, twice, and checked. null for a day that does not exist.
+export function fromJalali(year: number, month: number, day: number) {
+	let guess = Date.UTC(year + 621, 2, 21) + dayOfYear(month, day) * 86400000;
+	for (let turn = 0; turn < 2; turn++) { const seen = jalali(guess); guess += ((year - seen.year) * 365 + dayOfYear(month, day) - dayOfYear(seen.month, seen.day)) * 86400000; }
+	const seen = jalali(guess);
+	return month >= 1 && month <= 12 && seen.year === year && seen.month === month && seen.day === day ? new Date(guess).toISOString().slice(0, 10) : null;
+}
+
+// A day input. In Persian it takes and shows a Jalali year/month/day, since the browser's own date picker only knows the Gregorian calendar. value stays an ISO day either way.
+export function DayField({label, hint, value, onChange, optional}: {label: string, hint?: string, value: string, onChange: (value: string) => void, optional?: boolean}) {
+	const {t, locale, number} = useP(), shown = (iso: string) => { if (!iso) return ""; const j = jalali(Date.parse(iso + "T12:00:00Z")); return `${number(j.year, {useGrouping: false})}/${number(j.month, {minimumIntegerDigits: 2})}/${number(j.day, {minimumIntegerDigits: 2})}`; };
+	const [text, setText] = useState(() => shown(value)), [wrong, setWrong] = useState(false);
+	if (locale !== "fa") return <TextField label={label} hint={hint} type="date" value={value} onChange={onChange} optional={optional}/>;
+	const type = (next: string) => {
+		setText(next);
+		const parts = latin(next.trim()).match(/^(\d{4})[/.-](\d{1,2})[/.-](\d{1,2})$/), iso = parts ? fromJalali(Number(parts[1]), Number(parts[2]), Number(parts[3])) : null;
+		setWrong(next.trim() !== "" && !iso);
+		if (iso || !next.trim()) onChange(iso ?? "");
+	};
+	return <TextField label={label} hint={[hint, t("day.hint")].filter(Boolean).join(" ")} error={wrong ? t("day.wrong") : undefined} inputMode="numeric" placeholder={t("day.placeholder")} value={text} onChange={type} optional={optional}/>;
+}
+
+// What a check found, each with where it is. Paths are the document's own words, so they stay in code type.
+export function Issues({issues}: {issues: {path: string, text: string}[]}) {
+	const {t} = useP();
+	if (!issues.length) return null;
+	return <ul className="p-issues" aria-label={t("config.problems")}>{issues.map((issue, i) => <li key={i}>{issue.path && <span className="vw-code">{issue.path}</span>}<span>{issue.text}</span></li>)}</ul>;
+}
+
+export const ago = (seconds: number) => seconds < 120 ? {key: "time.seconds" as const, count: Math.round(seconds)} : seconds < 7200 ? {key: "time.minutes" as const, count: Math.round(seconds / 60)} : seconds < 172800 ? {key: "time.hours" as const, count: Math.round(seconds / 3600)} : {key: "time.days" as const, count: Math.round(seconds / 86400)};

@@ -1,7 +1,7 @@
 import {Banner, Button, Checkbox, ConfirmDialog, DataTable, Dialog, Glass, NumberField, RadioGroup, Segmented, SelectField, StateBlock, Switch, TextField, UsageBar, useToast} from "@veilway/ui";
 import {useEffect, useState} from "react";
 import {api, type LinkView, type NodeState, type NodeUser, type User} from "../api.ts";
-import {ErrorNote, fromDay, LinkDialog, NodeNote, PageHead, toDay, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {DayField, ErrorNote, fromDay, LinkDialog, NodeNote, PageHead, toDay, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {useSettings} from "../settings.ts";
 
 const GB = 1024 ** 3;
@@ -100,7 +100,7 @@ function BulkChange({count, busy, error, onClose, onApply}: {count: number, busy
 			<RadioGroup label={t("bulk.action")} value={action} onChange={setAction} options={[{value: "add_group", label: t("bulk.addGroup")}, {value: "remove_group", label: t("bulk.removeGroup")}, {value: "set_quota", label: t("bulk.setQuota")}, {value: "set_expiry", label: t("bulk.setExpiry")}, {value: "set_device_limit", label: t("bulk.setLimit")}]}/>
 			{(action === "add_group" || action === "remove_group") && <TextField label={t("form.groups")} value={group} onChange={value => setGroup(value.toLowerCase().trim())} error={problem || undefined} technical/>}
 			{action === "set_quota" && <><NumberField label={t("form.quota")} hint={t("form.quotaHint")} unit={t("unit.gb")} min={0} step="any" value={quota} onChange={setQuota}/><SelectField label={t("form.period")} value={period} onChange={value => setPeriod(value as Period)} disabled={quota === ""} options={(["none", "daily", "weekly", "monthly"] as const).map(p => ({value: p, label: t(`form.period.${p}`)}))}/></>}
-			{action === "set_expiry" && <TextField label={t("form.expiry")} hint={t("form.expiryHint")} type="date" value={day} onChange={setDay}/>}
+			{action === "set_expiry" && <DayField label={t("form.expiry")} hint={t("form.expiryHint")} value={day} onChange={setDay}/>}
 			{action === "set_device_limit" && <NumberField label={t("form.limit")} hint={t("form.limitHint")} unit={t("form.devices")} min={0} max={65535} value={limit} onChange={setLimit}/>}
 			<ErrorNote error={error}/>
 			<div className="vw-dialog-foot"><Button onClick={onClose}>{t("action.cancel")}</Button><Button type="submit" variant="primary" disabled={busy}>{t("bulk.apply")}</Button></div>
@@ -142,7 +142,7 @@ export function UserForm({user, defaultLimit, onClose, onSaved}: {user: User | n
 				<SelectField label={t("form.period")} hint={quota === "" ? t("form.periodHint") : undefined} value={quota === "" ? "none" : period} onChange={value => setPeriod(value as Period)} disabled={quota === ""} options={(["none", "daily", "weekly", "monthly"] as const).map(p => ({value: p, label: t(`form.period.${p}`)}))}/>
 			</div>
 			<div className="p-pair">
-				<TextField label={t("form.expiry")} hint={t("form.expiryHint")} type="date" value={day} onChange={setDay} optional/>
+				<DayField label={t("form.expiry")} hint={t("form.expiryHint")} value={day} onChange={setDay} optional/>
 				<NumberField label={t("form.limit")} hint={t("form.limitHint")} unit={t("form.devices")} min={0} max={65535} value={limit} onChange={setLimit}/>
 			</div>
 			<TextField label={t("form.note")} hint={t("form.noteHint")} value={note} onChange={setNote} optional/>

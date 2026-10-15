@@ -1,6 +1,6 @@
-import {Banner, Button, ConfirmDialog, Field, Glass, IconButton, List, ListRow, NumberField, StateBlock, Switch, Tabs, TextField, useToast} from "@veilway/ui";
+import {Button, ConfirmDialog, Field, Glass, IconButton, List, ListRow, NumberField, StateBlock, Switch, Tabs, TextField, useToast} from "@veilway/ui";
 import {useContext, useState} from "react";
-import {api, type Settings} from "../api.ts";
+import {api, type NotFound, type Settings} from "../api.ts";
 import {ErrorNote, lines, LinesField, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {SettingsContext} from "../settings.ts";
 
@@ -25,6 +25,7 @@ export function SubscriptionsPage() {
 function SettingsForm({initial, onSaved, part = "endpoint"}: {initial: Settings, onSaved: (settings: Settings) => void, part?: "endpoint" | "mirrors" | "profiles"}) {
 	const {t} = useP(), toast = useToast(), guard = useGuard(), shared = useContext(SettingsContext);
 	const [draft, setDraft] = useState(initial), [pins, setPins] = useState((initial.endpoint_pins ?? []).join("\n")), [profiles, setProfiles] = useState(JSON.stringify(initial.profiles ?? [], null, 2));
+	const [custom, setCustom] = useState(initial.not_found != null), [answer, setAnswer] = useState<{status: number | "", headers: string, body: string}>(() => ({status: initial.not_found?.status ?? 404, headers: (initial.not_found?.headers ?? [["content-type", "text/html"]]).map(([name, value]) => name + ": " + value).join("\n"), body: initial.not_found?.body ?? ""}));
 	const [mirrors, setMirrors] = useState<Mirror[]>(() => (initial.refresh_mirrors ?? []).map(m => typeof m === "string" ? {url: m, pins: ""} : {url: String((m as {url?: string}).url ?? ""), pins: ((m as {pins?: string[]}).pins ?? []).join("\n")})), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const patch = (change: Partial<Settings>) => setDraft({...draft, ...change});
 	const save = async () => {
@@ -32,9 +33,12 @@ function SettingsForm({initial, onSaved, part = "endpoint"}: {initial: Settings,
 		let parsed: unknown;
 		try { parsed = JSON.parse(profiles); } catch (failure) { return setError(new Error(t("error.json", {message: (failure as Error).message}))); }
 		if (!Array.isArray(parsed) || parsed.length > 64 || parsed.some(p => !p || typeof p !== "object" || Array.isArray(p) || "device" in p)) return setError(new Error(t("error.profiles")));
+		const headers = lines(answer.headers).map(line => [line.slice(0, line.indexOf(":")).trim(), line.slice(line.indexOf(":") + 1).trim()]);
+		if (custom && headers.some(([name]) => !name)) return setError(new Error(t("subs.nfHeadersWrong")));
+		const notFound: NotFound | null = custom ? {status: answer.status === "" ? 404 : answer.status, headers: headers as [string, string][], body: answer.body} : null;
 		setBusy(true);
 		try {
-			const saved = await guard(() => api("put", "/settings", {body: {...draft, endpoint_pins: lines(pins), profiles: parsed as Settings["profiles"], refresh_mirrors: mirrors.filter(m => m.url.trim()).map(m => lines(m.pins).length ? {url: m.url.trim(), pins: lines(m.pins)} : m.url.trim())}}));
+			const saved = await guard(() => api("put", "/settings", {body: {...draft, not_found: notFound, endpoint_pins: lines(pins), profiles: parsed as Settings["profiles"], refresh_mirrors: mirrors.filter(m => m.url.trim()).map(m => lines(m.pins).length ? {url: m.url.trim(), pins: lines(m.pins)} : m.url.trim())}}));
 			onSaved(saved);
 			shared.set(saved);
 			toast({tone: "success", title: t("common.saved")});
@@ -48,6 +52,7 @@ function SettingsForm({initial, onSaved, part = "endpoint"}: {initial: Settings,
 		{part === "endpoint" && <Glass className="p-panel p-form">
 			<TextField label={t("subs.provider")} hint={t("subs.providerHint")} value={draft.provider_name ?? ""} onChange={value => patch({provider_name: value})} maxLength={64}/>
 			<TextField label={t("subs.endpoint")} hint={t("subs.endpointHint")} type="url" placeholder="https://" value={draft.endpoint_url ?? ""} onChange={value => patch({endpoint_url: value.trim()})} technical/>
+			<TextField label={t("subs.nodeHost")} hint={t("subs.nodeHostHint")} placeholder="vpn.example.org" value={draft.node_host ?? ""} onChange={value => patch({node_host: value.trim()})} technical/>
 			<LinesField label={t("subs.pins")} hint={t("subs.pinsHint")} value={pins} onChange={setPins} rows={2}/>
 			<div className="p-pair">
 				<NumberField label={t("subs.interval")} unit={t("subs.minutesUnit")} min={15} max={10080} value={Math.round((draft.update_interval ?? 3600) / 60)} onChange={value => patch({update_interval: value === "" ? 3600 : value * 60})}/>
@@ -59,6 +64,15 @@ function SettingsForm({initial, onSaved, part = "endpoint"}: {initial: Settings,
 			</div>
 			<Switch label={t("subs.once")} hint={t("subs.onceHint")} checked={draft.show_links_once ?? false} onChange={on => patch({show_links_once: on})}/>
 		</Glass>}
+		{part === "endpoint" && <Glass className="p-panel p-form">
+			<div><h2 className="vw-h3">{t("subs.notFound")}</h2><p className="vw-muted">{t("subs.notFoundBody")}</p></div>
+			<Switch label={t("subs.nfCustom")} hint={t("subs.nfCustomHint")} checked={custom} onChange={setCustom}/>
+			{custom && <>
+				<NumberField label={t("subs.nfStatus")} unit="HTTP" min={100} max={599} value={answer.status} onChange={status => setAnswer({...answer, status})}/>
+				<LinesField label={t("subs.nfHeaders")} hint={t("subs.nfHeadersHint")} value={answer.headers} onChange={headers => setAnswer({...answer, headers})} rows={3}/>
+				<Field label={t("subs.nfBody")} hint={t("subs.nfBodyHint")} optional>{ids => <textarea {...ids} className="vw-input vw-code p-textarea" dir="ltr" spellCheck={false} rows={6} value={answer.body} onChange={event => setAnswer({...answer, body: event.target.value})}/>}</Field>
+			</>}
+		</Glass>}
 		{part === "mirrors" && <>
 			<Glass className="p-panel">
 				<p className="vw-muted">{t("subs.mirrorsLead")}</p>
@@ -69,7 +83,6 @@ function SettingsForm({initial, onSaved, part = "endpoint"}: {initial: Settings,
 				</fieldset>)}
 				{mirrors.length < 4 && <div><Button icon="plus" onClick={() => setMirrors([...mirrors, {url: "", pins: ""}])}>{t("subs.addMirror")}</Button></div>}
 			</Glass>
-			<Banner tone="info" title={t("subs.notFound")}>{t("subs.notFoundBody")}</Banner>
 		</>}
 		{part === "profiles" && <Glass className="p-panel">
 			<p className="vw-muted">{t("subs.profilesLead")}</p>

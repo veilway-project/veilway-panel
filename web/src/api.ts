@@ -14,6 +14,20 @@ export type SessionRow = Schemas["SessionRow"];
 export type AuditRow = Schemas["AuditRow"];
 export type Subscription = Schemas["SubscriptionInfo"];
 export type Totp = Schemas["TotpEnrolled"];
+export type Live = Schemas["Live"];
+export type UsageEntry = Schemas["UsageEntry"];
+export type Point = Schemas["Point"];
+export type NotFound = Schemas["NotFound"];
+// The routes below hand on the node's own answers, which the schema leaves open. Only the fields the panel reads are named.
+export type Problem = {path: string, message: string};
+export type Report = {errors: Problem[], warnings: Problem[], more_errors: number, more_warnings: number};
+export type Changes = {added: string[], changed: string[], removed: string[]};
+export type Diff = {[kind in "inbounds" | "outbounds" | "exits" | "rules" | "users"]?: Changes} & {routing_default?: boolean, rules_reordered?: boolean, inbound_changes?: {tag: string, restart: boolean}[], user_changes?: {name: string, lost_access?: boolean}[]};
+export type Running = {revision: string, generation: number, document: Record<string, unknown>};
+export type Template = {inbound: string, profile: Record<string, unknown>, missing: string[], overridden: string[]};
+export type Pairings = {offers: {id: string, name: string, direction: string, expires_at: number}[], answered: {id: string, name: string, direction: string, expires_at: number, fingerprint: string, tries: number, role: string}[]};
+export type NodeLink = {tag: string, id: string, half: string, role: string, state: string, state_secs: number, flows: number, traffic: {up_bytes: number, down_bytes: number}};
+export type Pasted = {id: string, name: string, direction: string, half: string, expires_at: number, expired: boolean, overlaps_pool: boolean, dials: {address: string, private: boolean}[], transports: {type: string}[], ws_warning: boolean};
 /** What the node reports for a user. The schema leaves it open, so only the fields the panel reads are named. */
 export type NodeUser = {used_bytes?: number, period_start?: number, denied?: "disabled" | "expired" | "quota" | null, traffic?: {up_bytes?: number, down_bytes?: number}};
 

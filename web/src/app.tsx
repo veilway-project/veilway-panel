@@ -1,13 +1,15 @@
-import {Backdrop, Banner, Button, DEFAULT_SETTINGS, Glass, Nav, PRODUCT, Segmented, Shell, StateBlock, ToastProvider, UiProvider, useToast, type NavItem} from "@veilway/ui";
+import {Backdrop, Banner, Button, DEFAULT_SETTINGS, Glass, Icon, List, ListRow, Nav, PRODUCT, Segmented, Shell, StateBlock, ToastProvider, UiProvider, useToast, type NavItem} from "@veilway/ui";
 import {useEffect, useMemo, useState} from "react";
 import {api, session, type Settings} from "./api.ts";
 import {en} from "./locales/en.ts";
 import {fa} from "./locales/fa.ts";
-import {GuardProvider, useLoad, useP, useSay} from "./kit.tsx";
+import {GuardProvider, PageHead, useLoad, useP, useSay} from "./kit.tsx";
 import {AccountPage, type Prefs} from "./pages/account.tsx";
 import {Login, Setup} from "./pages/auth.tsx";
+import {NodePage} from "./pages/config.tsx";
 import {SubscriptionsPage} from "./pages/subscriptions.tsx";
 import {TokensPage} from "./pages/tokens.tsx";
+import {TrafficPage} from "./pages/traffic.tsx";
 import {UserPage} from "./pages/user.tsx";
 import {UsersPage} from "./pages/users.tsx";
 import {SettingsContext} from "./settings.ts";
@@ -69,16 +71,18 @@ function Root({prefs, onPrefs}: {prefs: Prefs, onPrefs: (prefs: Prefs) => void})
 		</main>
 	</Backdrop>;
 	const parts = hash.replace(/^#\/?/, "").split("/"), page = parts[0] || "users", userId = page === "users" && parts[1] ? Number(parts[1]) : null;
-	// On a phone the bar has room for four items; the two sections still to come only appear in the wide rail.
-	const items: NavItem[] = [{id: "users", label: t("nav.users"), icon: "users"}, {id: "subscriptions", label: t("nav.subscriptions"), icon: "globe"}, ...(wide ? [{id: "config", label: t("nav.config"), icon: "settings"}, {id: "traffic", label: t("nav.traffic"), icon: "chart"}] as NavItem[] : []), {id: "tokens", label: t("nav.tokens"), icon: "lock"}, {id: "account", label: t("nav.account"), icon: "device"}];
+	// On a phone the bar has room for four items, so the pages an operator visits less often sit behind More.
+	const items: NavItem[] = wide ? [{id: "users", label: t("nav.users"), icon: "users"}, {id: "subscriptions", label: t("nav.subscriptions"), icon: "globe"}, {id: "node", label: t("nav.node"), icon: "settings"}, {id: "traffic", label: t("nav.traffic"), icon: "chart"}, {id: "tokens", label: t("nav.tokens"), icon: "lock"}, {id: "account", label: t("nav.account"), icon: "device"}] : [{id: "users", label: t("nav.users"), icon: "users"}, {id: "node", label: t("nav.node"), icon: "settings"}, {id: "traffic", label: t("nav.traffic"), icon: "chart"}, {id: "more", label: t("nav.more"), icon: "overview"}];
+	const current = !wide && ["subscriptions", "tokens", "account", "more"].includes(page) ? "more" : page;
 	const logout = () => void api("post", "/logout").finally(() => { session.set(""); setAuth({kind: "login"}); });
 	return <SettingsContext.Provider value={{settings, set: setSettings}}><Backdrop fixed className="p-app">
-		<Shell nav={<Nav value={page} onChange={id => { location.hash = "#/" + id; }} items={items} header={<Brand/>}/>} banner={<>{httpBanner}<NodeBanner/></>}>
+		<Shell nav={<Nav value={current} onChange={id => { location.hash = "#/" + id; }} items={items} header={<Brand/>}/>} banner={<>{httpBanner}<NodeBanner/></>}>
 			<div className="p-page" key={hash}>
 				{page === "users" && (userId !== null && Number.isFinite(userId) ? <UserPage id={userId}/> : <UsersPage/>)}
 				{page === "subscriptions" && <SubscriptionsPage/>}
-				{page === "config" && <StateBlock kind="empty" title={t("coming.config")}>{t("coming.configBody")}</StateBlock>}
-				{page === "traffic" && <StateBlock kind="empty" title={t("coming.traffic")} action={<Button onClick={() => { location.hash = "#/users"; }}>{t("nav.users")}</Button>}>{t("coming.trafficBody")}</StateBlock>}
+				{page === "node" && <NodePage tab={parts[1] ?? ""}/>}
+				{page === "traffic" && <TrafficPage/>}
+				{page === "more" && <><PageHead title={t("nav.more")}/><Glass className="p-panel"><List label={t("nav.more")}>{(["subscriptions", "tokens", "account"] as const).map(id => <ListRow key={id} title={t(`nav.${id}`)} detail={t(`more.${id}`)} trailing={<Icon name="chevronForward"/>} onClick={() => { location.hash = "#/" + id; }}/>)}</List></Glass></>}
 				{page === "tokens" && <TokensPage/>}
 				{page === "account" && <AccountPage username={auth.username} prefs={prefs} onPrefs={onPrefs} onLogout={logout}/>}
 			</div>

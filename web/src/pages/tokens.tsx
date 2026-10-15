@@ -1,7 +1,7 @@
 import {Button, ConfirmDialog, DataTable, Dialog, Glass, RadioGroup, StateBlock, TextField, useToast} from "@veilway/ui";
 import {useState} from "react";
 import {api, type Token} from "../api.ts";
-import {Copyable, ErrorNote, fromDay, lines, LinesField, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {Copyable, DayField, ErrorNote, fromDay, lines, LinesField, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 
 const SCOPES = ["read", "users", "full"] as const;
 
@@ -41,7 +41,7 @@ export function TokensPage() {
 			<form className="p-stack" onSubmit={event => { event.preventDefault(); void make(); }}>
 				<TextField label={t("tokens.name")} hint={t("tokens.nameHint")} value={name} onChange={setName} maxLength={64} required autoFocus/>
 				<RadioGroup label={t("tokens.scope")} value={scope} onChange={setScope} options={SCOPES.map(s => ({value: s, label: t(`tokens.scope.${s}`), detail: t(`tokens.scope.${s}Detail`)}))}/>
-				<TextField label={t("tokens.expiry")} hint={t("tokens.expiryHint")} type="date" value={day} onChange={setDay} optional/>
+				<DayField label={t("tokens.expiry")} hint={t("tokens.expiryHint")} value={day} onChange={setDay} optional/>
 				<LinesField label={t("tokens.sources")} hint={t("tokens.sourcesHint")} value={sources} onChange={setSources}/>
 				<ErrorNote error={error}/>
 				<div className="vw-dialog-foot"><Button onClick={() => setMaking(false)}>{t("action.cancel")}</Button><Button type="submit" variant="primary" disabled={busy}>{t("tokens.create")}</Button></div>
