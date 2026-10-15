@@ -1,0 +1,3826 @@
+{
+  "components": {
+    "schemas": {
+      "AdminRowOut": {
+        "properties": {
+          "created": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "username",
+          "created"
+        ],
+        "type": "object"
+      },
+      "AdminsOut": {
+        "properties": {
+          "admins": {
+            "items": {
+              "$ref": "#/components/schemas/AdminRowOut"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "admins"
+        ],
+        "type": "object"
+      },
+      "AuditOut": {
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/AuditRow"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "entries"
+        ],
+        "type": "object"
+      },
+      "AuditRow": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "at",
+          "actor",
+          "source",
+          "action",
+          "target",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "Bulk": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "enable, disable, delete, reset_usage, add_group, remove_group, set_quota, set_expiry or set_device_limit.",
+            "type": "string"
+          },
+          "ids": {
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "value": {
+            "description": "The group name, the quota (an object with quota_bytes and quota_period), the expiry in Unix seconds or null, or the device limit."
+          }
+        },
+        "required": [
+          "ids",
+          "action"
+        ],
+        "type": "object"
+      },
+      "BulkFailure": {
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "error"
+        ],
+        "type": "object"
+      },
+      "BulkResult": {
+        "properties": {
+          "done": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "failed": {
+            "items": {
+              "$ref": "#/components/schemas/BulkFailure"
+            },
+            "type": "array"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeState"
+          }
+        },
+        "required": [
+          "done",
+          "failed",
+          "node"
+        ],
+        "type": "object"
+      },
+      "Changed": {
+        "properties": {
+          "node": {
+            "$ref": "#/components/schemas/NodeState"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserOut"
+          }
+        },
+        "required": [
+          "user",
+          "node"
+        ],
+        "type": "object"
+      },
+      "Created": {
+        "properties": {
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LinkView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "link_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserOut"
+          }
+        },
+        "required": [
+          "user"
+        ],
+        "type": "object"
+      },
+      "Deleted": {
+        "properties": {
+          "node": {
+            "$ref": "#/components/schemas/NodeState"
+          }
+        },
+        "required": [
+          "node"
+        ],
+        "type": "object"
+      },
+      "DeviceCreated": {
+        "properties": {
+          "device": {
+            "$ref": "#/components/schemas/DeviceOut"
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeState"
+          },
+          "weaker": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "device",
+          "weaker",
+          "node"
+        ],
+        "type": "object"
+      },
+      "DeviceIn": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "DeviceOut": {
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "confirmed_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "created": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "key_origin": {
+            "description": "\"device\" when the device made its key, \"panel\" when the panel did. The second is the weaker choice: the private key sits in the panel's database and travels in the document.",
+            "type": "string"
+          },
+          "last_seen": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "state": {
+            "description": "\"pending\" or \"enrolled\".",
+            "type": "string"
+          },
+          "token_gen": {
+            "description": "The link generation the device enrolled with.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "public_key",
+          "address",
+          "state",
+          "key_origin",
+          "created",
+          "token_gen"
+        ],
+        "type": "object"
+      },
+      "DevicesOut": {
+        "properties": {
+          "devices": {
+            "items": {
+              "$ref": "#/components/schemas/DeviceOut"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "devices"
+        ],
+        "type": "object"
+      },
+      "Done": {
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "type": "object"
+      },
+      "ErrorBody": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "ErrorDetail": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
+      "Exported": {
+        "properties": {
+          "file": {
+            "description": "The same as the content of a file the client imports.",
+            "type": "string"
+          },
+          "link": {
+            "description": "A whole signed document in a link, when it is small enough for one. Null otherwise.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "type": "object"
+      },
+      "KeyOut": {
+        "properties": {
+          "created": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "kid": {
+            "type": "string"
+          },
+          "public_key": {
+            "type": "string"
+          },
+          "retired_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kid",
+          "fingerprint",
+          "public_key",
+          "state",
+          "created"
+        ],
+        "type": "object"
+      },
+      "KeysOut": {
+        "properties": {
+          "keys": {
+            "items": {
+              "$ref": "#/components/schemas/KeyOut"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "keys"
+        ],
+        "type": "object"
+      },
+      "LinkReset": {
+        "properties": {
+          "link": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LinkView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "link_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node": {
+            "$ref": "#/components/schemas/NodeState"
+          },
+          "old_devices": {
+            "items": {
+              "$ref": "#/components/schemas/DeviceOut"
+            },
+            "type": "array"
+          },
+          "removed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "old_devices",
+          "removed",
+          "node"
+        ],
+        "type": "object"
+      },
+      "LinkView": {
+        "properties": {
+          "https": {
+            "type": "string"
+          },
+          "qr_svg": {
+            "description": "The same link as an SVG QR code.",
+            "type": "string"
+          },
+          "veilway": {
+            "description": "The link in the form providers hand out. A secret: it is shown to the one who asked and stored nowhere but in the sealed copy.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "veilway",
+          "https",
+          "qr_svg"
+        ],
+        "type": "object"
+      },
+      "LoggedIn": {
+        "properties": {
+          "csrf": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "session_id",
+          "csrf"
+        ],
+        "type": "object"
+      },
+      "Login": {
+        "additionalProperties": false,
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "totp": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password",
+          "totp"
+        ],
+        "type": "object"
+      },
+      "NewAdmin": {
+        "additionalProperties": false,
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "type": "object"
+      },
+      "NewPassword": {
+        "additionalProperties": false,
+        "properties": {
+          "new_password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "new_password"
+        ],
+        "type": "object"
+      },
+      "NewToken": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_sources": {
+            "default": [],
+            "description": "Source addresses the token works from. Empty means any.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "expires_at": {
+            "description": "Unix seconds.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "description": "\"read\" (reads only), \"users\" (users, devices and links) or \"full\" (everything an API token may do).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "scope"
+        ],
+        "type": "object"
+      },
+      "NodeInfo": {
+        "properties": {
+          "keys_missing": {
+            "type": "boolean"
+          },
+          "last_sync": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reachable": {
+            "type": "boolean"
+          },
+          "status": true
+        },
+        "required": [
+          "reachable",
+          "keys_missing"
+        ],
+        "type": "object"
+      },
+      "NodeState": {
+        "description": "Whether the node took the change. The panel's database is changed either way and the next successful push brings the node up to date.",
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "synced": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "synced"
+        ],
+        "type": "object"
+      },
+      "Reauth": {
+        "additionalProperties": false,
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "totp": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "password",
+          "totp"
+        ],
+        "type": "object"
+      },
+      "ResetLink": {
+        "additionalProperties": false,
+        "properties": {
+          "remove_devices": {
+            "default": false,
+            "description": "Remove the devices that were enrolled with the old link. They are listed in the answer either way.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "ResetUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "totals": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "SessionInfo": {
+        "properties": {
+          "csrf": {
+            "type": "string"
+          },
+          "reauth_until": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "session_id",
+          "csrf",
+          "reauth_until"
+        ],
+        "type": "object"
+      },
+      "SessionRow": {
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "created": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "current": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_seen": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created",
+          "last_seen",
+          "source",
+          "agent",
+          "current"
+        ],
+        "type": "object"
+      },
+      "SessionsOut": {
+        "properties": {
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/SessionRow"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "sessions"
+        ],
+        "type": "object"
+      },
+      "Settings": {
+        "additionalProperties": false,
+        "description": "What an operator sets once for the whole panel.",
+        "properties": {
+          "default_device_limit": {
+            "default": 3,
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "document_days": {
+            "default": 14,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "endpoint_pins": {
+            "default": [],
+            "description": "SHA-256 of the SubjectPublicKeyInfo of the endpoint's certificate, standard base64, when it has no certificate from an authority. The first is put in links. Empty for a chain-validated endpoint.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "endpoint_url": {
+            "default": "",
+            "description": "The public `https` URL of the subscription endpoint, with the path the web server forwards to the panel's `sub_path`. No fragment.",
+            "type": "string"
+          },
+          "pool_v4": {
+            "default": "10.66.0.0/16",
+            "description": "The address pool devices get their tunnel address from, an IPv4 network.",
+            "type": "string"
+          },
+          "profiles": {
+            "default": [],
+            "description": "One profile per inbound, in the shape of \"A profile\" on the subscription format page, without `device`. The panel adds the device.",
+            "items": true,
+            "type": "array"
+          },
+          "provider_name": {
+            "default": "Veilway",
+            "type": "string"
+          },
+          "refresh_mirrors": {
+            "default": [],
+            "description": "Other endpoints of the same subscription, put in every document as `refresh_urls`. A string, or an object with `url` and `pins`.",
+            "items": true,
+            "type": "array"
+          },
+          "show_links_once": {
+            "default": false,
+            "description": "Store no copy of a token: a link is shown at creation and reset, and never again.",
+            "type": "boolean"
+          },
+          "update_interval": {
+            "default": 3600,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "Setup": {
+        "additionalProperties": false,
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "username",
+          "password"
+        ],
+        "type": "object"
+      },
+      "Status": {
+        "properties": {
+          "setup_needed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "setup_needed"
+        ],
+        "type": "object"
+      },
+      "SubscriptionInfo": {
+        "properties": {
+          "can_show": {
+            "description": "Whether the panel holds a sealed copy, so the link can be shown again. False with \"show links once\".",
+            "type": "boolean"
+          },
+          "endpoint_url": {
+            "type": "string"
+          },
+          "key_fingerprints": {
+            "description": "Fingerprints of the current signing keys, which are not secret.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "subscription_id": {
+            "type": "string"
+          },
+          "token_created": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "token_generation": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "subscription_id",
+          "endpoint_url",
+          "token_generation",
+          "token_created",
+          "can_show",
+          "key_fingerprints"
+        ],
+        "type": "object"
+      },
+      "TokenCreated": {
+        "properties": {
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "token": {
+            "description": "Shown once. Only its hash is stored.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "scope",
+          "token"
+        ],
+        "type": "object"
+      },
+      "TokenRow": {
+        "properties": {
+          "allowed_sources": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "created": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expires_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_used": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "revoked_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "scope",
+          "prefix",
+          "allowed_sources",
+          "created"
+        ],
+        "type": "object"
+      },
+      "TokensOut": {
+        "properties": {
+          "tokens": {
+            "items": {
+              "$ref": "#/components/schemas/TokenRow"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tokens"
+        ],
+        "type": "object"
+      },
+      "TotpEnrolled": {
+        "properties": {
+          "otpauth": {
+            "type": "string"
+          },
+          "totp_secret": {
+            "description": "Base32, for an authenticator app. Shown once.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "totp_secret",
+          "otpauth"
+        ],
+        "type": "object"
+      },
+      "UserIn": {
+        "additionalProperties": false,
+        "properties": {
+          "device_limit": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "exits": true,
+          "expires_at": {
+            "description": "Unix seconds.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "groups": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quota_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "quota_period": {
+            "description": "\"daily\", \"weekly\" or \"monthly\". Needs quota_bytes.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "UserOut": {
+        "properties": {
+          "created": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "device_limit": {
+            "description": "0 is no limit beyond the node's own 16.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "devices": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "exits": {
+            "description": "\"all\" or a list of exit tags."
+          },
+          "expires_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "groups": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "node": {
+            "description": "The node's own record of the user: usage, denial and traffic. Null when the node cannot be reached."
+          },
+          "note": {
+            "type": "string"
+          },
+          "pending_devices": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "quota_bytes": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "quota_period": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscription_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "groups",
+          "exits",
+          "device_limit",
+          "note",
+          "created",
+          "subscription_id",
+          "devices",
+          "pending_devices"
+        ],
+        "type": "object"
+      },
+      "UserPatch": {
+        "additionalProperties": false,
+        "properties": {
+          "device_limit": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "exits": true,
+          "expires_at": {
+            "default": null,
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "groups": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quota_bytes": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "quota_period": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "UsersOut": {
+        "properties": {
+          "users": {
+            "items": {
+              "$ref": "#/components/schemas/UserOut"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "users"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "session": {
+        "in": "cookie",
+        "name": "vw_session",
+        "type": "apiKey"
+      },
+      "token": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "HTTP and JSON under the panel's path prefix. A browser logs in and sends the CSRF token on every change. An integration sends an API token as a Bearer header. The x-access member of an operation says what it needs: read, users or full are token scopes, session and session-reauth are for a logged-in admin only, and public needs nothing.",
+    "title": "Veilway panel API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/account/password": {
+      "post": {
+        "operationId": "changePassword",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewPassword"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Changes the password and ends every other session.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/account/totp": {
+      "post": {
+        "operationId": "changeTotp",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpEnrolled"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Makes a new TOTP secret and ends every other session.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/admins": {
+      "get": {
+        "operationId": "listAdmins",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminsOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The admin accounts.",
+        "x-access": "session"
+      },
+      "post": {
+        "operationId": "createAdmin",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewAdmin"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpEnrolled"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Makes another admin.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/admins/{id}": {
+      "delete": {
+        "operationId": "removeAdmin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Removes another admin.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/audit": {
+      "get": {
+        "operationId": "audit",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The audit log, newest first. Query: limit, before.",
+        "x-access": "full"
+      }
+    },
+    "/login": {
+      "post": {
+        "operationId": "login",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Login"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoggedIn"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Logs in with password and TOTP code. Sets the session cookie and returns the CSRF token to send as X-CSRF-Token on every change.",
+        "x-access": "public"
+      }
+    },
+    "/logout": {
+      "post": {
+        "operationId": "logout",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Ends this session.",
+        "x-access": "session"
+      }
+    },
+    "/node": {
+      "get": {
+        "operationId": "node",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeInfo"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Whether the node answers on its control socket and when the panel last pushed its users.",
+        "x-access": "read"
+      }
+    },
+    "/node/sync": {
+      "post": {
+        "operationId": "syncNode",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeState"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Pushes the panel's users into the node's config.",
+        "x-access": "users"
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "openapi",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": true
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "This document.",
+        "x-access": "public"
+      }
+    },
+    "/session": {
+      "get": {
+        "operationId": "session",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInfo"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "This session: its CSRF token and until when a re-authentication holds.",
+        "x-access": "session"
+      }
+    },
+    "/session/reauth": {
+      "post": {
+        "operationId": "reauth",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Reauth"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Confirms password and code again, which the routes marked session-reauth ask for within five minutes.",
+        "x-access": "session"
+      }
+    },
+    "/sessions": {
+      "get": {
+        "operationId": "listSessions",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionsOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The admin's sessions.",
+        "x-access": "session"
+      }
+    },
+    "/sessions/{sid}": {
+      "delete": {
+        "operationId": "revokeSession",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sid",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Ends a session.",
+        "x-access": "session"
+      }
+    },
+    "/settings": {
+      "get": {
+        "operationId": "getSettings",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Panel settings: provider name, endpoint, pins, address pool, profiles, mirrors.",
+        "x-access": "read"
+      },
+      "put": {
+        "operationId": "putSettings",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Settings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Replaces the settings. Publishing profiles needs a recent re-authentication.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/setup": {
+      "post": {
+        "operationId": "setup",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Setup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpEnrolled"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Creates the first admin from the one-time setup token printed to the console. The TOTP secret in the answer is shown once.",
+        "x-access": "public"
+      }
+    },
+    "/signing-keys": {
+      "get": {
+        "operationId": "listSigningKeys",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeysOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The subscription signing keys, current and retired. No private part is ever shown.",
+        "x-access": "session"
+      }
+    },
+    "/signing-keys/finish": {
+      "post": {
+        "operationId": "finishSigningRotation",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeysOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Retires the older key. It is kept 365 days to sign refusals.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/signing-keys/rotate": {
+      "post": {
+        "operationId": "rotateSigningKey",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeysOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Adds a second current key. Both are listed in every document until the rotation is finished.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/status": {
+      "get": {
+        "operationId": "status",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Whether first-run setup is still to be done.",
+        "x-access": "public"
+      }
+    },
+    "/tokens": {
+      "get": {
+        "operationId": "listTokens",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokensOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The admin's API tokens. A token is never shown again.",
+        "x-access": "session"
+      },
+      "post": {
+        "operationId": "createToken",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenCreated"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Makes an API token, shown once. No API token can do this.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/tokens/{id}": {
+      "delete": {
+        "operationId": "revokeToken",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Revokes an API token.",
+        "x-access": "session"
+      }
+    },
+    "/users": {
+      "get": {
+        "operationId": "listUsers",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsersOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Users with the node's usage. Query: q, group, enabled.",
+        "x-access": "read"
+      },
+      "post": {
+        "operationId": "createUser",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Created"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Makes a user and a subscription link, shown now and again only through the sealed copy.",
+        "x-access": "users"
+      }
+    },
+    "/users/bulk": {
+      "post": {
+        "operationId": "bulkUsers",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Bulk"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkResult"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "One action on many users.",
+        "x-access": "users"
+      }
+    },
+    "/users/{id}": {
+      "delete": {
+        "operationId": "deleteUser",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deleted"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Removes a user and their devices.",
+        "x-access": "users"
+      },
+      "get": {
+        "operationId": "getUser",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "One user.",
+        "x-access": "read"
+      },
+      "patch": {
+        "operationId": "updateUser",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Changed"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Changes a user. A field set to null clears it.",
+        "x-access": "users"
+      }
+    },
+    "/users/{id}/devices": {
+      "get": {
+        "operationId": "listDevices",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevicesOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The user's devices, pending ones included.",
+        "x-access": "read"
+      },
+      "post": {
+        "operationId": "createDevice",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceCreated"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Makes a device with a key the panel generates. The weaker choice: the default is that the device enrolls itself through the endpoint.",
+        "x-access": "users"
+      }
+    },
+    "/users/{id}/devices/{did}": {
+      "delete": {
+        "operationId": "removeDevice",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "did",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Deleted"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Removes a device.",
+        "x-access": "users"
+      }
+    },
+    "/users/{id}/devices/{did}/export": {
+      "post": {
+        "operationId": "exportDevice",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "did",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Exported"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The signed document of a panel-keyed device, private key included, as a link or file.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/users/{id}/subscription": {
+      "get": {
+        "operationId": "getSubscription",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubscriptionInfo"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Non-secret facts about a user's subscription.",
+        "x-access": "read"
+      }
+    },
+    "/users/{id}/subscription/reset": {
+      "post": {
+        "operationId": "resetLink",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetLink"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkReset"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Makes a new token. The old one stops working. The answer lists the devices enrolled with the old link and removes them when asked.",
+        "x-access": "users"
+      }
+    },
+    "/users/{id}/subscription/show": {
+      "post": {
+        "operationId": "showLink",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkView"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Opens the sealed copy of the link, with its QR code. Needs a recent re-authentication and is audited without the link.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/users/{id}/usage/reset": {
+      "post": {
+        "operationId": "resetUsage",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetUsage"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Starts the user's quota count over on the node. The answer is the node's record of the user.",
+        "x-access": "users"
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "{prefix}/api",
+      "variables": {
+        "prefix": {
+          "default": "/panel"
+        }
+      }
+    }
+  ]
+}
