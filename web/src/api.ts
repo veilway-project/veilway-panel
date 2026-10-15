@@ -18,6 +18,7 @@ export type Live = Schemas["Live"];
 export type UsageEntry = Schemas["UsageEntry"];
 export type Point = Schemas["Point"];
 export type NotFound = Schemas["NotFound"];
+export type XrayLink = Schemas["XrayLink"];
 // The routes below hand on the node's own answers, which the schema leaves open. Only the fields the panel reads are named.
 export type Problem = {path: string, message: string};
 export type Report = {errors: Problem[], warnings: Problem[], more_errors: number, more_warnings: number};

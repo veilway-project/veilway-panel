@@ -508,14 +508,14 @@ fn signing_keys_must_be_private() {
 }
 
 /// A node that keeps one config and answers the way the real control API does: a revision per applied change, If-Match, validate and diff, and the stats routes.
-struct Fake {document: Mutex<Value>, generation: Mutex<u64>, stats: Mutex<Value>, sessions: Mutex<Value>, applied: Mutex<Vec<Value>>, dir: PathBuf}
+struct Fake {document: Mutex<Value>, generation: Mutex<u64>, status: Mutex<Value>, stats: Mutex<Value>, sessions: Mutex<Value>, applied: Mutex<Vec<Value>>, dir: PathBuf}
 
 impl Fake {
 	async fn start(document: Value) -> (Arc<Fake>, PathBuf) {
 		let dir = std::env::temp_dir().join(format!("vwfake-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
 		std::fs::create_dir_all(&dir).unwrap();
 		let socket = dir.join("control.sock");
-		let fake = Arc::new(Fake {document: Mutex::new(document), generation: Mutex::new(1), stats: Mutex::new(json!({})), sessions: Mutex::new(json!({"sessions": []})), applied: Mutex::new(Vec::new()), dir});
+		let fake = Arc::new(Fake {document: Mutex::new(document), generation: Mutex::new(1), status: Mutex::new(json!({"version": "0.0.0", "uptime_secs": 5, "generation": 1})), stats: Mutex::new(json!({})), sessions: Mutex::new(json!({"sessions": []})), applied: Mutex::new(Vec::new()), dir});
 		let node = Router::new()
 			.route("/v1/config", get(|State(fake): State<Arc<Fake>>| async move {
 				let generation = *fake.generation.lock().unwrap();
@@ -530,7 +530,7 @@ impl Fake {
 			}))
 			.route("/v1/config/validate", post(|Json(document): Json<Value>| async move {Json(json!({"valid": document.get("invalid").is_none(), "report": {"errors": [], "warnings": []}}))}))
 			.route("/v1/config/diff", post(|Json(_): Json<Value>| async move {Json(json!({"valid": true, "report": {}, "diff": {"inbounds": {"added": ["x"]}}}))}))
-			.route("/v1/status", get(|| async {Json(json!({"version": "0.0.0", "uptime_secs": 5, "generation": 1}))}))
+			.route("/v1/status", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.status.lock().unwrap().clone())}))
 			.route("/v1/stats", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.stats.lock().unwrap().clone())}))
 			.route("/v1/sessions", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.sessions.lock().unwrap().clone())}))
 			.route("/v1/exits", get(|| async {Json(json!({"exits": [{"tag": "main", "udp": true}]}))}))
@@ -694,4 +694,58 @@ async fn small_fixes_found_by_the_web_app() {
 	assert_eq!((missing.body.clone(), missing.headers.get(CONTENT_TYPE).unwrap().to_str().unwrap().to_string()), (b"nothing here".to_vec(), "text/plain".to_string()));
 	settings["not_found"]["status"] = json!(99);
 	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(settings), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn xray_inbounds_keep_a_credential_per_user_and_make_share_links() {
+	let mut document = node_document("10.66.0.1/24");
+	document["public_addresses"] = json!(["vpn.example.org"]);
+	let (fake, socket) = Fake::start(document).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (ann, _) = h.user(&session, "ann", json!({})).await;
+	assert_eq!(h.call(Method::POST, &format!("/p/api/users/{ann}/devices"), Some(&session), Some(json!({"name": "phone"})), "10.0.0.1").await.status, StatusCode::OK);
+	let vless = json!({"tag": "vless1", "protocol": "vless", "port": 8444, "cert": "/etc/veilway/cert.pem", "key": "/etc/veilway/key.pem"});
+	let missing = h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(vless.clone()), "10.0.0.1").await;
+	assert_eq!((missing.status, missing.json()["error"]["code"].clone()), (StatusCode::CONFLICT, json!("addon_missing")), "a node without the add-on");
+	assert_eq!(h.call(Method::GET, "/p/api/xray", Some(&session), None, "10.0.0.1").await.json()["installed"], false);
+	*fake.status.lock().unwrap() = json!({"version": "0.0.0", "addons": {"xray": {"installed": true, "release": "v26.3.27"}}});
+	let made = h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(vless), "10.0.0.1").await;
+	assert_eq!(made.status, StatusCode::OK, "{}", String::from_utf8_lossy(&made.body));
+	assert_eq!(h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(json!({"tag": "ss", "protocol": "shadowsocks", "port": 8388, "cert": "/a", "key": "/b"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	assert_eq!(h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(json!({"tag": "tr", "protocol": "trojan", "port": 8445})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	assert_eq!(h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(json!({"tag": "ss", "protocol": "shadowsocks", "port": 8388, "host": "ss.example.org"})), "10.0.0.1").await.status, StatusCode::OK);
+	let applied = fake.applied.lock().unwrap().last().unwrap().clone();
+	let inbounds = applied["xray"]["inbounds"].as_array().unwrap().clone();
+	assert_eq!((inbounds[0]["listen"].clone(), inbounds[0]["tls"]["cert"].clone(), inbounds[1].get("tls").is_none()), (json!("0.0.0.0:8444"), json!("/etc/veilway/cert.pem"), true));
+	let uuid = inbounds[0]["clients"][0]["secret"].as_str().unwrap().to_string();
+	let password = inbounds[1]["clients"][0]["secret"].as_str().unwrap().to_string();
+	assert_eq!((inbounds[0]["clients"][0]["user"].clone(), uuid.split('-').map(str::len).collect::<Vec<_>>()), (json!("ann"), vec![8, 4, 4, 4, 12]));
+	assert!(password.len() >= 8 && password.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)));
+	let listed = h.call(Method::GET, "/p/api/xray", Some(&session), None, "10.0.0.1").await;
+	let view = listed.json();
+	assert_eq!((view["installed"].clone(), view["release"].clone(), view["inbounds"][0]["port"].clone(), view["inbounds"][0]["security"].clone(), view["inbounds"][0]["clients"].clone(), view["inbounds"][1]["host"].clone()), (json!(true), json!("v26.3.27"), json!(8444), json!("tls"), json!(1), json!("ss.example.org")));
+	assert!(!String::from_utf8_lossy(&listed.body).contains(&uuid));
+	let (bob, _) = h.user(&session, "bob", json!({})).await;
+	assert_eq!(h.call(Method::POST, &format!("/p/api/users/{bob}/devices"), Some(&session), Some(json!({"name": "laptop"})), "10.0.0.1").await.status, StatusCode::OK);
+	let applied = fake.applied.lock().unwrap().last().unwrap().clone();
+	let clients = &applied["xray"]["inbounds"][0]["clients"];
+	assert_eq!((clients.as_array().unwrap().len(), clients[0]["secret"].clone(), clients[1]["user"].clone()), (2, json!(uuid), json!("bob")), "a new user gets a credential and an old one keeps theirs");
+	let links = h.call(Method::GET, &format!("/p/api/users/{ann}/xray"), Some(&session), None, "10.0.0.1").await;
+	assert_eq!(links.status, StatusCode::OK, "{}", String::from_utf8_lossy(&links.body));
+	let links = links.json()["links"].as_array().unwrap().clone();
+	let shadowsocks = format!("ss://{}@ss.example.org:8388#Test%20Net%20ss", URL_SAFE_NO_PAD.encode(format!("chacha20-ietf-poly1305:{password}")));
+	assert_eq!((links[0]["link"].clone(), links[1]["link"].clone()), (json!(shadowsocks), json!(format!("vless://{uuid}@vpn.example.org:8444?encryption=none&security=tls&sni=vpn.example.org&type=tcp#Test%20Net%20vless1"))));
+	assert!(links[0]["qr_svg"].as_str().unwrap().contains("<svg"));
+	assert_eq!(h.call(Method::DELETE, &format!("/p/api/users/{bob}"), Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	let applied = fake.applied.lock().unwrap().last().unwrap().clone();
+	assert!(applied["xray"]["inbounds"].as_array().unwrap().iter().all(|inbound| inbound["clients"].as_array().unwrap().len() == 1 && inbound["clients"][0]["user"] == "ann"), "a deleted user leaves every inbound");
+	assert_eq!(h.call(Method::DELETE, "/p/api/xray/inbounds/ss", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::DELETE, "/p/api/xray/inbounds/vless1", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert!(fake.applied.lock().unwrap().last().unwrap().get("xray").is_none());
+	assert_eq!(h.call(Method::DELETE, "/p/api/xray/inbounds/vless1", Some(&session), None, "10.0.0.1").await.status, StatusCode::NOT_FOUND);
+	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await;
+	assert!(!String::from_utf8_lossy(&audit.body).contains(&uuid) && !String::from_utf8_lossy(&audit.body).contains(&password));
+	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "xray.links.show"));
 }

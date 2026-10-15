@@ -445,6 +445,57 @@
         ],
         "type": "object"
       },
+      "InboundIn": {
+        "additionalProperties": false,
+        "properties": {
+          "cert": {
+            "description": "Paths of the certificate and key files on the node. Needed for vless and trojan, refused for shadowsocks.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "description": "The host the links name, in the place of the node's first public address.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "listen": {
+            "description": "The address Xray listens on. 0.0.0.0 when left out.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "port": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol": {
+            "description": "vless, trojan or shadowsocks.",
+            "type": "string"
+          },
+          "tag": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag",
+          "protocol",
+          "port"
+        ],
+        "type": "object"
+      },
       "KeyOut": {
         "properties": {
           "created": {
@@ -1586,6 +1637,134 @@
         },
         "required": [
           "users"
+        ],
+        "type": "object"
+      },
+      "XrayInboundOut": {
+        "properties": {
+          "cert": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "certificate_missing": {
+            "description": "A vless or trojan inbound without certificate files, which the node refuses.",
+            "type": "boolean"
+          },
+          "clients": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "host": {
+            "description": "The host the links name.",
+            "type": "string"
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "listen": {
+            "type": "string"
+          },
+          "managed": {
+            "description": "Whether the panel made this inbound and holds its credentials, which links need.",
+            "type": "boolean"
+          },
+          "port": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "protocol": {
+            "description": "vless, trojan or shadowsocks.",
+            "type": "string"
+          },
+          "security": {
+            "description": "\"tls\" or \"none\".",
+            "type": "string"
+          },
+          "tag": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag",
+          "protocol",
+          "listen",
+          "port",
+          "security",
+          "clients",
+          "host",
+          "managed",
+          "certificate_missing"
+        ],
+        "type": "object"
+      },
+      "XrayLink": {
+        "properties": {
+          "link": {
+            "description": "A secret, like the subscription link.",
+            "type": "string"
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "qr_svg": {
+            "description": "The same link as an SVG QR code.",
+            "type": "string"
+          },
+          "tag": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag",
+          "protocol",
+          "link",
+          "qr_svg"
+        ],
+        "type": "object"
+      },
+      "XrayLinks": {
+        "properties": {
+          "links": {
+            "items": {
+              "$ref": "#/components/schemas/XrayLink"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "links"
+        ],
+        "type": "object"
+      },
+      "XrayOut": {
+        "properties": {
+          "inbounds": {
+            "items": {
+              "$ref": "#/components/schemas/XrayInboundOut"
+            },
+            "type": "array"
+          },
+          "installed": {
+            "type": "boolean"
+          },
+          "release": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "installed",
+          "inbounds"
         ],
         "type": "object"
       }
@@ -5570,6 +5749,274 @@
         },
         "summary": "Starts the user's quota count over on the node. The answer is the node's record of the user.",
         "x-access": "users"
+      }
+    },
+    "/users/{id}/xray": {
+      "get": {
+        "operationId": "showXrayLinks",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/XrayLinks"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The user's share link for each Xray inbound the panel made, with QR codes. Needs a recent re-authentication and is audited without the links.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/xray": {
+      "get": {
+        "operationId": "getXray",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/XrayOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The Xray add-on: whether the node has it, its release and its inbounds, without credentials.",
+        "x-access": "read"
+      }
+    },
+    "/xray/inbounds": {
+      "post": {
+        "operationId": "createXrayInbound",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InboundIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Adds an Xray inbound with a credential the panel makes for every user, and applies the config on the node. Refused while the add-on is not installed.",
+        "x-access": "full"
+      }
+    },
+    "/xray/inbounds/{tag}": {
+      "delete": {
+        "operationId": "deleteXrayInbound",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tag",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Removes an Xray inbound from the node's config, and its credentials.",
+        "x-access": "full"
       }
     }
   },

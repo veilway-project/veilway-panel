@@ -1,5 +1,5 @@
 //! The route table. One list builds both the router and `openapi.json`, so the document cannot say anything else than what is served.
-use crate::{admin, app::{App, Settings}, auth::Access, http::ErrorBody, links, nodecfg, stats, users};
+use crate::{admin, app::{App, Settings}, auth::Access, http::ErrorBody, links, nodecfg, stats, users, xray};
 use axum::{extract::State, handler::Handler, http::{header::CONTENT_TYPE, HeaderValue, Method, StatusCode}, response::{IntoResponse, Response}, routing::{on, MethodFilter, MethodRouter}};
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use std::{any::TypeId, sync::Arc};
@@ -85,6 +85,10 @@ pub fn routes(schemas: &mut SchemaGenerator) -> Vec<Route> {
 		route::<Nothing, serde_json::Value, _, _>(s, M::GET, "/profiles/derived", "derivedProfiles", "A `veilway` profile template per inbound, made from the node's config and the overrides, with what each still lacks.", Access::Read, nodecfg::derived_profiles),
 		route::<nodecfg::OverrideIn, serde_json::Value, _, _>(s, M::PUT, "/profiles/overrides/{inbound}", "putProfileOverride", "Sets the members that replace the derived ones for an inbound. An empty object clears them.", Access::Full, nodecfg::put_override),
 		route::<Nothing, serde_json::Value, _, _>(s, M::POST, "/profiles/publish", "publishProfiles", "Writes the derived templates into the settings' profiles, which the subscription endpoint serves. Refused while one lacks a member.", Access::AdminReauth, nodecfg::publish_profiles),
+		route::<Nothing, xray::XrayOut, _, _>(s, M::GET, "/xray", "getXray", "The Xray add-on: whether the node has it, its release and its inbounds, without credentials.", Access::Read, xray::get),
+		route::<xray::InboundIn, admin::Done, _, _>(s, M::POST, "/xray/inbounds", "createXrayInbound", "Adds an Xray inbound with a credential the panel makes for every user, and applies the config on the node. Refused while the add-on is not installed.", Access::Full, xray::create),
+		route::<Nothing, admin::Done, _, _>(s, M::DELETE, "/xray/inbounds/{tag}", "deleteXrayInbound", "Removes an Xray inbound from the node's config, and its credentials.", Access::Full, xray::remove),
+		route::<Nothing, xray::XrayLinks, _, _>(s, M::GET, "/users/{id}/xray", "showXrayLinks", "The user's share link for each Xray inbound the panel made, with QR codes. Needs a recent re-authentication and is audited without the links.", Access::AdminReauth, xray::links),
 		route::<Nothing, serde_json::Value, _, _>(s, M::GET, "/links", "listLinks", "The node's links with their state, as the node reports them.", Access::Read, links::list),
 		route::<links::OfferIn, serde_json::Value, _, _>(s, M::POST, "/links/offers", "offerLink", "Step 1: makes an offer code for another node, good for the lifetime given. It holds no secret and says where this node is reached.", Access::AdminReauth, links::offer),
 		route::<Nothing, serde_json::Value, _, _>(s, M::GET, "/links/pairings", "listPairings", "Open offers and answered pairings that wait for the fingerprint.", Access::Admin, links::pending),

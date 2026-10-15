@@ -17,7 +17,7 @@ pub async fn push(app: &Arc<App>) -> NodeState {
 	match node::sync(app).await {Ok(()) => NodeState {synced: true, error: None}, Err(error) => NodeState {synced: false, error: Some(error)}}
 }
 
-fn name_ok(name: &str, dots: bool) -> bool {
+pub(crate) fn name_ok(name: &str, dots: bool) -> bool {
 	let mut bytes = name.bytes();
 	name.len() <= 64 && bytes.next().is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit()) && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_' || (dots && byte == b'.'))
 }

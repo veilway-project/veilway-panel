@@ -37,10 +37,10 @@ pub async fn get_section(State(app): State<Arc<App>>, Path(section): Path<String
 	ok(&json!({"revision": revision, "generation": generation, "value": document.get(&section).cloned().unwrap_or(Value::Null)}))
 }
 
-/// The document with the panel's users in it, since the node's `users` is what the panel owns.
+/// The document with the panel's users in it, and their Xray credentials, since the node's `users` is what the panel owns.
 fn with_users(app: &App, mut document: Value) -> Result<Value, Failure> {
 	if !document.is_object() {return Err(Failure::bad("The document is a JSON object."))}
-	document["users"] = node::users(app).map_err(|error| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "users_unavailable", error))?;
+	node::fill(app, &mut document).map_err(|error| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "users_unavailable", error))?;
 	Ok(document)
 }
 

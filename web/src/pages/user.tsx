@@ -1,16 +1,17 @@
 import {Banner, Button, Checkbox, ConfirmDialog, Dialog, Glass, Icon, IconButton, List, ListRow, StateBlock, TextField, UsageBar, useToast} from "@veilway/ui";
 import {useState} from "react";
-import {api, type Device, type LinkView, type NodeState, type NodeUser} from "../api.ts";
+import {api, type Device, type LinkView, type NodeState, type NodeUser, type XrayLink} from "../api.ts";
 import {Copyable, ErrorNote, LinkDialog, NodeNote, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {useSettings} from "../settings.ts";
 import {useExpiry, UserForm} from "./users.tsx";
+import {XrayLinksDialog} from "./xray.tsx";
 
 export function UserPage({id}: {id: number}) {
 	const {t, date, bytes, number} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings();
 	const page = useLoad(() => Promise.all([api("get", "/users/{id}", {params: {id}}), api("get", "/users/{id}/devices", {params: {id}}), api("get", "/users/{id}/subscription", {params: {id}})]), [id]);
 	const [editing, setEditing] = useState(false), [dialog, setDialog] = useState<"delete" | "usage" | "link" | "device" | null>(null), [removing, setRemoving] = useState<Device | null>(null);
 	const [totals, setTotals] = useState(false), [removeOld, setRemoveOld] = useState(false), [deviceName, setDeviceName] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [linkError, setLinkError] = useState<unknown>(null);
-	const [shown, setShown] = useState<{link: LinkView, once: boolean} | null>(null), [exported, setExported] = useState<{name: string, file: string, link?: string | null} | null>(null), [node, setNode] = useState<NodeState | null>(null);
+	const [shown, setShown] = useState<{link: LinkView, once: boolean} | null>(null), [exported, setExported] = useState<{name: string, file: string, link?: string | null} | null>(null), [node, setNode] = useState<NodeState | null>(null), [xray, setXray] = useState<XrayLink[] | null>(null);
 	if (page.error && !page.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={page.reload}>{t("action.retry")}</Button>}>{say(page.error)}</StateBlock>;
 	if (!page.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
 	const [user, {devices}, sub] = page.data, usage = user.node as NodeUser | null, current = devices.filter(d => d.token_gen === sub.token_generation);
@@ -60,6 +61,7 @@ export function UserPage({id}: {id: number}) {
 				<div className="p-cluster">
 					{sub.can_show && <Button variant="primary" icon="eye" onClick={async () => { setLinkError(null); try { setShown({link: await guard(() => api("post", "/users/{id}/subscription/show", {params: {id}})), once: false}); } catch (failure) { setLinkError(failure); } }}>{t("user.showLink")}</Button>}
 					<Button onClick={() => { setRemoveOld(false); open("link"); }}>{t("user.resetLink")}</Button>
+					<Button variant="quiet" icon="eye" onClick={async () => { setLinkError(null); try { setXray((await guard(() => api("get", "/users/{id}/xray", {params: {id}}))).links); } catch (failure) { setLinkError(failure); } }}>{t("xray.showLinks")}</Button>
 				</div>
 			</Glass>
 		</div>
@@ -114,5 +116,6 @@ export function UserPage({id}: {id: number}) {
 			</div>}
 		</Dialog>
 		<LinkDialog name={user.name} link={shown?.link ?? null} once={shown?.once ?? false} onClose={() => setShown(null)}/>
+		<XrayLinksDialog name={user.name} links={xray} onClose={() => setXray(null)}/>
 	</>;
 }

@@ -1,8 +1,10 @@
 //! The node's control API over its unix socket, and the one place the panel's users become the node's `users`.
-use crate::{app::App, crypto::now, subs};
+use crate::{app::App, crypto::{self, now}, subs};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Bytes, Request};
 use hyper_util::rt::TokioIo;
+use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use std::{collections::HashMap, path::Path, sync::{atomic::Ordering, Arc}, time::Duration};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -31,14 +33,14 @@ pub async fn usage(app: &App) -> HashMap<String, Value> {
 	serde_json::from_slice::<Value>(&body).ok().and_then(|value| value.get("users").cloned()).and_then(|users| users.as_array().cloned()).unwrap_or_default().into_iter().filter_map(|user| Some((user.get("name")?.as_str()?.to_string(), user))).collect()
 }
 
-/// The `users` of the node's config, from the panel's database. A user with no device is left out, since the node needs one.
-pub(crate) fn users(app: &App) -> Result<Value, String> {
+/// Puts the panel's users into the document's `users`, and the panel's credentials into the `clients` of the Xray inbounds it made, making one for a user who has none yet. A user with no device is left out, since the node needs one. An Xray inbound the panel did not make keeps its clients, less those whose user is gone.
+pub(crate) fn fill(app: &App, document: &mut Value) -> Result<(), String> {
 	let keys = app.keys.as_ref().ok_or("the key file is missing, so no secret can be opened")?;
 	let db = app.db.lock();
 	subs::expire_pending(&db, now()).map_err(|error| error.to_string())?;
 	let mut statement = db.prepare("select id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, record_id from users order by id").map_err(|error| error.to_string())?;
 	let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<i64>>(7)?, row.get::<_, Vec<u8>>(8)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-	let mut out = Vec::new();
+	let (mut out, mut present) = (Vec::new(), Vec::new());
 	for (id, name, enabled, groups, exits, quota, period, expires, record) in rows {
 		let record: [u8; 16] = record.try_into().map_err(|_| "a user record id is not 16 bytes")?;
 		let mut devices = db.prepare("select id, public_key, address, transport_secret from devices where user_id = ? and state = 'enrolled' order by id").map_err(|error| error.to_string())?;
@@ -53,8 +55,35 @@ pub(crate) fn users(app: &App) -> Result<Value, String> {
 		if let (Some(_), Some(period)) = (quota, period) {user["quota_period"] = json!(period);}
 		if let Some(expires) = expires {user["expires_at"] = json!(OffsetDateTime::from_unix_timestamp(expires).map_err(|error| error.to_string())?.format(&Rfc3339).map_err(|error| error.to_string())?);}
 		out.push(user);
+		present.push((id, name, record));
 	}
-	Ok(Value::Array(out))
+	document["users"] = Value::Array(out);
+	let made: HashMap<String, String> = db.prepare("select tag, protocol from xray_inbounds").and_then(|mut statement| statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect()).map_err(|error| error.to_string())?;
+	for inbound in document.get_mut("xray").and_then(|xray| xray.get_mut("inbounds")).and_then(Value::as_array_mut).into_iter().flatten() {
+		let tag = inbound["tag"].as_str().unwrap_or_default().to_string();
+		let Some(protocol) = made.get(&tag) else {
+			if let Some(clients) = inbound["clients"].as_array_mut() {clients.retain(|client| present.iter().any(|(_, name, _)| client["user"] == name.as_str()));}
+			continue
+		};
+		let clients = present.iter().map(|(id, name, record)| {
+			let sealed: Option<Vec<u8>> = db.query_row("select secret from xray_clients where tag = ? and user_id = ?", params![tag, id], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
+			let secret = match sealed {
+				Some(sealed) => String::from_utf8(keys.open_secret(record, &format!("xray:{tag}"), &sealed).ok_or("an Xray secret does not open")?).map_err(|error| error.to_string())?,
+				None => {
+					let bytes = crypto::random::<16>();
+					let secret = if protocol == "vless" {
+						let hex: String = bytes.iter().enumerate().map(|(at, byte)| format!("{:02x}", match at {6 => byte & 0x0f | 0x40, 8 => byte & 0x3f | 0x80, _ => *byte})).collect();
+						format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
+					} else {URL_SAFE_NO_PAD.encode([bytes.as_slice(), &crypto::random::<8>()].concat())};
+					db.execute("insert into xray_clients (tag, user_id, secret) values (?, ?, ?)", params![tag, id, keys.seal_secret(record, &format!("xray:{tag}"), secret.as_bytes())]).map_err(|error| error.to_string())?;
+					secret
+				}
+			};
+			Ok(json!({"user": name, "secret": secret}))
+		}).collect::<Result<Vec<_>, String>>()?;
+		inbound["clients"] = Value::Array(clients);
+	}
+	Ok(())
 }
 
 /// Puts the panel's users into the node's running config. A stale revision is read again once.
@@ -66,7 +95,7 @@ pub async fn sync(app: &Arc<App>) -> Result<(), String> {
 			if status != 200 {return Err(format!("the node answered {status} to the config"))}
 			let running: Value = serde_json::from_slice(&body).map_err(|error| error.to_string())?;
 			let (Some(revision), Some(mut document)) = (running.get("revision").and_then(Value::as_str).map(str::to_string), running.get("document").cloned()) else {return Err("the node's config answer has no revision or document".into())};
-			document["users"] = users(app)?;
+			fill(app, &mut document)?;
 			let (status, body) = request(&app.cfg.node_socket, "PUT", "/v1/config", Some(&revision), Some(&document)).await?;
 			match status {
 				200 => return Ok(()),

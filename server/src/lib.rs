@@ -15,6 +15,7 @@ pub mod stats;
 pub mod subs;
 pub mod users;
 pub mod web;
+pub mod xray;
 
 use app::{App, Limiter, Settings, Signing};
 use axum::{extract::Request, http::{header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS}, HeaderName, HeaderValue, Method}, middleware::{self, Next}, response::Response, routing::{any, get}, Router};

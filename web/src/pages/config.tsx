@@ -6,12 +6,13 @@ import {ErrorNote, Issues, lines, LinesField, Mark, PageHead, Rating, useLoad, u
 import type {PanelKey} from "../locales/en.ts";
 import {LinksTab} from "./links.tsx";
 import {ProfilesTab} from "./profiles.tsx";
+import {XrayTab} from "./xray.tsx";
 
 type Section = "inbounds" | "outbounds" | "exits" | "routing";
 type Item = Record<string, unknown>;
 type Row = {type: string, listen: string, path: string};
 type Cond = {key: string, values: string};
-const TABS = ["inbounds", "outbounds", "exits", "routing", "profiles", "links"] as const;
+const TABS = ["inbounds", "outbounds", "exits", "routing", "profiles", "xray", "links"] as const;
 const TRANSPORTS = ["udp", "udp-obfs", "tls", "ws", "fronted"];
 const PATHED = ["tls", "ws", "fronted"];
 const CONDITIONS = ["user", "group", "inbound", "link", "ip", "domain", "protocol", "port", "icmp_type", "icmp_code"];
@@ -31,7 +32,7 @@ export function NodePage({tab}: {tab: string}) {
 	useEffect(() => { document.querySelector(".vw-tab[data-state=active]")?.scrollIntoView({block: "nearest", inline: "nearest"}); }, [current]);
 	return <>
 		<PageHead title={t("node.title")} lead={t("node.lead")}/>
-		<Tabs label={t("node.title")} value={current} onChange={id => { location.hash = "#/node/" + id; }} items={TABS.map(id => ({id, label: t(`node.tab.${id}`), content: id === "profiles" ? <ProfilesTab/> : id === "links" ? <LinksTab/> : <SectionTab section={id}/>}))}/>
+		<Tabs label={t("node.title")} value={current} onChange={id => { location.hash = "#/node/" + id; }} items={TABS.map(id => ({id, label: t(`node.tab.${id}`), content: id === "profiles" ? <ProfilesTab/> : id === "xray" ? <XrayTab/> : id === "links" ? <LinksTab/> : <SectionTab section={id}/>}))}/>
 	</>;
 }
 
