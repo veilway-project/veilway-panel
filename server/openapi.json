@@ -483,6 +483,13 @@
               "null"
             ]
           },
+          "decoy": {
+            "description": "For vless and trojan, the origin of the operator's own web server (http://127.0.0.1:8080) that anything that is not a user's connection is handed to. Taken from the node's `tls` transport when left out; the inbound is refused when the node has none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "host": {
             "description": "The host the links name, in the place of the node's first public address.",
             "type": [
@@ -1046,6 +1053,21 @@
             "type": "boolean"
           }
         },
+        "type": "object"
+      },
+      "Rotated": {
+        "properties": {
+          "node": {
+            "$ref": "#/components/schemas/NodeState"
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "node"
+        ],
         "type": "object"
       },
       "SectionIn": {
@@ -5922,6 +5944,75 @@
         "x-access": "session-reauth"
       }
     },
+    "/users/{id}/xray/rotate": {
+      "post": {
+        "operationId": "rotateXrayCredentials",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Rotated"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Gives the user new credentials in every Xray inbound. Their old share links stop working once the node takes the change. Needs a recent re-authentication and is audited.",
+        "x-access": "session-reauth"
+      }
+    },
     "/xray": {
       "get": {
         "operationId": "getXray",
@@ -6048,7 +6139,7 @@
             "description": "Rate limited."
           }
         },
-        "summary": "Adds an Xray inbound with a credential the panel makes for every user, and applies the config on the node. Refused while the add-on is not installed.",
+        "summary": "Adds an Xray inbound with a credential the panel makes for every user, and applies the config on the node. Refused while the add-on is not installed, and for vless and trojan while there is no decoy web server. It shares the server's address with the native profiles and makes all of them easier to identify, so they are capped at Detectable.",
         "x-access": "full"
       }
     },

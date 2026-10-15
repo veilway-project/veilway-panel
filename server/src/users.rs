@@ -369,7 +369,9 @@ pub async fn sub_reset(State(app): State<Arc<App>>, Extension(ctx): Extension<Ct
 		let old: Vec<DeviceRow> = DeviceRow::for_user(&db, id)?.into_iter().filter(|device| device.token_gen == user.token_gen).collect();
 		db.execute("update users set token_lookup = ?, token_copy = ?, token_gen = token_gen + 1, token_created = ? where id = ?", params![keys.token_lookup(&token).as_slice(), copy, now(), id])?;
 		if input.remove_devices {db.execute("delete from devices where user_id = ? and token_gen = ?", params![id, user.token_gen])?;}
-		audit(&db, &ctx.actor, &ctx.source, "link.reset", &format!("user:{id}"), &format!("{} devices of the old link, removed: {}", old.len(), input.remove_devices));
+		// A link that was reset is a link that may have leaked, and the Xray share links are the same user's, so they are made new with it and the push below carries them to the node.
+		db.execute("delete from xray_clients where user_id = ?", [id])?;
+		audit(&db, &ctx.actor, &ctx.source, "link.reset", &format!("user:{id}"), &format!("{} devices of the old link, removed: {}, Xray credentials made new", old.len(), input.remove_devices));
 		old
 	};
 	let (link, link_error) = match view(&settings, &app, &token) {Ok(link) => (Some(link), None), Err(error) => (None, Some(error))};

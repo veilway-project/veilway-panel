@@ -914,6 +914,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users/{id}/xray/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Gives the user new credentials in every Xray inbound. Their old share links stop working once the node takes the change. Needs a recent re-authentication and is audited. */
+        post: operations["rotateXrayCredentials"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/xray": {
         parameters: {
             query?: never;
@@ -940,7 +957,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Adds an Xray inbound with a credential the panel makes for every user, and applies the config on the node. Refused while the add-on is not installed. */
+        /** Adds an Xray inbound with a credential the panel makes for every user, and applies the config on the node. Refused while the add-on is not installed, and for vless and trojan while there is no decoy web server. It shares the server's address with the native profiles and makes all of them easier to identify, so they are capped at Detectable. */
         post: operations["createXrayInbound"];
         delete?: never;
         options?: never;
@@ -1107,6 +1124,8 @@ export interface components {
         InboundIn: {
             /** @description Paths of the certificate and key files on the node. Needed for vless and trojan, refused for shadowsocks. */
             cert?: string | null;
+            /** @description For vless and trojan, the origin of the operator's own web server (http://127.0.0.1:8080) that anything that is not a user's connection is handed to. Taken from the node's `tls` transport when left out; the inbound is refused when the node has none. */
+            decoy?: string | null;
             /** @description The host the links name, in the place of the node's first public address. */
             host?: string | null;
             key?: string | null;
@@ -1283,6 +1302,10 @@ export interface components {
         ResetUsage: {
             /** @default false */
             totals: boolean;
+        };
+        Rotated: {
+            node: components["schemas"]["NodeState"];
+            ok: boolean;
         };
         SectionIn: {
             revision: string;
@@ -5124,6 +5147,64 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["XrayLinks"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    rotateXrayCredentials: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Rotated"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */

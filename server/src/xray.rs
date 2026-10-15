@@ -1,7 +1,7 @@
 //! The Xray add-on: its inbounds in the node's config, which the panel makes with a credential per user, and the users' share links. The credentials are sealed in the panel's database, which is what the links are made from, since the node only ever shows its marker.
-use crate::{admin::Done, app::App, crypto::now, db::audit, http::{ok, Body, Ctx, Failure}, node, nodecfg, subs::UserRow, users::name_ok};
+use crate::{admin::Done, app::App, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, nodecfg, subs::UserRow, users::{self, name_ok, NodeState}};
 use axum::{extract::{Path, State}, http::StatusCode, response::Response, Extension};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::params;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,17 @@ use serde_json::{json, Value};
 use std::{net::IpAddr, sync::Arc};
 
 const PROTOCOLS: [&str; 3] = ["vless", "trojan", "shadowsocks"];
+
+/// The key Shadowsocks 2022 uses at the server and, for each user, at the client: 32 random bytes as standard base64.
+pub(crate) fn key32() -> String {STANDARD.encode(crypto::random::<32>())}
+
+/// What the sealed server key of a Shadowsocks inbound is bound to, since it belongs to no user.
+pub(crate) fn server_label(tag: &str) -> String {format!("xray_server:{tag}")}
+
+/// The origin of the first `tls` transport of the node's inbounds that has a decoy: the operator's own web server, which a connection that is not an Xray user's is handed to.
+fn node_decoy(document: &Value) -> Option<String> {
+	document["inbounds"].as_array()?.iter().flat_map(|inbound| inbound["transports"].as_array().into_iter().flatten()).find(|transport| transport["type"] == "tls").and_then(|transport| transport["decoy"]["origin"].as_str().map(str::to_string))
+}
 
 /// Whether the node has the add-on, and its release. A node that says nothing of add-ons has none.
 async fn addon(app: &App) -> (bool, Option<String>) {
@@ -73,9 +84,11 @@ pub struct InboundIn {
 	pub cert: Option<String>, pub key: Option<String>,
 	/// The host the links name, in the place of the node's first public address.
 	pub host: Option<String>,
+	/// For vless and trojan, the origin of the operator's own web server (http://127.0.0.1:8080) that anything that is not a user's connection is handed to. Taken from the node's `tls` transport when left out; the inbound is refused when the node has none.
+	pub decoy: Option<String>,
 }
 
-/// Adds an inbound with a credential for every user the node carries, and applies the config on the node.
+/// Adds an inbound with a credential for every user the node carries, and applies the config on the node. The inbound answers on the server's address, which the native profiles use too, so it makes all of them easier to identify: every profile is capped at Detectable in the signed document.
 pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<InboundIn>) -> Result<Response, Failure> {
 	if !name_ok(&input.tag, false) {return Err(Failure::bad("tag is 1 to 64 characters of a-z, 0-9, dash and underscore, starting with a letter or digit."))}
 	if !PROTOCOLS.contains(&input.protocol.as_str()) {return Err(Failure::bad("protocol is vless, trojan or shadowsocks."))}
@@ -98,18 +111,29 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	if inbounds.iter().any(|inbound| inbound["tag"] == input.tag.as_str()) {return Err(Failure::conflict("An Xray inbound has this tag."))}
 	let mut inbound = json!({"tag": input.tag, "protocol": input.protocol, "listen": if listen.is_ipv6() {format!("[{listen}]:{}", input.port)} else {format!("{listen}:{}", input.port)}, "clients": []});
 	if let Some(tls) = tls {inbound["tls"] = tls;}
+	let server_key = (input.protocol == "shadowsocks").then(key32);
+	if let Some(key) = &server_key {inbound["server_key"] = json!(key);}
+	else {
+		let decoy = input.decoy.clone().or_else(|| node_decoy(&document));
+		let Some(decoy) = decoy.filter(|decoy| decoy.len() <= 300 && decoy.starts_with("http://") && !decoy.contains(char::is_whitespace)) else {return Err(Failure::bad("A vless or trojan inbound needs a decoy: the origin of your own web server (http://127.0.0.1:8080), which anything that is not a user's connection is handed to, so the port answers a stranger as a web server would. The node has no tls transport with one to take it from, so give `decoy`."))};
+		inbound["decoy"] = json!(decoy);
+	}
 	inbounds.push(inbound);
 	document["xray"] = json!({"inbounds": inbounds});
 	{
 		let db = app.db.lock();
 		db.execute("delete from xray_inbounds where tag = ?", [&input.tag])?;
-		db.execute("insert into xray_inbounds (tag, protocol, host, created) values (?, ?, ?, ?)", params![input.tag, input.protocol, host, now()])?;
+		db.execute("insert into xray_inbounds (tag, protocol, host, created, server_key) values (?, ?, ?, ?, ?)", params![input.tag, input.protocol, host, now(), server_key.as_ref().and_then(|key| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&input.tag), key.as_bytes())))])?;
 	}
 	if let Err(error) = nodecfg::apply(&app, &ctx, document, &revision, &format!("xray:{}", input.tag)).await {
 		app.db.lock().execute("delete from xray_inbounds where tag = ?", [&input.tag])?;
 		return Err(error)
 	}
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "xray.create", &input.tag, &format!("{} on port {}", input.protocol, input.port));
+	// The profiles share this address with the inbound, so none of them may claim more than Detectable. Publishing the profiles again derives the same cap, and removing the last inbound lifts it there.
+	let mut settings = app.settings();
+	for profile in settings.profiles.iter_mut().filter(|profile| profile["type"] == "veilway" && profile["rating_cap"] != "unsafe") {profile["rating_cap"] = json!("detectable");}
+	app.save_settings(&settings);
+	audit(&app.db.lock(), &ctx.actor, &ctx.source, "xray.create", &input.tag, &format!("{} on port {}, profiles capped at detectable", input.protocol, input.port));
 	ok(&Done {ok: true})
 }
 
@@ -148,28 +172,47 @@ pub async fn links(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	let (user, held) = {
 		let db = app.db.lock();
 		let user = UserRow::load(&db, id)?;
-		let mut statement = db.prepare("select i.tag, i.protocol, i.host, c.secret from xray_clients c join xray_inbounds i on i.tag = c.tag where c.user_id = ? order by i.tag")?;
-		let held: Vec<(String, String, String, Vec<u8>)> = statement.query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?.collect::<Result<_, _>>()?;
+		let mut statement = db.prepare("select i.tag, i.protocol, i.host, c.secret, i.server_key from xray_clients c join xray_inbounds i on i.tag = c.tag where c.user_id = ? order by i.tag")?;
+		let held: Vec<(String, String, String, Vec<u8>, Option<Vec<u8>>)> = statement.query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?.collect::<Result<_, _>>()?;
 		(user, held)
 	};
 	let (_, _, document) = nodecfg::running(&app).await?;
 	let provider = app.settings().provider_name;
 	let mut links = Vec::new();
-	for (tag, protocol, own, sealed) in held {
+	for (tag, protocol, own, sealed, server) in held {
 		let Some(port) = document["xray"]["inbounds"].as_array().into_iter().flatten().find(|inbound| inbound["tag"] == tag.as_str()).and_then(|inbound| inbound["listen"].as_str()?.rsplit_once(':').map(|(_, port)| port.to_string())) else {continue};
 		let secret = keys.open_secret(&user.record_id, &format!("xray:{tag}"), &sealed).and_then(|plain| String::from_utf8(plain).ok()).ok_or_else(|| Failure::internal("an Xray secret does not open"))?;
 		let host = host_of(&app, &document, &own);
 		if host.is_empty() {return Err(Failure::conflict("No host to put in links: set the node's public_addresses, the panel's node host or the inbound's host."))}
 		let address = if host.contains(':') {format!("[{host}]:{port}")} else {format!("{host}:{port}")};
-		let name: String = format!("{provider} {tag}").bytes().map(|byte| if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {(byte as char).to_string()} else {format!("%{byte:02X}")}).collect();
+		let escape = |text: &str| -> String {text.bytes().map(|byte| if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {(byte as char).to_string()} else {format!("%{byte:02X}")}).collect()};
+		let name = escape(&format!("{provider} {tag}"));
 		let link = match protocol.as_str() {
 			"vless" => format!("vless://{secret}@{address}?encryption=none&security=tls&sni={host}&type=tcp#{name}"),
 			"trojan" => format!("trojan://{secret}@{address}?security=tls&sni={host}&type=tcp#{name}"),
-			_ => format!("ss://{}@{address}#{name}", URL_SAFE_NO_PAD.encode(format!("chacha20-ietf-poly1305:{secret}"))),
+			// The userinfo of a 2022 cipher is the method and the password in the clear, and the password of a multi-user server is its key and the user's, each escaped.
+			_ => {
+				let server = server.and_then(|sealed| keys.open_secret(&[0; 16], &server_label(&tag), &sealed)).and_then(|plain| String::from_utf8(plain).ok()).ok_or_else(|| Failure::internal("the server key of a Shadowsocks inbound does not open"))?;
+				format!("ss://2022-blake3-aes-256-gcm:{}:{}@{address}#{name}", escape(&server), escape(&secret))
+			}
 		};
 		let qr_svg = qrcode::QrCode::new(link.as_bytes()).map_err(Failure::internal)?.render::<qrcode::render::svg::Color>().min_dimensions(240, 240).build();
 		links.push(XrayLink {tag, protocol, link, qr_svg});
 	}
 	audit(&app.db.lock(), &ctx.actor, &ctx.source, "xray.links.show", &format!("user:{id}"), "");
 	ok(&XrayLinks {links})
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct Rotated {pub ok: bool, pub node: NodeState}
+
+/// Gives the user new credentials in every Xray inbound, which ends the old ones as the node takes the change. A share link the user holds stops working. Subscription links do not change.
+pub async fn rotate(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
+	{
+		let db = app.db.lock();
+		UserRow::load(&db, id)?;
+		db.execute("delete from xray_clients where user_id = ?", [id])?;
+		audit(&db, &ctx.actor, &ctx.source, "xray.rotate", &format!("user:{id}"), "");
+	}
+	ok(&Rotated {ok: true, node: users::push(&app).await})
 }

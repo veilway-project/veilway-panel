@@ -123,6 +123,8 @@ fn derive(settings: &Settings, document: &Value) -> Vec<Value> {
 			})
 		}).collect();
 		let mut profile = json!({"id": tag.to_lowercase(), "name": tag, "type": "veilway", "gateways": gateways, "mtu": inbound["mtu"].as_u64().unwrap_or(if obfs {1390} else {1420}), "transports": listed});
+		// The Xray inbounds answer on this server's address like the profiles do, so no profile may claim more than Detectable. An override can lower it further and not raise it.
+		if document["xray"]["inbounds"].as_array().is_some_and(|list| !list.is_empty()) {profile["rating_cap"] = json!("detectable");}
 		if let Some(edits) = settings.profile_overrides.get(&tag).and_then(Value::as_object) {for (key, value) in edits {profile[key] = value.clone();}}
 		let mut missing = Vec::new();
 		if profile.get("inbound_public_key").is_none() {missing.push("inbound_public_key")}

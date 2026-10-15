@@ -706,11 +706,14 @@ async fn xray_inbounds_keep_a_credential_per_user_and_make_share_links() {
 	h.configure(&session, json!({})).await;
 	let (ann, _) = h.user(&session, "ann", json!({})).await;
 	assert_eq!(h.call(Method::POST, &format!("/p/api/users/{ann}/devices"), Some(&session), Some(json!({"name": "phone"})), "10.0.0.1").await.status, StatusCode::OK);
-	let vless = json!({"tag": "vless1", "protocol": "vless", "port": 8444, "cert": "/etc/veilway/cert.pem", "key": "/etc/veilway/key.pem"});
+	let vless = json!({"tag": "vless1", "protocol": "vless", "port": 8444, "cert": "/etc/veilway/cert.pem", "key": "/etc/veilway/key.pem", "decoy": "http://127.0.0.1:8080"});
 	let missing = h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(vless.clone()), "10.0.0.1").await;
 	assert_eq!((missing.status, missing.json()["error"]["code"].clone()), (StatusCode::CONFLICT, json!("addon_missing")), "a node without the add-on");
 	assert_eq!(h.call(Method::GET, "/p/api/xray", Some(&session), None, "10.0.0.1").await.json()["installed"], false);
 	*fake.status.lock().unwrap() = json!({"version": "0.0.0", "addons": {"xray": {"installed": true, "release": "v26.3.27"}}});
+	let bare = h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(json!({"tag": "bare", "protocol": "trojan", "port": 8445, "cert": "/etc/veilway/cert.pem", "key": "/etc/veilway/key.pem"})), "10.0.0.1").await;
+	assert_eq!(bare.status, StatusCode::BAD_REQUEST, "a vless or trojan inbound is refused while the node has no decoy to hand strangers to");
+	assert!(String::from_utf8_lossy(&bare.body).contains("decoy"));
 	let made = h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(vless), "10.0.0.1").await;
 	assert_eq!(made.status, StatusCode::OK, "{}", String::from_utf8_lossy(&made.body));
 	assert_eq!(h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(json!({"tag": "ss", "protocol": "shadowsocks", "port": 8388, "cert": "/a", "key": "/b"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
@@ -722,7 +725,8 @@ async fn xray_inbounds_keep_a_credential_per_user_and_make_share_links() {
 	let uuid = inbounds[0]["clients"][0]["secret"].as_str().unwrap().to_string();
 	let password = inbounds[1]["clients"][0]["secret"].as_str().unwrap().to_string();
 	assert_eq!((inbounds[0]["clients"][0]["user"].clone(), uuid.split('-').map(str::len).collect::<Vec<_>>()), (json!("ann"), vec![8, 4, 4, 4, 12]));
-	assert!(password.len() >= 8 && password.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte)));
+	let server = inbounds[1]["server_key"].as_str().unwrap().to_string();
+	assert_eq!((inbounds[0]["decoy"].clone(), password.len(), server.len(), inbounds[0].get("server_key").is_none(), inbounds[1].get("decoy").is_none()), (json!("http://127.0.0.1:8080"), 44, 44, true, true), "a key of 32 bytes for the server and one for the user, and a decoy only where there is a web listener");
 	let listed = h.call(Method::GET, "/p/api/xray", Some(&session), None, "10.0.0.1").await;
 	let view = listed.json();
 	assert_eq!((view["installed"].clone(), view["release"].clone(), view["inbounds"][0]["port"].clone(), view["inbounds"][0]["security"].clone(), view["inbounds"][0]["clients"].clone(), view["inbounds"][1]["host"].clone()), (json!(true), json!("v26.3.27"), json!(8444), json!("tls"), json!(1), json!("ss.example.org")));
@@ -735,9 +739,17 @@ async fn xray_inbounds_keep_a_credential_per_user_and_make_share_links() {
 	let links = h.call(Method::GET, &format!("/p/api/users/{ann}/xray"), Some(&session), None, "10.0.0.1").await;
 	assert_eq!(links.status, StatusCode::OK, "{}", String::from_utf8_lossy(&links.body));
 	let links = links.json()["links"].as_array().unwrap().clone();
-	let shadowsocks = format!("ss://{}@ss.example.org:8388#Test%20Net%20ss", URL_SAFE_NO_PAD.encode(format!("chacha20-ietf-poly1305:{password}")));
+	let escape = |text: &str| text.replace('+', "%2B").replace('/', "%2F").replace('=', "%3D");
+	let shadowsocks = format!("ss://2022-blake3-aes-256-gcm:{}:{}@ss.example.org:8388#Test%20Net%20ss", escape(&server), escape(&password));
 	assert_eq!((links[0]["link"].clone(), links[1]["link"].clone()), (json!(shadowsocks), json!(format!("vless://{uuid}@vpn.example.org:8444?encryption=none&security=tls&sni=vpn.example.org&type=tcp#Test%20Net%20vless1"))));
 	assert!(links[0]["qr_svg"].as_str().unwrap().contains("<svg"));
+	let rotated = h.call(Method::POST, &format!("/p/api/users/{ann}/xray/rotate"), Some(&session), Some(json!({})), "10.0.0.1").await;
+	assert_eq!(rotated.status, StatusCode::OK, "{}", String::from_utf8_lossy(&rotated.body));
+	let applied = fake.applied.lock().unwrap().last().unwrap().clone();
+	let (renewed, other) = (applied["xray"]["inbounds"][0]["clients"][0]["secret"].as_str().unwrap().to_string(), applied["xray"]["inbounds"][1]["clients"][0]["secret"].as_str().unwrap().to_string());
+	assert!(renewed != uuid && other != password && applied["xray"]["inbounds"][0]["clients"][0]["user"] == "ann", "new credentials in every inbound for the same user");
+	assert_eq!(applied["xray"]["inbounds"][1]["server_key"], json!(server), "the server key stays");
+	let (uuid, password) = (renewed, other);
 	assert_eq!(h.call(Method::DELETE, &format!("/p/api/users/{bob}"), Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
 	let applied = fake.applied.lock().unwrap().last().unwrap().clone();
 	assert!(applied["xray"]["inbounds"].as_array().unwrap().iter().all(|inbound| inbound["clients"].as_array().unwrap().len() == 1 && inbound["clients"][0]["user"] == "ann"), "a deleted user leaves every inbound");
@@ -748,4 +760,6 @@ async fn xray_inbounds_keep_a_credential_per_user_and_make_share_links() {
 	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await;
 	assert!(!String::from_utf8_lossy(&audit.body).contains(&uuid) && !String::from_utf8_lossy(&audit.body).contains(&password));
 	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "xray.links.show"));
+	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "xray.rotate"));
+	assert!(!String::from_utf8_lossy(&audit.body).contains(&server));
 }

@@ -1,6 +1,7 @@
 //! The node's control API over its unix socket, and the one place the panel's users become the node's `users`.
 use crate::{app::App, crypto::{self, now}, subs};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use crate::xray::{key32, server_label};
 use http_body_util::{BodyExt, Full};
 use hyper::{body::Bytes, Request};
 use hyper_util::rt::TokioIo;
@@ -65,6 +66,10 @@ pub(crate) fn fill(app: &App, document: &mut Value) -> Result<(), String> {
 			if let Some(clients) = inbound["clients"].as_array_mut() {clients.retain(|client| present.iter().any(|(_, name, _)| client["user"] == name.as_str()));}
 			continue
 		};
+		if protocol == "shadowsocks" {
+			let sealed: Option<Vec<u8>> = db.query_row("select server_key from xray_inbounds where tag = ?", [&tag], |row| row.get(0)).optional().map_err(|error| error.to_string())?.flatten();
+			if let Some(key) = sealed.and_then(|sealed| keys.open_secret(&[0; 16], &server_label(&tag), &sealed)) {inbound["server_key"] = json!(String::from_utf8(key).map_err(|error| error.to_string())?);}
+		}
 		let clients = present.iter().map(|(id, name, record)| {
 			let sealed: Option<Vec<u8>> = db.query_row("select secret from xray_clients where tag = ? and user_id = ?", params![tag, id], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
 			let secret = match sealed {
@@ -74,7 +79,7 @@ pub(crate) fn fill(app: &App, document: &mut Value) -> Result<(), String> {
 					let secret = if protocol == "vless" {
 						let hex: String = bytes.iter().enumerate().map(|(at, byte)| format!("{:02x}", match at {6 => byte & 0x0f | 0x40, 8 => byte & 0x3f | 0x80, _ => *byte})).collect();
 						format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
-					} else {URL_SAFE_NO_PAD.encode([bytes.as_slice(), &crypto::random::<8>()].concat())};
+					} else if protocol == "shadowsocks" {key32()} else {URL_SAFE_NO_PAD.encode([bytes.as_slice(), &crypto::random::<8>()].concat())};
 					db.execute("insert into xray_clients (tag, user_id, secret) values (?, ?, ?)", params![tag, id, keys.seal_secret(record, &format!("xray:{tag}"), secret.as_bytes())]).map_err(|error| error.to_string())?;
 					secret
 				}

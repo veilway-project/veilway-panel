@@ -8,7 +8,7 @@ const PROTOCOLS = ["vless", "trojan", "shadowsocks"] as const;
 // Xray inbounds live in the node's config like the others, but the panel makes them so that it holds every user's credential and can hand out links.
 export function XrayTab() {
 	const {t} = useP(), say = useSay(), guard = useGuard(), toast = useToast(), xray = useLoad(() => api("get", "/xray"), []);
-	const [adding, setAdding] = useState(false), [protocol, setProtocol] = useState<string>("vless"), [tag, setTag] = useState(""), [port, setPort] = useState<number | "">(443), [cert, setCert] = useState(""), [key, setKey] = useState(""), [host, setHost] = useState("");
+	const [adding, setAdding] = useState(false), [protocol, setProtocol] = useState<string>("vless"), [tag, setTag] = useState(""), [port, setPort] = useState<number | "">(443), [cert, setCert] = useState(""), [key, setKey] = useState(""), [host, setHost] = useState(""), [decoy, setDecoy] = useState("");
 	const [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null);
 	if (xray.error && !xray.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={xray.reload}>{t("action.retry")}</Button>}>{say(xray.error)}</StateBlock>;
 	if (!xray.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
@@ -28,7 +28,7 @@ export function XrayTab() {
 			setBusy(false);
 		}
 	};
-	const create = () => run(() => api("post", "/xray/inbounds", {body: {tag: tag.trim(), protocol, port: port === "" ? 0 : port, cert: tls ? cert.trim() : null, key: tls ? key.trim() : null, host: host.trim() || null}}), t("xray.created", {tag: tag.trim()}));
+	const create = () => run(() => api("post", "/xray/inbounds", {body: {tag: tag.trim(), protocol, port: port === "" ? 0 : port, cert: tls ? cert.trim() : null, key: tls ? key.trim() : null, host: host.trim() || null, decoy: tls ? decoy.trim() || null : null}}), t("xray.created", {tag: tag.trim()}));
 	return <div className="p-stack">
 		<div className="p-row"><p className="vw-muted p-lead">{t("xray.lead", {release: release ?? ""})}</p><Button size="sm" icon="plus" onClick={() => { setError(null); setAdding(true); }}>{t("xray.add")}</Button></div>
 		{!adding && <ErrorNote error={error}/>}
@@ -43,11 +43,13 @@ export function XrayTab() {
 		</Glass>
 		<Dialog open={adding} onOpenChange={open => { if (!open) setAdding(false); }} title={t("xray.add")} description={t("xray.addBody")}>
 			<form className="p-stack" onSubmit={event => { event.preventDefault(); void create(); }}>
+				<Banner tone="warning" title={t("xray.sharedTitle")}>{t("xray.sharedBody")}</Banner>
 				<SelectField label={t("xray.protocol")} value={protocol} onChange={setProtocol} options={PROTOCOLS.map(value => ({value, label: value, detail: t(`xray.protocol.${value}`)}))}/>
 				<TextField label={t("config.col.tag")} hint={t("config.tagHint")} value={tag} onChange={value => setTag(value.toLowerCase())} technical required autoFocus/>
 				<NumberField label={t("xray.port")} unit="TCP" min={1} max={65535} value={port} onChange={setPort}/>
 				{tls && <TextField label={t("xray.cert")} hint={t("xray.certHint")} placeholder="/etc/ssl/node/fullchain.pem" value={cert} onChange={setCert} technical required/>}
 				{tls && <TextField label={t("xray.key")} placeholder="/etc/ssl/node/privkey.pem" value={key} onChange={setKey} technical required/>}
+				{tls && <TextField label={t("xray.decoy")} hint={t("xray.decoyHint")} placeholder="http://127.0.0.1:8080" value={decoy} onChange={setDecoy} technical optional/>}
 				<TextField label={t("xray.host")} hint={t("xray.hostHint")} value={host} onChange={setHost} technical optional/>
 				<ErrorNote error={error}/>
 				<div className="vw-dialog-foot"><Button onClick={() => setAdding(false)}>{t("action.cancel")}</Button><Button type="submit" variant="primary" disabled={busy || !tag.trim() || port === ""}>{t("xray.create")}</Button></div>

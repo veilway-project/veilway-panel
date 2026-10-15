@@ -417,6 +417,11 @@
       "pattern": "^[0-9A-Fa-f:.]+/[1-9][0-9]{0,2}$",
       "type": "string"
     },
+    "Host": {
+      "description": "an IP address or a lowercase host name, with no port",
+      "pattern": "^[0-9A-Za-z.:-]{1,253}$",
+      "type": "string"
+    },
     "HostPort": {
       "description": "a host and port such as proxy.example.com:1080, with an IPv6 address in brackets",
       "pattern": "^([a-z0-9.-]{1,253}|\\[[0-9A-Fa-f:.]+\\]):[1-9][0-9]{0,4}$",
@@ -1900,7 +1905,8 @@
             "$ref": "#/$defs/XrayInbound"
           },
           "maxItems": 16,
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         }
       },
       "required": [
@@ -1912,9 +1918,9 @@
       "additionalProperties": false,
       "properties": {
         "secret": {
-          "description": "A UUID for `vless`, otherwise a password of 8 to 128 characters from A-Z a-z 0-9 and _ - . + / =.",
+          "description": "A UUID for `vless`. For `trojan` a password of 22 to 128 characters from A-Z a-z 0-9 and _ - . + / =. For `shadowsocks` a key of 32 bytes as standard base64. No two clients of an inbound share a secret.",
           "maxLength": 128,
-          "minLength": 8,
+          "minLength": 22,
           "type": "string"
         },
         "user": {
@@ -1937,7 +1943,12 @@
             "$ref": "#/$defs/XrayClient"
           },
           "maxItems": 65536,
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
+        },
+        "decoy": {
+          "$ref": "#/$defs/Origin",
+          "description": "Where a connection that is not a user's goes after the TLS handshake: the operator's own web server, the same one the `decoy.origin` of a `tls` transport names. Required for `vless` and `trojan`, not allowed for `shadowsocks`."
         },
         "listen": {
           "$ref": "#/$defs/Addr",
@@ -1946,7 +1957,23 @@
         "protocol": {
           "$ref": "#/$defs/XrayProtocol"
         },
+        "server_key": {
+          "description": "The server's key for `shadowsocks`: 32 bytes as standard base64. Required for `shadowsocks`, not allowed for the others.",
+          "type": "string"
+        },
         "tag": {
+          "not": {
+            "enum": [
+              "all",
+              "any",
+              "block",
+              "reject",
+              "drop",
+              "local",
+              "direct",
+              "user"
+            ]
+          },
           "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
           "type": "string"
         },
@@ -1967,17 +1994,17 @@
       "oneOf": [
         {
           "const": "vless",
-          "description": "Needs `tls`. The client secret is a UUID.",
+          "description": "Needs `tls` and a `decoy`. The client secret is a UUID.",
           "type": "string"
         },
         {
           "const": "trojan",
-          "description": "Needs `tls`. The client secret is a password.",
+          "description": "Needs `tls` and a `decoy`. The client secret is a password.",
           "type": "string"
         },
         {
           "const": "shadowsocks",
-          "description": "The cipher is chacha20-ietf-poly1305. The client secret is a password.",
+          "description": "The cipher is 2022-blake3-aes-256-gcm with a key for the server and one per client. Every key is 32 bytes as standard base64.",
           "type": "string"
         }
       ]
@@ -2044,6 +2071,15 @@
         "$ref": "#/$defs/Outbound"
       },
       "maxItems": 256,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "public_addresses": {
+      "description": "The addresses a profile of this node is given, as host names or IP addresses with no port: each transport keeps the port of its own listener.",
+      "items": {
+        "$ref": "#/$defs/Host"
+      },
+      "maxItems": 8,
       "type": "array",
       "uniqueItems": true
     },

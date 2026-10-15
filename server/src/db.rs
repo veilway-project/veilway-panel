@@ -25,6 +25,8 @@ impl Db {
 		let connection = Connection::open(path)?;
 		connection.execute_batch("pragma journal_mode=wal; pragma foreign_keys=on; pragma busy_timeout=5000;")?;
 		connection.execute_batch(SCHEMA)?;
+		// Added after the first release of the table; an error means the column is there.
+		let _ = connection.execute("alter table xray_inbounds add column server_key blob", []);
 		Ok(Self(Arc::new(Mutex::new(connection))))
 	}
 	/// Held for the length of one query or one short transaction and never across an await.

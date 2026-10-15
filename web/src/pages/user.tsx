@@ -9,7 +9,7 @@ import {XrayLinksDialog} from "./xray.tsx";
 export function UserPage({id}: {id: number}) {
 	const {t, date, bytes, number} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings();
 	const page = useLoad(() => Promise.all([api("get", "/users/{id}", {params: {id}}), api("get", "/users/{id}/devices", {params: {id}}), api("get", "/users/{id}/subscription", {params: {id}})]), [id]);
-	const [editing, setEditing] = useState(false), [dialog, setDialog] = useState<"delete" | "usage" | "link" | "device" | null>(null), [removing, setRemoving] = useState<Device | null>(null);
+	const [editing, setEditing] = useState(false), [dialog, setDialog] = useState<"delete" | "usage" | "link" | "device" | "xray" | null>(null), [removing, setRemoving] = useState<Device | null>(null);
 	const [totals, setTotals] = useState(false), [removeOld, setRemoveOld] = useState(false), [deviceName, setDeviceName] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [linkError, setLinkError] = useState<unknown>(null);
 	const [shown, setShown] = useState<{link: LinkView, once: boolean} | null>(null), [exported, setExported] = useState<{name: string, file: string, link?: string | null} | null>(null), [node, setNode] = useState<NodeState | null>(null), [xray, setXray] = useState<XrayLink[] | null>(null);
 	if (page.error && !page.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={page.reload}>{t("action.retry")}</Button>}>{say(page.error)}</StateBlock>;
@@ -62,6 +62,7 @@ export function UserPage({id}: {id: number}) {
 					{sub.can_show && <Button variant="primary" icon="eye" onClick={async () => { setLinkError(null); try { setShown({link: await guard(() => api("post", "/users/{id}/subscription/show", {params: {id}})), once: false}); } catch (failure) { setLinkError(failure); } }}>{t("user.showLink")}</Button>}
 					<Button onClick={() => { setRemoveOld(false); open("link"); }}>{t("user.resetLink")}</Button>
 					<Button variant="quiet" icon="eye" onClick={async () => { setLinkError(null); try { setXray((await guard(() => api("get", "/users/{id}/xray", {params: {id}}))).links); } catch (failure) { setLinkError(failure); } }}>{t("xray.showLinks")}</Button>
+					<Button variant="quiet" onClick={() => open("xray")}>{t("xray.rotate")}</Button>
 				</div>
 			</Glass>
 		</div>
@@ -89,6 +90,7 @@ export function UserPage({id}: {id: number}) {
 			<ErrorNote error={error}/>
 			<div className="vw-dialog-foot"><Button onClick={() => setDialog(null)}>{t("action.cancel")}</Button><Button variant="primary" disabled={busy} onClick={() => void act(() => api("post", "/users/{id}/usage/reset", {params: {id}, body: {totals}}), () => toast({tone: "success", title: t("user.resetDone")}))}>{t("user.resetUsage")}</Button></div>
 		</Dialog>
+		<ConfirmDialog open={dialog === "xray"} onOpenChange={o => { if (!o) setDialog(null); }} title={t("xray.rotateTitle", {name: user.name})} body={t("xray.rotateBody", {name: user.name})} confirmLabel={t("xray.rotateConfirm")} onConfirm={() => void guard(() => api("post", "/users/{id}/xray/rotate", {params: {id}})).then(answer => { setNode(answer.node); toast({tone: "success", title: t("xray.rotated")}); }, failure => toast({tone: "danger", title: say(failure)}))}/>
 		<Dialog open={dialog === "link"} onOpenChange={o => { if (!o) setDialog(null); }} title={t("user.resetLinkTitle", {name: user.name})} description={t("user.resetLinkBody")}>
 			<p>{t("user.resetLinkDevices", {count: current.length, names: current.map(d => d.name).join(", ")})}</p>
 			{current.length > 0 && <Checkbox label={t("user.removeOld")} checked={removeOld} onChange={setRemoveOld}/>}
