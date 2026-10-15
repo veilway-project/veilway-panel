@@ -1,0 +1,26 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # The server reads veilway-proto from ../../veilway/crates, so both repositories sit side by side under one parent folder.
+      - uses: actions/checkout@v7
+        with:
+          path: veilway-project/veilway-panel
+      - uses: actions/checkout@v7
+        with:
+          repository: veilway-project/veilway
+          path: veilway-project/veilway
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: veilway-project/veilway-panel/server
+      - run: cargo test
+        working-directory: veilway-project/veilway-panel/server

@@ -1,0 +1,15 @@
+# Weekly version updates, grouped so one pull request covers each package. Security updates come on their own as soon as an advisory is published.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories: ["/server"]
+    schedule: {interval: weekly}
+    groups: {cargo: {patterns: ["*"]}}
+  - package-ecosystem: npm
+    directories: ["/web"]
+    schedule: {interval: weekly}
+    groups: {npm: {patterns: ["*"]}}
+  - package-ecosystem: github-actions
+    directories: ["/"]
+    schedule: {interval: weekly}
+    groups: {actions: {patterns: ["*"]}}
