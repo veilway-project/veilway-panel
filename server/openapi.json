@@ -445,6 +445,34 @@
         ],
         "type": "object"
       },
+      "Inbound": {
+        "properties": {
+          "kind": {
+            "description": "\"wireguard\" or \"veilway\".",
+            "type": "string"
+          },
+          "public_key": {
+            "description": "The WireGuard public key of the inbound.",
+            "type": "string"
+          },
+          "tag": {
+            "type": "string"
+          },
+          "transport_public_key": {
+            "description": "The public half of the node transport key. Null when the inbound has none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "tag",
+          "kind",
+          "public_key"
+        ],
+        "type": "object"
+      },
       "InboundIn": {
         "additionalProperties": false,
         "properties": {
@@ -493,6 +521,20 @@
           "tag",
           "protocol",
           "port"
+        ],
+        "type": "object"
+      },
+      "Inbounds": {
+        "properties": {
+          "inbounds": {
+            "items": {
+              "$ref": "#/components/schemas/Inbound"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "inbounds"
         ],
         "type": "object"
       },
@@ -842,7 +884,7 @@
             "type": "string"
           },
           "inbound_public_key": {
-            "description": "The inbound's WireGuard public key. The node's API does not show it, so the operator gives it.",
+            "description": "The inbound's WireGuard public key, as `/links/inbounds` reports it.",
             "type": "string"
           },
           "lifetime": {
@@ -2690,6 +2732,66 @@
           }
         },
         "summary": "The node's links with their state, as the node reports them.",
+        "x-access": "read"
+      }
+    },
+    "/links/inbounds": {
+      "get": {
+        "operationId": "linkInbounds",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Inbounds"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The node's inbounds with their WireGuard public key and transport public key, for an offer. Public keys only.",
         "x-access": "read"
       }
     },

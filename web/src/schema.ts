@@ -194,6 +194,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/links/inbounds": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The node's inbounds with their WireGuard public key and transport public key, for an offer. Public keys only. */
+        get: operations["linkInbounds"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/links/offers": {
         parameters: {
             query?: never;
@@ -1078,6 +1095,15 @@ export interface components {
             points: components["schemas"]["Point"][];
             resolution: string;
         };
+        Inbound: {
+            /** @description "wireguard" or "veilway". */
+            kind: string;
+            /** @description The WireGuard public key of the inbound. */
+            public_key: string;
+            tag: string;
+            /** @description The public half of the node transport key. Null when the inbound has none. */
+            transport_public_key?: string | null;
+        };
         InboundIn: {
             /** @description Paths of the certificate and key files on the node. Needed for vless and trojan, refused for shadowsocks. */
             cert?: string | null;
@@ -1091,6 +1117,9 @@ export interface components {
             /** @description vless, trojan or shadowsocks. */
             protocol: string;
             tag: string;
+        };
+        Inbounds: {
+            inbounds: components["schemas"]["Inbound"][];
         };
         KeyOut: {
             /** Format: int64 */
@@ -1193,7 +1222,7 @@ export interface components {
             direction: string;
             /** @description The tag of the `veilway` inbound the link connects to. */
             inbound: string;
-            /** @description The inbound's WireGuard public key. The node's API does not show it, so the operator gives it. */
+            /** @description The inbound's WireGuard public key, as `/links/inbounds` reports it. */
             inbound_public_key: string;
             /**
              * Format: uint64
@@ -2303,6 +2332,62 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    linkInbounds: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Inbounds"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */

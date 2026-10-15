@@ -4,7 +4,7 @@ use axum::{extract::{Path, State}, http::StatusCode, response::Response, Extensi
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use ipnet::IpNet;
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, net::IpAddr, sync::Arc};
 use veilway_proto::{pairing::{self, Agreed, Direction, Offer, Offers, Pastes, Terms, Unconfirmed}, NoRandom};
@@ -32,6 +32,27 @@ pub async fn list(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	ok(&json!({"status": status, "links": serde_json::from_slice::<Value>(&body).ok().and_then(|value| value.get("links").cloned()).unwrap_or(Value::Null)}))
 }
 
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct Inbound {
+	pub tag: String,
+	/// "wireguard" or "veilway".
+	pub kind: String,
+	/// The WireGuard public key of the inbound.
+	pub public_key: String,
+	/// The public half of the node transport key. Null when the inbound has none.
+	pub transport_public_key: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct Inbounds {pub inbounds: Vec<Inbound>}
+
+/// The node's inbounds with their public keys, which an offer needs. Only the public keys are read from the node's answer.
+pub async fn inbounds(State(app): State<Arc<App>>) -> Result<Response, Failure> {
+	let (status, body) = crate::node::request(&app.cfg.node_socket, "GET", "/v1/inbounds", None, None).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
+	if status != 200 {return Err(Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", format!("the node answered {status} to the inbounds")))}
+	ok(&serde_json::from_slice::<Inbounds>(&body).map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", format!("the node's inbounds: {error}")))?)
+}
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OfferIn {
@@ -42,7 +63,7 @@ pub struct OfferIn {
 	/// "forward" or "reverse". In a forward link this node is the exit.
 	pub direction: String,
 	pub name: String,
-	/// The inbound's WireGuard public key. The node's API does not show it, so the operator gives it.
+	/// The inbound's WireGuard public key, as `/links/inbounds` reports it.
 	pub inbound_public_key: String,
 	/// Needed when `transports` lists tls or ws.
 	pub transport_public_key: Option<String>,

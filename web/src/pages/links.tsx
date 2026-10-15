@@ -39,11 +39,12 @@ export function LinksTab() {
 
 // Step 1 on the node that offers: the terms the other node will see, made into a code that holds no secret.
 function OfferFlow({onCompare, onClose}: {onCompare: (pairing: Compare) => void, onClose: () => void}) {
-	const {t, time} = useP(), guard = useGuard(), running = useLoad(loadRunning, []), derived = useLoad(() => api("get", "/profiles/derived") as Promise<{templates: Template[]}>, []);
+	const {t, time} = useP(), guard = useGuard(), running = useLoad(loadRunning, []), derived = useLoad(() => api("get", "/profiles/derived") as Promise<{templates: Template[]}>, []), nodeInbounds = useLoad(() => api("get", "/links/inbounds") as Promise<{inbounds: {tag: string, public_key: string, transport_public_key: string | null}[]}>, []);
 	const inbounds = ((running.data?.document.inbounds ?? []) as {tag: string, type: string}[]).filter(inbound => inbound.type === "veilway").map(inbound => inbound.tag);
 	const [inbound, setInbound] = useState(""), [tag, setTag] = useState(""), [name, setName] = useState(""), [direction, setDirection] = useState("forward"), [key, setKey] = useState(""), [transportKey, setTransportKey] = useState(""), [dialler, setDialler] = useState(""), [listener, setListener] = useState(""), [transports, setTransports] = useState(""), [minutes, setMinutes] = useState<number | "">(10);
 	const [made, setMade] = useState<{id: string, code: string, expires_at: number} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
-	const pick = (tagOf: string) => { const profile = derived.data?.templates.find(template => template.inbound === tagOf)?.profile; setInbound(tagOf); if (profile) { setKey(String(profile.inbound_public_key ?? "")); setTransportKey(String(profile.transport_public_key ?? "")); setTransports(JSON.stringify(profile.transports ?? [], null, 2)); } };
+	const reportedOf = (tagOf: string) => nodeInbounds.data?.inbounds.find(found => found.tag === tagOf);
+	const pick = (tagOf: string) => { const profile = derived.data?.templates.find(template => template.inbound === tagOf)?.profile, reported = reportedOf(tagOf); setInbound(tagOf); setKey(reported?.public_key ?? ""); setTransportKey(reported?.transport_public_key ?? ""); if (profile) { setTransports(JSON.stringify(profile.transports ?? [], null, 2)); } };
 	const offer = async () => {
 		setError(null);
 		let parsed: unknown;
@@ -72,8 +73,8 @@ function OfferFlow({onCompare, onClose}: {onCompare: (pairing: Compare) => void,
 				<TextField label={t("links.tag")} hint={t("links.tagHint")} value={tag} onChange={value => setTag(value.toLowerCase())} technical required/>
 				<TextField label={t("links.name")} hint={t("links.nameHint")} value={name} onChange={setName} maxLength={64} required/>
 			</div>
-			<TextField label={t("profiles.inboundKey")} hint={t("profiles.inboundKeyHint")} value={key} onChange={setKey} technical required/>
-			<TextField label={t("links.transportKey")} hint={t("links.transportKeyHint")} value={transportKey} onChange={setTransportKey} technical optional/>
+			<TextField label={t("profiles.inboundKey")} hint={t("profiles.inboundKeyHint")} value={key} onChange={setKey} readOnly={Boolean(reportedOf(inbound)?.public_key)} technical required/>
+			<TextField label={t("links.transportKey")} hint={t("links.transportKeyHint")} value={transportKey} onChange={setTransportKey} readOnly={Boolean(reportedOf(inbound)?.transport_public_key)} technical optional/>
 			<LinesField label={t("links.dialler")} hint={t("links.diallerHint")} value={dialler} onChange={setDialler} rows={2}/>
 			{direction === "reverse" && <LinesField label={t("links.listener")} hint={t("links.listenerHint")} value={listener} onChange={setListener} rows={2}/>}
 			<Field label={t("links.transports")} hint={t("links.transportsHint")}>{ids => <textarea {...ids} className="vw-input vw-code p-textarea" dir="ltr" spellCheck={false} rows={6} value={transports} onChange={event => setTransports(event.target.value)}/>}</Field>
