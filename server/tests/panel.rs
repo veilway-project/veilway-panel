@@ -1,4 +1,4 @@
-use axum::{body::Body, extract::ConnectInfo, http::{header::{CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE}, HeaderMap, Method, Request, StatusCode}, routing::{get, post}, Json, Router};
+use axum::{body::Body, extract::{ConnectInfo, State}, http::{header::{CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE}, HeaderMap, Method, Request, StatusCode}, routing::{get, post}, Json, Router};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
@@ -413,7 +413,7 @@ async fn web_pages_load_without_a_session() {
 	let h = Harness::new().await;
 	let page = h.call(Method::GET, "/p/", None, None, "10.0.0.1").await;
 	assert_eq!((page.status, page.headers.get("x-robots-tag").map(|value| value.to_str().unwrap().to_string())), (StatusCode::OK, Some("noindex".to_string())));
-	assert_eq!(h.call(Method::GET, "/p", None, None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::GET, "/p", None, None, "10.0.0.1").await.status, StatusCode::PERMANENT_REDIRECT);
 	assert_eq!(h.call(Method::GET, "/p/login/deep", None, None, "10.0.0.1").await.status, StatusCode::OK);
 	let robots = h.call(Method::GET, "/robots.txt", None, None, "10.0.0.1").await;
 	assert_eq!(robots.body, b"User-agent: *\nDisallow: /p/\n".to_vec());
@@ -505,4 +505,193 @@ fn signing_keys_must_be_private() {
 	std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 	assert!(Signing::load(&path).is_err());
 	let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A node that keeps one config and answers the way the real control API does: a revision per applied change, If-Match, validate and diff, and the stats routes.
+struct Fake {document: Mutex<Value>, generation: Mutex<u64>, stats: Mutex<Value>, sessions: Mutex<Value>, applied: Mutex<Vec<Value>>, dir: PathBuf}
+
+impl Fake {
+	async fn start(document: Value) -> (Arc<Fake>, PathBuf) {
+		let dir = std::env::temp_dir().join(format!("vwfake-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
+		std::fs::create_dir_all(&dir).unwrap();
+		let socket = dir.join("control.sock");
+		let fake = Arc::new(Fake {document: Mutex::new(document), generation: Mutex::new(1), stats: Mutex::new(json!({})), sessions: Mutex::new(json!({"sessions": []})), applied: Mutex::new(Vec::new()), dir});
+		let node = Router::new()
+			.route("/v1/config", get(|State(fake): State<Arc<Fake>>| async move {
+				let generation = *fake.generation.lock().unwrap();
+				Json(json!({"revision": format!("rev{generation}"), "generation": generation, "document": fake.document.lock().unwrap().clone()}))
+			}).put(|State(fake): State<Arc<Fake>>, headers: HeaderMap, Json(document): Json<Value>| async move {
+				let mut generation = fake.generation.lock().unwrap();
+				if headers.get("if-match").unwrap() != &format!("\"rev{generation}\"") {return (StatusCode::CONFLICT, Json(json!({"error": {"code": "stale"}})))}
+				*generation += 1;
+				fake.applied.lock().unwrap().push(document.clone());
+				*fake.document.lock().unwrap() = document;
+				(StatusCode::OK, Json(json!({"revision": format!("rev{generation}"), "generation": *generation, "saved": true, "diff": {}, "report": {}})))
+			}))
+			.route("/v1/config/validate", post(|Json(document): Json<Value>| async move {Json(json!({"valid": document.get("invalid").is_none(), "report": {"errors": [], "warnings": []}}))}))
+			.route("/v1/config/diff", post(|Json(_): Json<Value>| async move {Json(json!({"valid": true, "report": {}, "diff": {"inbounds": {"added": ["x"]}}}))}))
+			.route("/v1/status", get(|| async {Json(json!({"version": "0.0.0", "uptime_secs": 5, "generation": 1}))}))
+			.route("/v1/stats", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.stats.lock().unwrap().clone())}))
+			.route("/v1/sessions", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.sessions.lock().unwrap().clone())}))
+			.route("/v1/exits", get(|| async {Json(json!({"exits": [{"tag": "main", "udp": true}]}))}))
+			.route("/v1/links", get(|| async {Json(json!({"links": []}))}))
+			.route("/v1/users", get(|| async {Json(json!({"users": []}))}))
+			.with_state(fake.clone());
+		let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+		tokio::spawn(async move {axum::serve(listener, node).await.unwrap();});
+		(fake, socket)
+	}
+}
+
+impl Drop for Fake {
+	fn drop(&mut self) {let _ = std::fs::remove_dir_all(&self.dir);}
+}
+
+fn node_document(pool: &str) -> Value {
+	json!({"version": 1, "dns": {}, "inbounds": [{"tag": "Main", "type": "veilway", "private_key": "<redacted>", "address": [pool], "transports": [{"type": "udp", "listen": "0.0.0.0:51820"}, {"type": "udp-obfs", "listen": "0.0.0.0:51821"}]}], "outbounds": [{"tag": "plain", "type": "direct"}], "exits": [], "routing": {"default": "main", "rules": []}, "users": [{"name": "ghost"}]})
+}
+
+#[tokio::test]
+async fn config_sections_validate_diff_and_apply_through_the_node() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	let read = h.token(&session, "read", json!({})).await;
+	let full = h.token(&session, "full", json!({})).await;
+	let whole = h.call(Method::GET, "/p/api/config", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((whole["revision"].clone(), whole["document"].get("users").is_none()), (json!("rev1"), true), "the panel owns the users");
+	assert!(h.call(Method::GET, "/p/api/config/schema", Some(&session), None, "10.0.0.1").await.json().is_object());
+	let section = h.call(Method::GET, "/p/api/config/outbounds", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(section["value"][0]["tag"], "plain");
+	assert_eq!(h.call(Method::GET, "/p/api/config/users", Some(&session), None, "10.0.0.1").await.status, StatusCode::NOT_FOUND);
+	assert_eq!(h.bearer(Method::GET, "/p/api/config/exits", &read, None, "10.1.1.1").await.status, StatusCode::OK);
+	let outbounds = json!([{"tag": "plain", "type": "direct"}, {"tag": "proxy", "type": "socks5", "server": "127.0.0.1:1080"}]);
+	assert_eq!(h.bearer(Method::PUT, "/p/api/config/outbounds", &read, Some(json!({"revision": "rev1", "value": outbounds})), "10.1.1.1").await.status, StatusCode::FORBIDDEN);
+	assert_eq!(h.bearer(Method::PUT, "/p/api/config/outbounds", &full, Some(json!({"revision": "rev1", "value": {"not": "a list"}})), "10.1.1.1").await.status, StatusCode::BAD_REQUEST);
+	let diff = h.bearer(Method::POST, "/p/api/config/diff", &full, Some(json!({"document": node_document("10.66.0.1/24")})), "10.1.1.1").await.json();
+	assert_eq!(diff["diff"]["inbounds"]["added"], json!(["x"]));
+	let applied = h.bearer(Method::PUT, "/p/api/config/outbounds", &full, Some(json!({"revision": "rev1", "value": outbounds})), "10.1.1.1").await;
+	assert_eq!(applied.status, StatusCode::OK, "{}", String::from_utf8_lossy(&applied.body));
+	assert_eq!(applied.json()["generation"], 2);
+	let document = fake.applied.lock().unwrap().last().unwrap().clone();
+	assert_eq!((document["outbounds"].clone(), document["users"].clone()), (outbounds, json!([])), "the section changed and the panel's users replaced the node's");
+	let stale = h.bearer(Method::PUT, "/p/api/config/outbounds", &full, Some(json!({"revision": "rev1", "value": []})), "10.1.1.1").await;
+	assert_eq!(stale.status, StatusCode::CONFLICT);
+	let mut bad = node_document("10.66.0.1/24");
+	bad["invalid"] = json!(true);
+	let refused = h.bearer(Method::PUT, "/p/api/config", &full, Some(json!({"revision": "rev2", "document": bad})), "10.1.1.1").await;
+	assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+	assert_eq!(fake.applied.lock().unwrap().len(), 1, "a refused document reaches no apply");
+	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await.json();
+	assert!(audit["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "config.apply" && entry["target"] == "outbounds"));
+}
+
+#[tokio::test]
+async fn profiles_are_derived_from_inbounds_with_overrides_kept() {
+	let (_fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"profiles": [{"id": "other", "name": "Other", "type": "veilway"}]})).await;
+	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
+	let template = &derived["templates"][0];
+	assert_eq!((template["profile"]["id"].clone(), template["profile"]["gateways"].clone(), template["profile"]["mtu"].clone()), (json!("main"), json!(["10.66.0.1"]), json!(1390)));
+	assert_eq!(template["missing"], json!(["inbound_public_key", "node_host"]));
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	settings["node_host"] = json!("192.0.2.10");
+	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(settings), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32]), "name": "Edited"}})), "10.0.0.1").await.status, StatusCode::OK);
+	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
+	let profile = &derived["templates"][0]["profile"];
+	assert_eq!((profile["name"].clone(), profile["transports"][1]["endpoints"].clone(), derived["templates"][0]["missing"].clone()), (json!("Edited"), json!(["192.0.2.10:51821"]), json!([])));
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	let published = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(published["profiles"].as_array().unwrap().iter().map(|profile| profile["id"].as_str().unwrap().to_string()).collect::<Vec<_>>(), vec!["other", "main"]);
+	assert_eq!(published["profile_overrides"]["Main"]["name"], "Edited", "the override stays after a publish");
+}
+
+#[tokio::test]
+async fn stats_are_recorded_per_bucket_and_survive_a_node_restart() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	let rated = |up: u64, down: u64| json!({"users": [{"name": "ann", "traffic": {"up_bytes": up, "down_bytes": down}, "up_bytes_per_sec": 5, "down_bytes_per_sec": 9}], "inbounds": [], "exits": [{"name": "main", "traffic": {"up_bytes": up, "down_bytes": down}, "up_bytes_per_sec": 5, "down_bytes_per_sec": 9}], "outbounds": [], "flows": 2, "drops": {}, "dns": {}});
+	*fake.sessions.lock().unwrap() = json!({"sessions": [{"user": "ann", "device": "d1"}, {"user": "ann", "device": "d2"}]});
+	let mut state = Upkeep::default();
+	for (up, down) in [(1000, 2000), (1100, 2300), (40, 70)] {
+		*fake.stats.lock().unwrap() = rated(up, down);
+		state.polled_at = 0;
+		upkeep_once(&h.app, &mut state).await;
+	}
+	let usage = h.call(Method::GET, "/p/api/stats/usage?kind=user&period=day", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(usage["entries"], json!([{"name": "ann", "up_bytes": 140, "down_bytes": 370}]), "the first poll starts the history, a restart adds the whole new value");
+	let week = h.call(Method::GET, "/p/api/stats/usage?kind=exit&period=week&name=main", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(week["entries"][0]["up_bytes"], 140);
+	for resolution in ["minute", "hour", "day"] {
+		let history = h.call(Method::GET, &format!("/p/api/stats/history?kind=user&name=ann&resolution={resolution}"), Some(&session), None, "10.0.0.1").await.json();
+		assert_eq!((history["points"][0]["down_bytes"].clone(), history["points"][0]["peak_down_bytes_per_sec"].clone()), (json!(370), json!(9)), "{resolution}");
+	}
+	let now = h.call(Method::GET, "/p/api/stats/now", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((now["reachable"].clone(), now["online_users"].clone(), now["sessions"].clone(), now["exits"][0]["tag"].clone()), (json!(true), json!(["ann"]), json!(2), json!("main")));
+	assert_eq!(h.call(Method::GET, "/p/api/stats/usage?kind=nothing", Some(&session), None, "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	h.app.db.lock().execute("update usage_buckets set at = at - 2 * 86400 where res = 60", []).unwrap();
+	veilway_panel::stats::prune(&h.app.db.lock(), crypto::now());
+	let left: i64 = h.app.db.lock().query_row("select count(*) from usage_buckets where res = 60", [], |row| row.get(0)).unwrap();
+	assert_eq!(left, 0, "minutes older than a day are pruned");
+}
+
+#[tokio::test]
+async fn two_nodes_pair_with_codes_and_a_fingerprint_before_the_link_is_in_either_config() {
+	let (listener, socket_a) = Fake::start(node_document("10.66.0.1/24")).await;
+	let (dialler, socket_b) = Fake::start(node_document("10.77.0.1/24")).await;
+	let (a, b) = (Harness::with_socket(Some(socket_a)).await, Harness::with_socket(Some(socket_b)).await);
+	let (sa, sb) = (a.login("10.0.0.1").await, b.login("10.0.0.1").await);
+	let public = base64::engine::general_purpose::STANDARD.encode(x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from([3u8; 32])).as_bytes());
+	let offered = a.call(Method::POST, "/p/api/links/offers", Some(&sa), Some(json!({"tag": "to-b", "inbound": "Main", "direction": "forward", "name": "north exit", "inbound_public_key": public, "dialler": ["10.9.0.2"], "transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820"]}]})), "10.0.0.1").await;
+	assert_eq!(offered.status, StatusCode::OK, "{}", String::from_utf8_lossy(&offered.body));
+	let code = offered.json()["code"].as_str().unwrap().to_string();
+	let seen = b.call(Method::POST, "/p/api/links/paste", Some(&sb), Some(json!({"code": code})), "10.0.0.1").await.json();
+	assert_eq!((seen["half"].clone(), seen["overlaps_pool"].clone(), seen["dials"][0]["address"].clone()), (json!("entry"), json!(false), json!("192.0.2.10:51820")));
+	assert_eq!(b.call(Method::POST, "/p/api/links/paste/answer", Some(&sb), Some(json!({"code": code, "tag": "from-a", "accept": false})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	let answered = b.call(Method::POST, "/p/api/links/paste/answer", Some(&sb), Some(json!({"code": code, "tag": "from-a", "accept": true})), "10.0.0.1").await.json();
+	let (answer, b_groups, b_id) = (answered["answer"].as_str().unwrap().to_string(), answered["fingerprint"].as_str().unwrap().to_string(), answered["id"].as_str().unwrap().to_string());
+	let taken = a.call(Method::POST, "/p/api/links/offers/answer", Some(&sa), Some(json!({"code": answer})), "10.0.0.1").await.json();
+	let (a_groups, a_id) = (taken["fingerprint"].as_str().unwrap().to_string(), taken["id"].as_str().unwrap().to_string());
+	assert_eq!(a_id, b_id);
+	assert_ne!(a_groups, b_groups, "each side shows its own value");
+	assert_eq!(a.call(Method::POST, "/p/api/links/offers/answer", Some(&sa), Some(json!({"code": answer})), "10.0.0.1").await.status, StatusCode::CONFLICT, "an answer is spent");
+	let wrong = a.call(Method::POST, &format!("/p/api/links/pairings/{a_id}/confirm"), Some(&sa), Some(json!({"typed": a_groups, "revision": "rev1"})), "10.0.0.1").await;
+	assert_eq!(wrong.status, StatusCode::FORBIDDEN, "typing its own groups does not confirm");
+	assert!(listener.applied.lock().unwrap().is_empty());
+	let pending = a.call(Method::GET, "/p/api/links/pairings", Some(&sa), None, "10.0.0.1").await.json();
+	assert_eq!((pending["answered"][0]["tries"].clone(), pending["answered"][0]["role"].clone()), (json!(1), json!("listener")));
+	let (ok_a, ok_b) = (a.call(Method::POST, &format!("/p/api/links/pairings/{a_id}/confirm"), Some(&sa), Some(json!({"typed": b_groups, "revision": "rev1"})), "10.0.0.1").await, b.call(Method::POST, &format!("/p/api/links/pairings/{b_id}/confirm"), Some(&sb), Some(json!({"typed": a_groups, "revision": "rev1"})), "10.0.0.1").await);
+	assert_eq!((ok_a.status, ok_b.status), (StatusCode::OK, StatusCode::OK), "{} {}", String::from_utf8_lossy(&ok_a.body), String::from_utf8_lossy(&ok_b.body));
+	let (entry_a, entry_b) = (listener.applied.lock().unwrap().last().unwrap()["links"][0].clone(), dialler.applied.lock().unwrap().last().unwrap()["links"][0].clone());
+	assert_eq!((entry_a["tag"].clone(), entry_a["inbound"].clone(), entry_a["exits"].clone(), entry_a.get("private_key").is_none()), (json!("to-b"), json!("Main"), json!(["main"]), true));
+	assert_eq!((entry_b["tag"].clone(), entry_b.get("exits").is_none(), entry_b["peer"]["transports"][0]["type"].clone(), entry_a["id"].clone()), (json!("from-a"), true, json!("udp"), entry_b["id"].clone()));
+	assert_eq!(entry_a["transport_secret"], entry_b["transport_secret"]);
+	let audit = a.call(Method::GET, "/p/api/audit?limit=1000", Some(&sa), None, "10.0.0.1").await.json();
+	assert!(!audit.to_string().contains(&entry_a["transport_secret"].as_str().unwrap().to_string()) && !audit.to_string().contains(&code), "the audit log holds no code and no secret");
+}
+
+#[tokio::test]
+async fn small_fixes_found_by_the_web_app() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	let bare = h.call(Method::GET, "/p", None, None, "10.0.0.1").await;
+	assert_eq!((bare.status, bare.headers.get("location").unwrap().to_str().unwrap()), (StatusCode::PERMANENT_REDIRECT, "/p/"));
+	let network = h.token(&session, "read", json!({"allowed_sources": ["10.5.0.0/24"]})).await;
+	for (source, status) in [("10.5.0.9", StatusCode::OK), ("10.5.1.9", StatusCode::UNAUTHORIZED)] {
+		assert_eq!(h.bearer(Method::GET, "/p/api/users", &network, None, source).await.status, status, "{source}");
+	}
+	let bad = h.call(Method::POST, "/p/api/tokens", Some(&session), Some(json!({"name": "x", "scope": "read", "allowed_sources": ["10.5.0.0/99"]})), "10.0.0.1").await;
+	assert_eq!(bad.status, StatusCode::BAD_REQUEST);
+	let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	settings["not_found"] = json!({"status": 404, "headers": [["content-type", "text/plain"]], "body": "nothing here"});
+	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(settings.clone()), "10.0.0.1").await.status, StatusCode::OK);
+	let missing = h.call(Method::GET, "/nowhere", None, None, "10.0.0.1").await;
+	assert_eq!((missing.body.clone(), missing.headers.get(CONTENT_TYPE).unwrap().to_str().unwrap().to_string()), (b"nothing here".to_vec(), "text/plain".to_string()));
+	settings["not_found"]["status"] = json!(99);
+	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(settings), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
 }

@@ -32,7 +32,7 @@ pub async fn usage(app: &App) -> HashMap<String, Value> {
 }
 
 /// The `users` of the node's config, from the panel's database. A user with no device is left out, since the node needs one.
-fn users(app: &App) -> Result<Value, String> {
+pub(crate) fn users(app: &App) -> Result<Value, String> {
 	let keys = app.keys.as_ref().ok_or("the key file is missing, so no secret can be opened")?;
 	let db = app.db.lock();
 	subs::expire_pending(&db, now()).map_err(|error| error.to_string())?;

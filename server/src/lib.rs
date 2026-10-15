@@ -6,14 +6,17 @@ pub mod config;
 pub mod crypto;
 pub mod db;
 pub mod http;
+pub mod links;
+pub mod nodecfg;
 pub mod node;
 pub mod openapi;
 pub mod routes;
+pub mod stats;
 pub mod subs;
 pub mod users;
 pub mod web;
 
-use app::{App, Limiter, Signing};
+use app::{App, Limiter, Settings, Signing};
 use axum::{extract::Request, http::{header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS}, HeaderName, HeaderValue, Method}, middleware::{self, Next}, response::Response, routing::{any, get}, Router};
 use auth::{Access, Guard};
 use config::Config;
@@ -29,15 +32,16 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 		(false, _) => None,
 	};
 	let signing = Signing::load(&cfg.signing)?;
+	let not_found = db.lock().query_row("select value from settings where key = 'settings'", [], |row| row.get::<_, String>(0)).ok().and_then(|text| serde_json::from_str::<Settings>(&text).ok()).and_then(|settings| settings.not_found);
 	let setup_needed = db.lock().query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0)).map_err(|error| error.to_string())? == 0;
 	let token = setup_needed.then(|| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<20>()));
 	if let Some(token) = &token {println!("Setup token (one time): {token}\nPOST it with a username and password to {}/api/setup", cfg.prefix);}
-	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: AtomicBool::new(false)}))
+	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: AtomicBool::new(false), not_found_page: Mutex::new(not_found), live: Mutex::new(None), pairing: Mutex::new(links::Pairing::default())}))
 }
 
 /// What the upkeep loop remembers between passes.
 #[derive(Default)]
-pub struct Upkeep {pub cleaned_at: i64, pub retry_at: i64, pub wait: i64}
+pub struct Upkeep {pub cleaned_at: i64, pub retry_at: i64, pub wait: i64, pub polled_at: i64}
 
 /// Runs upkeep every few seconds. The clean-up is hourly; a failed node push is retried, waiting twice as long each time up to ten minutes.
 pub fn spawn_upkeep(app: Arc<App>) {
@@ -57,9 +61,14 @@ pub async fn upkeep_once(app: &Arc<App>, state: &mut Upkeep) {
 		let db = app.db.lock();
 		let _ = db.execute("delete from sessions where last_seen < ? or created < ?", [at - auth::IDLE, at - auth::ABSOLUTE]);
 		let _ = subs::expire_pending(&db, at);
+		stats::prune(&db, at);
 		drop(db);
 		if let Err(error) = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).prune() {tracing::error!("the signing keys could not be pruned: {error}")}
 		if app.keys.is_none() {tracing::error!("the key file is missing: the subscription endpoint answers every request as an unknown path and no secret can be opened")}
+	}
+	if at - state.polled_at >= stats::POLL {
+		state.polled_at = at;
+		stats::poll(app).await;
 	}
 	if app.dirty.load(Ordering::Relaxed) && at >= state.retry_at {
 		state.wait = if node::sync(app).await.is_ok() {0} else {(state.wait * 2).clamp(5, 600)};
@@ -91,6 +100,6 @@ pub fn router(app: Arc<App>) -> Router {
 	let pages = [app.cfg.prefix.clone(), format!("{}/", app.cfg.prefix), format!("{}/{{*path}}", app.cfg.prefix)];
 	for page in &pages {for method in [Method::GET, Method::HEAD] {access.insert((method, page.clone()), Access::Public);}}
 	let guard = Arc::new(Guard {app: app.clone(), access});
-	let admin = api.route(&pages[0], get(web::index)).route(&pages[1], get(web::index)).route(&pages[2], get(web::asset)).route_layer(middleware::from_fn_with_state(guard, auth::guard)).method_not_allowed_fallback(routes::not_found).layer(middleware::from_fn(headers));
+	let admin = api.route(&pages[0], get(web::slash)).route(&pages[1], get(web::index)).route(&pages[2], get(web::asset)).route_layer(middleware::from_fn_with_state(guard, auth::guard)).method_not_allowed_fallback(routes::not_found).layer(middleware::from_fn(headers));
 	Router::new().merge(admin).route(&app.cfg.sub_path, any(subs::endpoint)).route("/robots.txt", get(web::robots)).fallback(routes::not_found).with_state(app)
 }

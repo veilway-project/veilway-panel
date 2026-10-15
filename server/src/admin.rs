@@ -1,10 +1,10 @@
 //! Admin accounts: setup, login, TOTP, sessions, API tokens, the audit log, settings, signing keys and the node.
 use crate::{app::{bucket, App, Settings, SigningEntry}, auth::{Agent, COOKIE_NAME, TOKEN_PREFIX}, crypto::{self, now}, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
 use argon2::{password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
-use axum::{extract::{Path, Query, State}, http::{header::SET_COOKIE, HeaderValue, StatusCode}, response::Response, Extension};
+use axum::{extract::{Path, Query, State}, http::{header::SET_COOKIE, HeaderName, HeaderValue, StatusCode}, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use data_encoding::BASE32_NOPAD;
-use ipnet::Ipv4Net;
+use ipnet::{IpNet, Ipv4Net};
 use rusqlite::{params, OptionalExtension};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -19,9 +19,14 @@ const DELAY_AFTER: usize = 5;
 /// Argon2 is memory-hard, so the checks that run at once are capped.
 static ARGON: Semaphore = Semaphore::const_new(4);
 
-fn hash_password(password: &str) -> Result<String, Failure> {
+fn hash_blocking(password: &str) -> Result<String, Failure> {
 	let salt = SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
 	Argon2::default().hash_password(password.as_bytes(), &salt).map(|hash| hash.to_string()).map_err(Failure::internal)
+}
+
+async fn hash_password(password: String) -> Result<String, Failure> {
+	let _permit = ARGON.acquire().await.map_err(Failure::internal)?;
+	tokio::task::spawn_blocking(move || hash_blocking(&password)).await.map_err(Failure::internal)?
 }
 
 async fn check_password(hash: String, password: String) -> bool {
@@ -32,7 +37,7 @@ async fn check_password(hash: String, password: String) -> bool {
 /// What a login that fails checks against, so an unknown name costs the same time as a known one.
 fn dummy() -> &'static str {
 	static DUMMY: OnceLock<String> = OnceLock::new();
-	DUMMY.get_or_init(|| hash_password("not a password anyone has").unwrap_or_default())
+	DUMMY.get_or_init(|| hash_blocking("not a password anyone has").unwrap_or_default())
 }
 
 fn password_ok(password: &str) -> Result<(), Failure> {
@@ -75,7 +80,7 @@ pub async fn setup(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	if !expected.is_some_and(|expected| crypto::equal(expected.as_bytes(), input.token.as_bytes())) {return Err(Failure::new(StatusCode::FORBIDDEN, "bad_setup_token", "The setup token is wrong, or setup is done."))}
 	username_ok(&input.username)?;
 	password_ok(&input.password)?;
-	let hash = hash_password(&input.password)?;
+	let hash = hash_password(input.password.clone()).await?;
 	let (sealed, record, shown) = new_totp(&app, &input.username)?;
 	{
 		let db = app.db.lock();
@@ -235,7 +240,7 @@ pub struct NewPassword {pub new_password: String}
 /// Every other session of the admin ends when the password or the TOTP secret changes.
 pub async fn change_password(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<NewPassword>) -> Result<Response, Failure> {
 	password_ok(&input.new_password)?;
-	let hash = hash_password(&input.new_password)?;
+	let hash = hash_password(input.new_password.clone()).await?;
 	let db = app.db.lock();
 	db.execute("update admins set password_hash = ? where id = ?", params![hash, ctx.admin_id])?;
 	db.execute("delete from sessions where admin_id = ? and id != ?", params![ctx.admin_id, ctx.session_id.clone().unwrap_or_default()])?;
@@ -259,7 +264,7 @@ pub struct NewAdmin {pub username: String, pub password: String}
 pub async fn create_admin(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<NewAdmin>) -> Result<Response, Failure> {
 	username_ok(&input.username)?;
 	password_ok(&input.password)?;
-	let hash = hash_password(&input.password)?;
+	let hash = hash_password(input.password.clone()).await?;
 	let (sealed, record, shown) = new_totp(&app, &input.username)?;
 	let db = app.db.lock();
 	db.execute("insert into admins (username, password_hash, totp_secret, totp_record, created) values (?, ?, ?, ?, ?)", params![input.username, hash, sealed, record, now()])?;
@@ -323,7 +328,7 @@ pub struct TokenCreated {pub id: i64, pub name: String, pub scope: String,
 
 pub async fn create_token(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<NewToken>) -> Result<Response, Failure> {
 	if !["read", "users", "full"].contains(&input.scope.as_str()) {return Err(Failure::bad("scope is read, users or full."))}
-	if input.name.is_empty() || input.name.chars().count() > 64 || input.expires_at.is_some_and(|at| at <= now()) || input.allowed_sources.len() > 32 || input.allowed_sources.iter().any(|source| source.parse::<std::net::IpAddr>().is_err()) {return Err(Failure::bad("A token has a name of 1 to 64 characters, an expiry in the future and at most 32 source addresses."))}
+	if input.name.is_empty() || input.name.chars().count() > 64 || input.expires_at.is_some_and(|at| at <= now()) || input.allowed_sources.len() > 32 || input.allowed_sources.iter().any(|source| source.parse::<IpNet>().is_err() && source.parse::<std::net::IpAddr>().is_err()) {return Err(Failure::bad("A token has a name of 1 to 64 characters, an expiry in the future and at most 32 source addresses or networks."))}
 	let token = format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(crypto::random::<32>()));
 	let db = app.db.lock();
 	db.execute("insert into api_tokens (admin_id, name, scope, token_hash, prefix, expires_at, sources, created) values (?, ?, ?, ?, ?, ?, ?, ?)", params![ctx.admin_id, input.name, input.scope, crypto::sha256(token.as_bytes()).as_slice(), &token[..TOKEN_PREFIX.len() + 4], input.expires_at, serde_json::to_string(&input.allowed_sources).unwrap_or_default(), now()])?;
@@ -360,8 +365,12 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 	if input.endpoint_pins.len() > 2 || input.endpoint_pins.iter().any(|pin| STANDARD.decode(pin).map_or(true, |bytes| bytes.len() != 32)) {return Err(Failure::bad("endpoint_pins is at most two SHA-256 pins in standard base64."))}
 	if !(900..=604_800).contains(&input.update_interval) || !(1..=90).contains(&input.document_days) || input.provider_name.is_empty() || input.provider_name.chars().count() > 64 {return Err(Failure::bad("update_interval is 900 to 604800, document_days is 1 to 90 and provider_name is 1 to 64 characters."))}
 	if input.profiles.len() > 64 || input.profiles.iter().any(|profile| !profile.is_object() || profile.get("device").is_some()) || input.refresh_mirrors.len() > 4 {return Err(Failure::bad("profiles are at most 64 objects without a device, and refresh_mirrors at most 4."))}
+	if let Some(page) = &input.not_found {
+		if !(200..=599).contains(&page.status) || page.headers.len() > 16 || page.body.len() > 65_536 || page.headers.iter().any(|(name, value)| HeaderName::try_from(name.as_str()).is_err() || HeaderValue::from_str(value).is_err()) {return Err(Failure::bad("not_found is a status from 200 to 599, at most 16 valid headers and a body of at most 64 KB."))}
+	}
 	let before = app.settings();
 	app.save_settings(&input);
+	*app.not_found_page.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = input.not_found.clone();
 	let db = app.db.lock();
 	if input.show_links_once && !before.show_links_once {db.execute("update users set token_copy = null", [])?;}
 	audit(&db, &ctx.actor, &ctx.source, "settings.update", "settings", if before.profiles != input.profiles {"profiles changed"} else {""});

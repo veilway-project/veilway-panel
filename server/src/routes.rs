@@ -1,5 +1,5 @@
 //! The route table. One list builds both the router and `openapi.json`, so the document cannot say anything else than what is served.
-use crate::{admin, app::{App, Settings}, auth::Access, http::ErrorBody, users};
+use crate::{admin, app::{App, Settings}, auth::Access, http::ErrorBody, links, nodecfg, stats, users};
 use axum::{extract::State, handler::Handler, http::{header::CONTENT_TYPE, HeaderValue, Method, StatusCode}, response::{IntoResponse, Response}, routing::{on, MethodFilter, MethodRouter}};
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use std::{any::TypeId, sync::Arc};
@@ -74,6 +74,28 @@ pub fn routes(schemas: &mut SchemaGenerator) -> Vec<Route> {
 		route::<Nothing, users::SubscriptionInfo, _, _>(s, M::GET, "/users/{id}/subscription", "getSubscription", "Non-secret facts about a user's subscription.", Access::Read, users::sub_info),
 		route::<Nothing, users::LinkView, _, _>(s, M::POST, "/users/{id}/subscription/show", "showLink", "Opens the sealed copy of the link, with its QR code. Needs a recent re-authentication and is audited without the link.", Access::AdminReauth, users::sub_show),
 		route::<users::ResetLink, users::LinkReset, _, _>(s, M::POST, "/users/{id}/subscription/reset", "resetLink", "Makes a new token. The old one stops working. The answer lists the devices enrolled with the old link and removes them when asked.", Access::Users, users::sub_reset),
+
+		route::<Nothing, serde_json::Value, _, _>(s, M::GET, "/config/schema", "configSchema", "The core's config schema (`veilway schema`), for an editor. The node's own validation is the authority.", Access::Read, nodecfg::schema),
+		route::<Nothing, serde_json::Value, _, _>(s, M::GET, "/config", "getConfig", "The config the node runs without its users, which the panel owns, secrets as the node's marker, and its revision.", Access::Read, nodecfg::get_config),
+		route::<nodecfg::ConfigIn, serde_json::Value, _, _>(s, M::PUT, "/config", "putConfig", "Replaces the whole document: validated on the node, then applied with If-Match set to the revision given. The panel's users are put in. The answer is the node's.", Access::Full, nodecfg::put_config),
+		route::<nodecfg::DocumentIn, serde_json::Value, _, _>(s, M::POST, "/config/validate", "validateConfig", "Asks the node whether a document is valid. Nothing changes.", Access::Full, nodecfg::validate),
+		route::<nodecfg::DocumentIn, serde_json::Value, _, _>(s, M::POST, "/config/diff", "diffConfig", "What applying a document would add, change and remove on the node. Nothing changes.", Access::Full, nodecfg::diff),
+		route::<Nothing, serde_json::Value, _, _>(s, M::GET, "/config/{section}", "getConfigSection", "One of inbounds, outbounds, exits and routing as the node runs it, with the revision to change it on.", Access::Read, nodecfg::get_section),
+		route::<nodecfg::SectionIn, serde_json::Value, _, _>(s, M::PUT, "/config/{section}", "putConfigSection", "Replaces one section and applies the result like putConfig. A secret left as the node's marker keeps its value.", Access::Full, nodecfg::put_section),
+		route::<Nothing, serde_json::Value, _, _>(s, M::GET, "/profiles/derived", "derivedProfiles", "A `veilway` profile template per inbound, made from the node's config and the overrides, with what each still lacks.", Access::Read, nodecfg::derived_profiles),
+		route::<nodecfg::OverrideIn, serde_json::Value, _, _>(s, M::PUT, "/profiles/overrides/{inbound}", "putProfileOverride", "Sets the members that replace the derived ones for an inbound. An empty object clears them.", Access::Full, nodecfg::put_override),
+		route::<Nothing, serde_json::Value, _, _>(s, M::POST, "/profiles/publish", "publishProfiles", "Writes the derived templates into the settings' profiles, which the subscription endpoint serves. Refused while one lacks a member.", Access::AdminReauth, nodecfg::publish_profiles),
+		route::<Nothing, serde_json::Value, _, _>(s, M::GET, "/links", "listLinks", "The node's links with their state, as the node reports them.", Access::Read, links::list),
+		route::<links::OfferIn, serde_json::Value, _, _>(s, M::POST, "/links/offers", "offerLink", "Step 1: makes an offer code for another node, good for the lifetime given. It holds no secret and says where this node is reached.", Access::AdminReauth, links::offer),
+		route::<Nothing, serde_json::Value, _, _>(s, M::GET, "/links/pairings", "listPairings", "Open offers and answered pairings that wait for the fingerprint.", Access::Admin, links::pending),
+		route::<links::CodeIn, serde_json::Value, _, _>(s, M::POST, "/links/offers/answer", "takeAnswer", "Step 3: takes the other node's answer code. The answer is the fingerprint to read to the other operator.", Access::AdminReauth, links::take_answer),
+		route::<links::CodeIn, serde_json::Value, _, _>(s, M::POST, "/links/paste", "pasteOffer", "Step 2, read only: where an offer pasted here would make this node dial, and whether its addresses clash with an inbound pool.", Access::Admin, links::paste),
+		route::<links::PasteIn, serde_json::Value, _, _>(s, M::POST, "/links/paste/answer", "answerOffer", "Step 2: answers an offer after its addresses were accepted. The answer code is shown once.", Access::AdminReauth, links::paste_answer),
+		route::<links::ConfirmIn, serde_json::Value, _, _>(s, M::POST, "/links/pairings/{id}/confirm", "confirmPairing", "Step 4: confirms with the eight groups the other operator reads out. Only then the link goes into the node's config, through the same apply as putConfig. Five wrong tries drop the pairing.", Access::AdminReauth, links::confirm),
+		route::<Nothing, admin::Done, _, _>(s, M::DELETE, "/links/pairings/{id}", "dropPairing", "Drops a pairing that is waiting.", Access::Admin, links::drop_pairing),
+		route::<Nothing, stats::Live, _, _>(s, M::GET, "/stats/now", "statsNow", "Speed now and the node's state: rates by user, inbound, exit and outbound, exit states, sessions, online users and health, as of the last poll.", Access::Read, stats::now_view),
+		route::<Nothing, stats::UsageOut, _, _>(s, M::GET, "/stats/usage", "statsUsage", "Bytes carried over a day, week, month or year by user, inbound, exit or outbound. Query: kind, period, name.", Access::Read, stats::usage),
+		route::<Nothing, stats::HistoryOut, _, _>(s, M::GET, "/stats/history", "statsHistory", "The buckets of one name: minutes for a day, hours for a month, days for a year. Query: kind, name, resolution, since.", Access::Read, stats::history),
 	]
 }
 

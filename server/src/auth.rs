@@ -42,6 +42,12 @@ fn source(app: &App, request: &Request) -> String {
 	request.headers().get("x-forwarded-for").and_then(|value| value.to_str().ok()).and_then(|value| value.rsplit(',').next()).and_then(|last| last.trim().parse::<std::net::IpAddr>().ok().or_else(|| last.trim().parse::<SocketAddr>().ok().map(|addr| addr.ip()))).map(|ip| ip.to_string()).unwrap_or(peer)
 }
 
+/// Whether the source is one of the token's addresses or inside one of its networks.
+fn source_allowed(allowed: &[String], source: &str) -> bool {
+	let Ok(ip) = source.parse::<std::net::IpAddr>() else {return allowed.iter().any(|entry| entry == source)};
+	allowed.iter().any(|entry| entry.parse::<ipnet::IpNet>().or_else(|_| entry.parse::<std::net::IpAddr>().map(ipnet::IpNet::from)).is_ok_and(|net| net.contains(&ip)))
+}
+
 fn refuse(status: StatusCode, code: &'static str, message: &str) -> Response {Failure::new(status, code, message).into_response()}
 
 pub fn cookie_value(request: &Request, name: &str) -> Option<String> {
@@ -79,7 +85,7 @@ pub async fn guard(State(guard): State<Arc<Guard>>, mut request: Request, next: 
 		let found = app.db.lock().query_row("select t.id, t.name, t.scope, t.expires_at, t.sources, t.revoked_at, a.id from api_tokens t join admins a on a.id = t.admin_id where t.token_hash = ?", [hash.as_slice()], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<i64>>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, i64>(6)?))).optional().unwrap_or(None);
 		let Some((id, name, scope, expires, sources, revoked, admin_id)) = found else {return refuse(StatusCode::UNAUTHORIZED, "unauthorized", "The token is not valid.")};
 		let allowed: Vec<String> = serde_json::from_str(&sources).unwrap_or_default();
-		if revoked.is_some() || expires.is_some_and(|at| at <= now()) || (!allowed.is_empty() && !allowed.contains(&source)) {return refuse(StatusCode::UNAUTHORIZED, "unauthorized", "The token is not valid.")}
+		if revoked.is_some() || expires.is_some_and(|at| at <= now()) || (!allowed.is_empty() && !source_allowed(&allowed, &source)) {return refuse(StatusCode::UNAUTHORIZED, "unauthorized", "The token is not valid.")}
 		if !app.limits.hit(&format!("tok:{id}"), 120, 60) {return refuse(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "This token is over its limit.")}
 		let permitted = match access {
 			Access::Public | Access::Read => true,

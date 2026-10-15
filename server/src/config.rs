@@ -1,9 +1,10 @@
 //! The panel's own file: where it listens, its two paths, where its secrets and database live and how it reaches the node.
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::{fs, net::SocketAddr, path::PathBuf};
 
 /// What the endpoint (and every path the panel does not serve) answers to a request it will not take. The operator copies it from the web server in front, see "The endpoint" on the subscription format page.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct NotFound {
 	pub status: u16,

@@ -1,5 +1,5 @@
 //! The state every handler shares: configuration, database, keys, signing keys, limits and the settings.
-use crate::{config::Config, crypto::{self, now, Keys}, db::Db};
+use crate::{config::{Config, NotFound}, crypto::{self, now, Keys}, db::Db};
 use axum::{body::Body, http::{HeaderName, HeaderValue, StatusCode}, response::Response};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -103,11 +103,17 @@ pub struct Settings {
 	pub refresh_mirrors: Vec<Value>,
 	/// One profile per inbound, in the shape of "A profile" on the subscription format page, without `device`. The panel adds the device.
 	pub profiles: Vec<Value>,
+	/// Edits to the profiles derived from the node's inbounds, by inbound tag: an object whose members replace the derived ones.
+	pub profile_overrides: serde_json::Map<String, Value>,
+	/// The public host or address of this node, which the profiles' endpoints are made with.
+	pub node_host: String,
+	/// What the endpoint answers to a request it will not take, instead of the config file's. Null keeps the file's.
+	pub not_found: Option<NotFound>,
 }
 
 impl Default for Settings {
 	fn default() -> Self {
-		Self {provider_name: "Veilway".into(), endpoint_url: String::new(), endpoint_pins: Vec::new(), pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), profiles: Vec::new()}
+		Self {provider_name: "Veilway".into(), endpoint_url: String::new(), endpoint_pins: Vec::new(), pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None}
 	}
 }
 
@@ -124,6 +130,12 @@ pub struct App {
 	pub last_sync: Mutex<Option<String>>,
 	/// Set when the node's config was not brought up to date, and cleared by the next push that works.
 	pub dirty: AtomicBool,
+	/// The settings' answer for unknown paths, kept here so a stranger's request never reads the database.
+	pub not_found_page: Mutex<Option<NotFound>>,
+	/// What the last poll of the node's stats saw.
+	pub live: Mutex<Option<crate::stats::Live>>,
+	/// Node link pairing, all in memory: an offer, its answer and the fingerprint wait here until the operator confirms, and a restart drops them.
+	pub pairing: Mutex<crate::links::Pairing>,
 }
 
 impl App {
@@ -131,9 +143,10 @@ impl App {
 	pub fn save_settings(&self, settings: &Settings) {let _ = self.db.lock().execute("insert into settings (key, value) values ('settings', ?) on conflict (key) do update set value = excluded.value", [serde_json::to_string(settings).unwrap_or_default()]);}
 	/// The one answer for everything the panel does not serve: what the operator's web server says for a path it does not know.
 	pub fn not_found(&self) -> Response {
-		let mut response = Response::new(Body::from(self.cfg.not_found.body.clone()));
-		*response.status_mut() = StatusCode::from_u16(self.cfg.not_found.status).unwrap_or(StatusCode::NOT_FOUND);
-		for (name, value) in &self.cfg.not_found.headers {
+		let page = self.not_found_page.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone().unwrap_or_else(|| self.cfg.not_found.clone());
+		let mut response = Response::new(Body::from(page.body.clone()));
+		*response.status_mut() = StatusCode::from_u16(page.status).unwrap_or(StatusCode::NOT_FOUND);
+		for (name, value) in &page.headers {
 			if let (Ok(name), Ok(value)) = (HeaderName::try_from(name.as_str()), HeaderValue::from_str(value)) {response.headers_mut().append(name, value);}
 		}
 		response

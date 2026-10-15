@@ -1,6 +1,6 @@
 //! The React app, embedded at build time from `web/dist`, and a placeholder while that folder is empty.
 use crate::app::App;
-use axum::{body::Body, extract::{Path, State}, http::{header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE}, HeaderName, HeaderValue, StatusCode}, response::Response};
+use axum::{body::Body, extract::{Path, State}, http::{header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, CONTENT_TYPE}, HeaderName, HeaderValue, StatusCode}, response::{Redirect, Response}};
 use rust_embed::RustEmbed;
 use std::sync::Arc;
 
@@ -17,6 +17,9 @@ fn kind(path: &str) -> &'static str {
 		"png" => "image/png", "ico" => "image/x-icon", "woff2" => "font/woff2", "txt" => "text/plain", _ => "application/octet-stream",
 	}
 }
+
+/// The bare prefix goes to the prefix with a slash, which is where the app's relative asset paths resolve.
+pub async fn slash(State(app): State<Arc<App>>) -> Redirect {Redirect::permanent(&format!("{}/", app.cfg.prefix))}
 
 pub async fn index(State(app): State<Arc<App>>) -> Response {file(&app, "index.html")}
 
