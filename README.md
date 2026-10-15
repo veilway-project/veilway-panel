@@ -68,6 +68,12 @@ docker run --rm --cpus 3 --memory 3g -v "$PWD":/w/veilway-panel -v "$PWD/../veil
 
 After a change to a route or a type, regenerate `server/openapi.json` with the same command, using `sh -c "cargo run -- openapi > openapi.json"` in place of `cargo test`. A test fails when the file is stale.
 
+## Run with Docker
+
+The install script is the recommended way; Docker is an option. Images for linux/amd64 and linux/arm64 are published to `ghcr.io/veilway-project/veilway-panel` on each `v*` tag. The image runs as a non-root user, and its config and data live in volumes. The panel listens on `127.0.0.1` only, so it needs a web server with TLS in front of it, and it needs the node's control socket.
+
+[deploy/compose](https://github.com/veilway-project/veilway/tree/main/deploy/compose) in the core repo runs the node and the panel together, with the steps for the config, the socket volume and the web server.
+
 ## The API
 
 The admin API sits under `{prefix}/api`. The route table in `server/src/routes.rs` builds both the router and `openapi.json`, so the file always describes the running code.

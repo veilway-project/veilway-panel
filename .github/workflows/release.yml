@@ -1,0 +1,98 @@
+name: release
+# Publishes on v* tags. Started by hand on main it runs the same builds without publishing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    runs-on: ubuntu-latest
+    steps:
+      # The server depends on the core by path (../../veilway) and the web app on the design system (../../veilway-ui), so all three sit side by side under ws/.
+      - uses: actions/checkout@v7
+        with:
+          path: ws/veilway-panel
+      - uses: actions/checkout@v7
+        with:
+          repository: veilway-project/veilway
+          path: ws/veilway
+      - uses: actions/checkout@v7
+        with:
+          repository: veilway-project/veilway-ui
+          path: ws/veilway-ui
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Build the web app
+        working-directory: ws/veilway-panel/web
+        run: |
+          npm ci
+          npm run build
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ws/veilway-panel/server
+          key: ${{ matrix.target }}
+      - uses: goto-bus-stop/setup-zig@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - name: Build
+        working-directory: ws/veilway-panel/server
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }} --bin veilway-panel
+      - name: Stage asset
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p dist
+          cp "ws/veilway-panel/server/target/$TARGET/release/veilway-panel" "dist/veilway-panel-$TARGET"
+      - uses: actions/upload-artifact@v7
+        if: github.ref_type == 'tag'
+        with:
+          name: veilway-panel-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    if: github.ref_type == 'tag' && !cancelled() && needs.build.result == 'success'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      # RELEASE_SIGNING_KEY holds the contents of an unencrypted minisign secret key file (minisign -G -W).
+      # The trusted comment binds each signature to the tag and the asset name, so a signature cannot be reused for another file.
+      - name: Sign assets
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "::warning::RELEASE_SIGNING_KEY is not set, skipping minisign: this release is published without .minisig files"
+            exit 0
+          fi
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q minisign
+          umask 077
+          trap 'rm -f "$RUNNER_TEMP/minisign.key"' EXIT
+          printf "%s\n" "$RELEASE_SIGNING_KEY" > "$RUNNER_TEMP/minisign.key"
+          for f in dist/*; do minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$f" -t "veilway-panel $REF_NAME $(basename "$f")" </dev/null; done
+          echo "signed every asset in dist with minisign"
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true

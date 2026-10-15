@@ -1,0 +1,12 @@
+.git
+.github
+.claude
+target
+**/target
+**/node_modules
+web/dist
+*.local.md
+**/*.keys
+**/*.pem
+**/*.db
+panel.json
