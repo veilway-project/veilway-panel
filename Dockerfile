@@ -12,6 +12,8 @@ RUN apk add --no-cache git \
 FROM node:22-alpine AS web
 WORKDIR /src/veilway-panel/web
 COPY --from=sources /src/veilway-ui /src/veilway-ui
+# npm links the design system and does not install its own dependencies (fonts, charts), so the build cannot resolve them without this.
+RUN for d in i18n ui; do (cd /src/veilway-ui/packages/$d && npm ci --no-audit --no-fund) || exit 1; done
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./

@@ -34,6 +34,8 @@ jobs:
       - name: Build the web app
         working-directory: ws/veilway-panel/web
         run: |
+          # npm links the design system and does not install its own dependencies, so they are installed first.
+          for d in i18n ui; do (cd ../../veilway-ui/packages/$d && npm ci); done
           npm ci
           npm run build
       - uses: dtolnay/rust-toolchain@stable
