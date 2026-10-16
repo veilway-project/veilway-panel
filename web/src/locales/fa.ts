@@ -1287,7 +1287,7 @@ export const fa: Record<PanelKey, string> = {
 	"xray.name.trojan": "Trojan",
 	"xray.name.shadowsocks": "Shadowsocks",
 	"xray.tagHint": "قوانین و لینک‌ها با این نام به آن اشاره می‌کنند.",
-	"xray.portHint": "ورودی دیگری از آن استفاده نکند.",
+	"xray.portHint": "ورودی دیگری از آن استفاده نکند. Shadowsocks این پورت را برای UDP هم به کار می‌برد، پس آن را برای هر دو باز کنید.",
 	"xray.review": "بازبینی تغییر",
 	"xray.reviewBody": "اعمال این تغییر چه می‌کند. نود آن را همان لحظه می‌گیرد.",
 	"xray.reviewInbound": "ورودی Xray {protocol} روی درگاه {port}",

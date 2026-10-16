@@ -1286,7 +1286,7 @@ export const en = {
 	"xray.name.trojan": "Trojan",
 	"xray.name.shadowsocks": "Shadowsocks",
 	"xray.tagHint": "Rules and links name it.",
-	"xray.portHint": "Not used by another inbound.",
+	"xray.portHint": "Not used by another inbound. Shadowsocks uses this port for UDP as well, so open it for both.",
 	"xray.review": "Review change",
 	"xray.reviewBody": "What applying does. The node takes it at once.",
 	"xray.reviewInbound": "Xray {protocol} inbound on port {port}",

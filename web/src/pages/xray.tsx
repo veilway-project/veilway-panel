@@ -67,7 +67,7 @@ export function XrayForm({inbound, onClose, onDone}: {inbound?: XrayInbound, onC
 			</fieldset>}
 			<div className="p-pair">
 				{!inbound && <TextField label={t("config.col.tag")} hint={t("xray.tagHint")} value={tag} onChange={value => setTag(value.toLowerCase())} technical required/>}
-				<NumberField label={t("xray.port")} hint={t("xray.portHint")} unit="TCP" min={1} max={65535} value={port} onChange={setPort}/>
+				<NumberField label={t("xray.port")} hint={t("xray.portHint")} unit={tls ? "TCP" : "TCP+UDP"} min={1} max={65535} value={port} onChange={setPort}/>
 				<TextField label={t("xray.listen")} hint={t("xray.listenHint")} placeholder="0.0.0.0" value={listen} onChange={setListen} technical optional/>
 			</div>
 			{tls && <TextField label={t("xray.cert")} hint={t("xray.certHint")} placeholder="/etc/ssl/node/fullchain.pem" value={cert} onChange={setCert} technical required/>}
