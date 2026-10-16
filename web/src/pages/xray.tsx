@@ -1,61 +1,83 @@
-import {Banner, Button, DataTable, Dialog, Glass, NumberField, SelectField, StateBlock, TextField, useToast} from "@veilway/ui";
+import {Banner, Button, Dialog, Glass, Icon, IconButton, NumberField, TextField, useToast} from "@veilway/ui";
 import {useState} from "react";
 import {api, type XrayLink} from "../api.ts";
-import {Copyable, ErrorNote, Mark, Qr, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {Copyable, ErrorNote, Mark, Qr, useGuard, useP} from "../kit.tsx";
 
 const PROTOCOLS = ["vless", "trojan", "shadowsocks"] as const;
+export type XrayState = {installed: boolean, release?: string | null, inbounds: {tag: string, managed: boolean}[]};
 
-// Xray inbounds live in the node's config like the others, but the panel makes them so that it holds every user's credential and can hand out links.
-export function XrayTab() {
-	const {t} = useP(), say = useSay(), guard = useGuard(), toast = useToast(), xray = useLoad(() => api("get", "/xray"), []);
-	const [adding, setAdding] = useState(false), [protocol, setProtocol] = useState<string>("vless"), [tag, setTag] = useState(""), [port, setPort] = useState<number | "">(443), [cert, setCert] = useState(""), [key, setKey] = useState(""), [host, setHost] = useState(""), [decoy, setDecoy] = useState("");
-	const [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null);
-	if (xray.error && !xray.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={xray.reload}>{t("action.retry")}</Button>}>{say(xray.error)}</StateBlock>;
-	if (!xray.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
-	const {installed, release, inbounds} = xray.data, tls = protocol !== "shadowsocks";
-	if (!installed) return <StateBlock kind="empty" title={t("xray.missing")}>{t("xray.missingBody")} <span className="vw-code" dir="ltr">scripts/veilway.sh addon xray install</span></StateBlock>;
-	const run = async (work: () => Promise<unknown>, done: string) => {
+// The add-on itself: whether the node has it, and the one way to add an inbound to it.
+export function XraySheet({xray, onAdd}: {xray: XrayState, onAdd: () => void}) {
+	const {t, number} = useP(), made = xray.inbounds.filter(inbound => inbound.managed).length;
+	return <Glass className="p-panel">
+		<div className="p-sheet-head">
+			<div><h2 className="vw-h2">{t("xray.title")}</h2><p>{xray.installed ? t("xray.lead") : t("xray.missingBody")}</p></div>
+			{xray.installed ? <Mark tone="success">{t("xray.installed")}</Mark> : <Mark tone="muted">{t("xray.missing")}</Mark>}
+		</div>
+		{xray.installed ? <>
+			<dl className="p-kv">
+				{xray.release && <><dt>{t("xray.release")}</dt><dd><span className="vw-code">{xray.release}</span></dd></>}
+				<dt>{t("xray.credentials")}</dt><dd>{t("xray.credentialsBody")}</dd>
+				<dt>{t("xray.made")}</dt><dd className="vw-num">{number(made)}</dd>
+			</dl>
+			<div><Button icon="plus" onClick={onAdd}>{t("xray.add")}</Button></div>
+		</> : <span className="vw-code" dir="ltr">scripts/veilway.sh addon xray install</span>}
+	</Glass>;
+}
+
+// The form sits beside the list. Review shows what applying does before the node is asked, since Xray inbounds go to the node in one step.
+export function XrayForm({onClose, onDone}: {onClose: () => void, onDone: () => void}) {
+	const {t, number} = useP(), guard = useGuard(), toast = useToast();
+	const [protocol, setProtocol] = useState<string>("vless"), [tag, setTag] = useState(""), [port, setPort] = useState<number | "">(443), [cert, setCert] = useState(""), [key, setKey] = useState(""), [host, setHost] = useState(""), [decoy, setDecoy] = useState("");
+	const [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [review, setReview] = useState(false), tls = protocol !== "shadowsocks";
+	const create = async () => {
 		setBusy(true);
 		setError(null);
 		try {
-			await guard(work);
-			toast({tone: "success", title: done});
-			setAdding(false);
-			xray.reload();
+			await guard(() => api("post", "/xray/inbounds", {body: {tag: tag.trim(), protocol, port: port === "" ? 0 : port, cert: tls ? cert.trim() : null, key: tls ? key.trim() : null, host: host.trim() || null, decoy: tls ? decoy.trim() || null : null}}));
+			toast({tone: "success", title: t("xray.created", {tag: tag.trim()})});
+			setReview(false);
+			onDone();
 		} catch (failure) {
 			setError(failure);
 		} finally {
 			setBusy(false);
 		}
 	};
-	const create = () => run(() => api("post", "/xray/inbounds", {body: {tag: tag.trim(), protocol, port: port === "" ? 0 : port, cert: tls ? cert.trim() : null, key: tls ? key.trim() : null, host: host.trim() || null, decoy: tls ? decoy.trim() || null : null}}), t("xray.created", {tag: tag.trim()}));
-	return <div className="p-stack">
-		<div className="p-row"><p className="vw-muted p-lead">{t("xray.lead", {release: release ?? ""})}</p><Button size="sm" icon="plus" onClick={() => { setError(null); setAdding(true); }}>{t("xray.add")}</Button></div>
-		{!adding && <ErrorNote error={error}/>}
-		<Glass className="p-pad p-stack">
-			<DataTable caption={t("node.tab.xray")} rows={inbounds} rowKey={row => row.tag} empty={<StateBlock kind="empty" title={t("xray.empty")}>{t("xray.emptyBody")}</StateBlock>} columns={[
-				{id: "tag", header: t("config.col.tag"), cell: row => <span className="p-user"><span className="vw-code">{row.tag}</span><span className="vw-muted vw-small">{row.protocol}</span></span>},
-				{id: "listen", header: t("xray.col.listen"), cell: row => <span className="vw-code" dir="ltr">{row.host ? `${row.host}:${row.port}` : row.listen}</span>},
-				{id: "security", header: t("xray.col.security"), cell: row => row.certificate_missing ? <Mark tone="warning">{t("xray.noCertificate")}</Mark> : <span>{row.security === "tls" ? "TLS" : t("xray.ownEncryption")}</span>},
-				{id: "clients", header: t("xray.col.clients"), cell: row => row.managed ? String(row.clients) : <Mark tone="warning" title={t("xray.unmanagedHint")}>{t("xray.unmanaged")}</Mark>},
-				{id: "remove", header: "", align: "end", cell: row => <div className="p-cluster p-end"><Button size="sm" variant="quiet" disabled={busy} aria-label={t("config.removeName", {name: row.tag})} onClick={() => void run(() => api("delete", "/xray/inbounds/{tag}", {params: {tag: row.tag}}), t("xray.removed", {tag: row.tag}))}>{t("common.remove")}</Button></div>}
-			]}/>
-		</Glass>
-		<Dialog open={adding} onOpenChange={open => { if (!open) setAdding(false); }} title={t("xray.add")} description={t("xray.addBody")}>
-			<form className="p-stack" onSubmit={event => { event.preventDefault(); void create(); }}>
-				<Banner tone="warning" title={t("xray.sharedTitle")}>{t("xray.sharedBody")}</Banner>
-				<SelectField label={t("xray.protocol")} value={protocol} onChange={setProtocol} options={PROTOCOLS.map(value => ({value, label: value, detail: t(`xray.protocol.${value}`)}))}/>
-				<TextField label={t("config.col.tag")} hint={t("config.tagHint")} value={tag} onChange={value => setTag(value.toLowerCase())} technical required autoFocus/>
-				<NumberField label={t("xray.port")} unit="TCP" min={1} max={65535} value={port} onChange={setPort}/>
-				{tls && <TextField label={t("xray.cert")} hint={t("xray.certHint")} placeholder="/etc/ssl/node/fullchain.pem" value={cert} onChange={setCert} technical required/>}
-				{tls && <TextField label={t("xray.key")} placeholder="/etc/ssl/node/privkey.pem" value={key} onChange={setKey} technical required/>}
-				{tls && <TextField label={t("xray.decoy")} hint={t("xray.decoyHint")} placeholder="http://127.0.0.1:8080" value={decoy} onChange={setDecoy} technical optional/>}
-				<TextField label={t("xray.host")} hint={t("xray.hostHint")} value={host} onChange={setHost} technical optional/>
+	return <Glass className="p-panel" aria-labelledby="xray-form-title">
+		<div className="p-sheet-head">
+			<div><h2 className="vw-h2" id="xray-form-title">{t("xray.add")}</h2><p>{t("xray.addBody")}</p></div>
+			<IconButton icon="close" label={t("xray.closeForm")} onClick={onClose}/>
+		</div>
+		<form className="p-stack" onSubmit={event => { event.preventDefault(); setError(null); setReview(true); }}>
+			<fieldset className="p-choices">
+				<legend className="vw-label">{t("xray.protocol")}</legend>
+				{PROTOCOLS.map(value => <label key={value} className="p-choice"><input type="radio" name="xray-protocol" value={value} checked={protocol === value} onChange={() => setProtocol(value)}/><span className="p-choice-head">{t(`xray.name.${value}`)}{protocol === value && <Icon name="check"/>}</span><span>{t(`xray.protocol.${value}`)}</span></label>)}
+			</fieldset>
+			<div className="p-pair">
+				<TextField label={t("config.col.tag")} hint={t("xray.tagHint")} value={tag} onChange={value => setTag(value.toLowerCase())} technical required/>
+				<NumberField label={t("xray.port")} hint={t("xray.portHint")} unit="TCP" min={1} max={65535} value={port} onChange={setPort}/>
+			</div>
+			{tls && <TextField label={t("xray.cert")} hint={t("xray.certHint")} placeholder="/etc/ssl/node/fullchain.pem" value={cert} onChange={setCert} technical required/>}
+			{tls && <TextField label={t("xray.key")} placeholder="/etc/ssl/node/privkey.pem" value={key} onChange={setKey} technical required/>}
+			<TextField label={t("xray.host")} hint={t("xray.hostHint")} value={host} onChange={setHost} technical optional/>
+			{tls && <TextField label={t("xray.decoy")} hint={t("xray.decoyHint")} placeholder="http://127.0.0.1:8080" value={decoy} onChange={setDecoy} technical optional/>}
+			<Banner tone="warning" title={t("xray.sharedTitle")}>{t("xray.sharedBody")}</Banner>
+			{!review && <ErrorNote error={error}/>}
+			<div className="p-form-foot"><Button variant="quiet" onClick={onClose}>{t("action.cancel")}</Button><Button type="submit" variant="primary" disabled={!tag.trim() || port === "" || (tls && (!cert.trim() || !key.trim()))}>{t("xray.review")}</Button></div>
+		</form>
+		<Dialog open={review} onOpenChange={setReview} title={t("review.title")} description={t("xray.reviewBody")}>
+			<div className="p-stack">
+				<ul className="p-changes">
+					<li><Mark tone="success">{t("review.added")}</Mark><span>{t("xray.reviewInbound", {protocol: t(`xray.name.${protocol as "vless"}`), port: port === "" ? "" : number(port, {useGrouping: false})})}</span><span className="vw-code">{tag.trim()}</span></li>
+					<li><Mark tone="info">{t("review.changed")}</Mark><span>{t("xray.reviewUsers")}</span></li>
+					<li><Mark tone="warning">{t("review.changed")}</Mark><span>{t("xray.reviewCap")}</span></li>
+				</ul>
 				<ErrorNote error={error}/>
-				<div className="vw-dialog-foot"><Button onClick={() => setAdding(false)}>{t("action.cancel")}</Button><Button type="submit" variant="primary" disabled={busy || !tag.trim() || port === ""}>{t("xray.create")}</Button></div>
-			</form>
+				<div className="vw-dialog-foot"><Button onClick={() => setReview(false)}>{t("action.cancel")}</Button><Button variant="primary" disabled={busy} onClick={() => void create()}>{t("review.apply")}</Button></div>
+			</div>
 		</Dialog>
-	</div>;
+	</Glass>;
 }
 
 export function XrayLinksDialog({name, links, onClose}: {name: string, links: XrayLink[] | null, onClose: () => void}) {

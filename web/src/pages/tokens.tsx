@@ -29,7 +29,7 @@ export function TokensPage() {
 		<PageHead title={t("tokens.title")} lead={t("tokens.lead")}><Button variant="primary" icon="plus" onClick={add}>{t("tokens.add")}</Button></PageHead>
 		{tokens.error && !tokens.data ? <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={tokens.reload}>{t("action.retry")}</Button>}>{say(tokens.error)}</StateBlock>
 		: !tokens.data ? <StateBlock kind="loading" title={t("common.loading")}/>
-		: <Glass className="p-pad"><DataTable caption={t("tokens.title")} rows={tokens.data.tokens} rowKey={k => String(k.id)} empty={<StateBlock kind="empty" title={t("tokens.empty")} action={<Button variant="primary" icon="plus" onClick={add}>{t("tokens.add")}</Button>}>{t("tokens.emptyBody")}</StateBlock>} columns={[
+		: <Glass className="p-panel"><DataTable caption={t("tokens.title")} rows={tokens.data.tokens} rowKey={k => String(k.id)} empty={<StateBlock kind="empty" title={t("tokens.empty")} action={<Button variant="primary" icon="plus" onClick={add}>{t("tokens.add")}</Button>}>{t("tokens.emptyBody")}</StateBlock>} columns={[
 			{id: "name", header: t("tokens.col.name"), cell: k => <span className="p-user"><span>{k.name}</span><span className="vw-code vw-muted vw-small">{k.prefix}</span></span>},
 			{id: "scope", header: t("tokens.col.scope"), cell: k => scopeLabel(k.scope)},
 			{id: "sources", header: t("tokens.col.sources"), cell: k => k.allowed_sources.length ? <span className="vw-code">{k.allowed_sources.join(", ")}</span> : t("tokens.anywhere")},

@@ -1,40 +1,58 @@
-import {Banner, Button, Checkbox, DataTable, Field, Glass, IconButton, List, ListRow, NumberField, RadioGroup, SelectField, StateBlock, TextField, useToast} from "@veilway/ui";
+import {Banner, Button, Checkbox, Field, Glass, IconButton, List, ListRow, NumberField, RadioGroup, SelectField, StateBlock, TextField, useToast} from "@veilway/ui";
 import {useRef, useState} from "react";
 import {api, ApiError, type NodeLink, type Pairings, type Pasted, type Template} from "../api.ts";
-import {ago, Copyable, ErrorNote, lines, LinesField, Mark, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {ago, Copyable, ErrorNote, lines, LinesField, Mark, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {loadRunning} from "./config.tsx";
 
 type Compare = {id: string, fingerprint: string, name: string};
-const STATE_TONE: Record<string, "success" | "info" | "warning" | "danger" | undefined> = {up: "success", connecting: "info", unreachable: "warning", refused: "danger"};
+const STATE_TONE: Record<string, "success" | "info" | "warning" | "danger" | undefined> = {up: "success", connecting: "warning", unreachable: "danger", refused: "danger"};
 
-export function LinksTab() {
-	const {t, bytes, time} = useP(), say = useSay(), toast = useToast(), links = useLoad(() => api("get", "/links") as Promise<{links: NodeLink[] | null}>, []), pairings = useLoad(() => api("get", "/links/pairings") as Promise<Pairings>, []);
+// This node and every node it is linked to, one card each, with the pairing steps for a new link.
+export function NodesPage({status, reachable, online}: {status: {version?: string, generation?: number, uptime_secs?: number, public_addresses?: string[]} | null, reachable: boolean, online: number | undefined}) {
+	const {t, bytes, time, number} = useP(), say = useSay(), toast = useToast(), links = useLoad(() => api("get", "/links") as Promise<{links: NodeLink[] | null}>, []), pairings = useLoad(() => api("get", "/links/pairings") as Promise<Pairings>, []);
 	const [flow, setFlow] = useState<"offer" | "paste" | null>(null), [compare, setCompare] = useState<Compare | null>(null), [answering, setAnswering] = useState<string | null>(null);
 	const refresh = () => { links.reload(); pairings.reload(); };
 	const toCompare = (next: Compare) => { setFlow(null); setAnswering(null); setCompare(next); pairings.reload(); };
 	const drop = (id: string) => void api("delete", "/links/pairings/{id}", {params: {id}}).then(() => { toast({tone: "success", title: t("links.dropped")}); pairings.reload(); }, failure => toast({tone: "danger", title: say(failure)}));
-	const waiting = pairings.data ? pairings.data.offers.length + pairings.data.answered.length : 0;
-	if (compare) return <Fingerprints pairing={compare} onClose={() => { setCompare(null); refresh(); }}/>;
-	return <div className="p-stack">
-		<div className="p-row"><p className="vw-muted p-lead">{t("links.lead")}</p><div className="p-cluster"><Button variant={flow === "offer" ? "primary" : "secondary"} icon="plus" onClick={() => setFlow(flow === "offer" ? null : "offer")}>{t("links.offer")}</Button><Button variant={flow === "paste" ? "primary" : "secondary"} onClick={() => setFlow(flow === "paste" ? null : "paste")}>{t("links.paste")}</Button></div></div>
+	const waiting = pairings.data ? pairings.data.offers.length + pairings.data.answered.length : 0, span = (seconds: number) => { const found = ago(seconds); return t(found.key, {count: found.count}); };
+	if (compare) return <><PageHead title={t("nav.nodes")}/><Fingerprints pairing={compare} onClose={() => { setCompare(null); refresh(); }}/></>;
+	return <>
+		<PageHead title={t("nav.nodes")} lead={t("links.lead")}>
+			<Button variant={flow === "paste" ? "primary" : "secondary"} onClick={() => setFlow(flow === "paste" ? null : "paste")}>{t("links.paste")}</Button>
+			<Button variant={flow === "offer" ? "secondary" : "primary"} icon="plus" onClick={() => setFlow(flow === "offer" ? null : "offer")}>{t("links.offer")}</Button>
+		</PageHead>
 		{flow === "offer" && <OfferFlow onCompare={toCompare} onClose={() => { setFlow(null); pairings.reload(); }}/>}
 		{flow === "paste" && <PasteFlow onCompare={toCompare} onClose={() => setFlow(null)}/>}
 		{answering && <AnswerStep id={answering} onCompare={toCompare} onClose={() => setAnswering(null)}/>}
+		{links.error && !links.data && <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={links.reload}>{t("action.retry")}</Button>}>{say(links.error)}</StateBlock>}
+		<div className="p-columns p-node-cards">
+			<Glass className="p-node-card p-sheet-new">
+				<div className="p-sheet-head"><div><strong className="vw-code vw-h3">{status?.public_addresses?.[0] ?? t("side.thisNode")}</strong><span className="vw-small vw-muted">{t("nodes.this")}</span></div><Mark tone={reachable ? "success" : "danger"}>{reachable ? t("side.running") : t("side.unreachable")}</Mark></div>
+				<dl>
+					<div><dt>{t("nodes.online")}</dt><dd className="vw-num">{online === undefined ? t("users.usageUnknown") : number(online)}</dd></div>
+					{status?.generation !== undefined && <div><dt>{t("side.config")}</dt><dd className="vw-num">{t("side.configNo", {generation: number(status.generation)})}</dd></div>}
+					{status?.uptime_secs !== undefined && <div><dt>{t("side.uptime")}</dt><dd className="vw-num">{span(status.uptime_secs)}</dd></div>}
+					{status?.version && <div><dt>{t("nodes.version")}</dt><dd className="vw-code">{status.version}</dd></div>}
+				</dl>
+			</Glass>
+			{(links.data?.links ?? []).map(l => <Glass key={l.id} className="p-node-card">
+				<div className="p-sheet-head"><div><strong className="vw-code vw-h3">{l.tag}</strong><span className="vw-small vw-muted" title={t(l.half === "exit" ? "links.half.exit" : "links.half.entry")}>{t(l.half === "exit" ? "nodes.half.exit" : "nodes.half.entry")}</span></div><Mark tone={STATE_TONE[l.state]}>{["up", "connecting", "unreachable", "refused", "ended"].includes(l.state) ? t(`links.state.${l.state as "up"}`) : l.state}</Mark></div>
+				<dl>
+					<div><dt>{t(l.state === "up" ? "nodes.upFor" : "nodes.stateFor")}</dt><dd className="vw-num">{span(l.state_secs)}</dd></div>
+					<div><dt>{t("links.col.traffic")}</dt><dd className="vw-num">{bytes(l.traffic.up_bytes + l.traffic.down_bytes).text}</dd></div>
+					<div><dt>{t("nodes.flows")}</dt><dd className="vw-num">{number(l.flows)}</dd></div>
+				</dl>
+			</Glass>)}
+		</div>
+		{links.data && !(links.data.links ?? []).length && !flow && <Glass className="p-panel"><StateBlock kind="empty" title={t("links.empty")} action={<Button variant="primary" icon="plus" onClick={() => setFlow("offer")}>{t("links.offer")}</Button>}>{t("links.emptyBody")}</StateBlock></Glass>}
 		{pairings.data && waiting > 0 && <Glass className="p-panel">
-			<h2 className="vw-h3">{t("links.waiting")}</h2>
+			<div className="p-sheet-head"><div><h2 className="vw-h2">{t("links.waiting")}</h2><p>{t("print.channel")}</p></div></div>
 			<List label={t("links.waiting")}>
 				{pairings.data.answered.map(p => <ListRow key={p.id} title={p.name} detail={t("links.answeredDetail", {time: time(new Date(p.expires_at * 1000)), tries: 5 - p.tries})} trailing={<><Button size="sm" variant="primary" onClick={() => toCompare({id: p.id, fingerprint: p.fingerprint, name: p.name})}>{t("links.compare")}</Button><IconButton icon="close" label={t("links.drop", {name: p.name})} onClick={() => drop(p.id)}/></>}/>)}
 				{pairings.data.offers.map(p => <ListRow key={p.id} title={p.name} detail={t("links.offerDetail", {time: time(new Date(p.expires_at * 1000))})} trailing={<><Button size="sm" onClick={() => setAnswering(p.id)}>{t("links.pasteAnswer")}</Button><IconButton icon="close" label={t("links.drop", {name: p.name})} onClick={() => drop(p.id)}/></>}/>)}
 			</List>
 		</Glass>}
-		{links.error && !links.data ? <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={links.reload}>{t("action.retry")}</Button>}>{say(links.error)}</StateBlock>
-		: !links.data ? <StateBlock kind="loading" title={t("common.loading")}/>
-		: <Glass className="p-pad"><DataTable caption={t("node.tab.links")} rows={links.data.links ?? []} rowKey={l => l.id} empty={<StateBlock kind="empty" title={t("links.empty")} action={<Button variant="primary" icon="plus" onClick={() => setFlow("offer")}>{t("links.offer")}</Button>}>{t("links.emptyBody")}</StateBlock>} columns={[
-			{id: "tag", header: t("config.col.tag"), cell: l => <span className="p-user"><span className="vw-code">{l.tag}</span><span className="vw-muted vw-small">{t(l.half === "exit" ? "links.half.exit" : "links.half.entry")}</span></span>},
-			{id: "state", header: t("links.col.state"), cell: l => { const since = ago(l.state_secs); return <span className="p-user"><Mark tone={STATE_TONE[l.state]}>{["up", "connecting", "unreachable", "refused", "ended"].includes(l.state) ? t(`links.state.${l.state as "up"}`) : l.state}</Mark><span className="vw-muted vw-small">{t("links.since", {time: t(since.key, {count: since.count})})}</span></span>; }},
-			{id: "traffic", header: t("links.col.traffic"), align: "end", cell: l => <span className="vw-num">{bytes(l.traffic.up_bytes + l.traffic.down_bytes).text}</span>}
-		]}/></Glass>}
-	</div>;
+	</>;
 }
 
 // Step 1 on the node that offers: the terms the other node will see, made into a code that holds no secret.

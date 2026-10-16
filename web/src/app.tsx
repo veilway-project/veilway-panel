@@ -1,13 +1,16 @@
-import {Backdrop, Banner, Button, DEFAULT_SETTINGS, Glass, Icon, List, ListRow, Nav, PRODUCT, Segmented, Shell, StateBlock, ToastProvider, UiProvider, useToast, type NavItem} from "@veilway/ui";
-import {useEffect, useMemo, useState} from "react";
-import {api, session, type Settings} from "./api.ts";
-import {en} from "./locales/en.ts";
+import {Backdrop, Banner, Button, DEFAULT_SETTINGS, Glass, Icon, IconButton, PRODUCT, Segmented, StateBlock, ToastProvider, UiProvider, useToast, type IconName} from "@veilway/ui";
+import {useEffect, useMemo, useRef, useState, type ReactNode} from "react";
+import {api, session, type NodeLink, type Settings} from "./api.ts";
+import {en, type PanelKey} from "./locales/en.ts";
 import {fa} from "./locales/fa.ts";
-import {ErrorNote, GuardProvider, PageHead, useGuard, useLoad, useP, useSay} from "./kit.tsx";
+import {ago, ErrorNote, GuardProvider, useGuard, useLoad, useP, useSay} from "./kit.tsx";
 import {AccountPage, type Prefs} from "./pages/account.tsx";
 import {Login, Setup} from "./pages/auth.tsx";
-import {NodePage} from "./pages/config.tsx";
-import {SubscriptionsPage} from "./pages/subscriptions.tsx";
+import {InboundsPage, loadRunning, RoutingPage} from "./pages/config.tsx";
+import {DashboardPage} from "./pages/dashboard.tsx";
+import {NodesPage} from "./pages/links.tsx";
+import {ProfilesPage} from "./pages/profiles.tsx";
+import {SettingsPage} from "./pages/subscriptions.tsx";
 import {TokensPage} from "./pages/tokens.tsx";
 import {TrafficPage} from "./pages/traffic.tsx";
 import {UserPage} from "./pages/user.tsx";
@@ -16,6 +19,12 @@ import {SettingsContext} from "./settings.ts";
 
 const PACKS = {en, fa};
 const PREFS = "veilway-panel-display";
+const SIDEBAR = "veilway-panel-sidebar";
+// Addresses from before the pages were split, so bookmarks keep working.
+const MOVED: Record<string, string> = {"": "dashboard", node: "inbounds", "node/inbounds": "inbounds", "node/xray": "inbounds", "node/outbounds": "routing/outbounds", "node/exits": "routing/exits", "node/routing": "routing/routing", "node/profiles": "profiles", "node/links": "nodes", subscriptions: "settings", more: "dashboard"};
+type NodeStatus = {version?: string, generation?: number, uptime_secs?: number, public_addresses?: string[]};
+type Entry = {id: string, icon: IconName, count?: number, warn?: boolean};
+const PAGES = ["dashboard", "traffic", "users", "inbounds", "routing", "profiles", "nodes", "tokens", "settings", "account"];
 
 export function App() {
 	const [prefs, setPrefs] = useState<Prefs>(() => {
@@ -32,14 +41,14 @@ function Brand() {
 	const {t} = useP();
 	return <div className="p-brand">
 		<svg viewBox="0 0 1024 1024" aria-hidden="true"><defs><linearGradient id="p-tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#22795A"/><stop offset="1" stopColor="#145540"/></linearGradient><clipPath id="p-band"><rect x="0" y="262" width="1024" height="500"/></clipPath><mask id="p-behind" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024"><rect width="1024" height="1024" fill="#fff"/><path d="M242.2 200L543.7 828" stroke="#000" strokeWidth="152"/></mask></defs><rect x="64" y="64" width="896" height="896" rx="150" fill="url(#p-tile)"/><g clipPath="url(#p-band)" fill="none" stroke="#F1F8F4"><g mask="url(#p-behind)"><path d="M734.1 200L432.6 828" strokeWidth="34"/><path d="M781.8 200L480.3 828" strokeWidth="34" strokeOpacity="0.6"/><path d="M829.5 200L528 828" strokeWidth="34" strokeOpacity="0.32"/></g><path d="M242.2 200L543.7 828" strokeWidth="120"/></g></svg>
-		<div><strong>{PRODUCT}</strong><span className="vw-muted vw-small">{t("app.subtitle")}</span></div>
+		<div><strong>{PRODUCT}</strong><span>{t("app.subtitle")}</span></div>
 	</div>;
 }
 
 type Auth = {kind: "loading"} | {kind: "failed", error: unknown} | {kind: "setup"} | {kind: "login"} | {kind: "in", username: string};
 
 function Root({prefs, onPrefs}: {prefs: Prefs, onPrefs: (prefs: Prefs) => void}) {
-	const {t} = useP(), say = useSay(), toast = useToast(), [auth, setAuth] = useState<Auth>({kind: "loading"}), [hash, setHash] = useState(location.hash), [wide, setWide] = useState(() => matchMedia("(min-width: 760px)").matches);
+	const {t} = useP(), say = useSay(), toast = useToast(), [auth, setAuth] = useState<Auth>({kind: "loading"}), [hash, setHash] = useState(location.hash);
 	const [settings, setSettings] = useState<Settings | null>(null);
 	const start = () => {
 		setAuth({kind: "loading"});
@@ -48,10 +57,9 @@ function Root({prefs, onPrefs}: {prefs: Prefs, onPrefs: (prefs: Prefs) => void})
 	useEffect(() => {
 		start();
 		session.onExpired(() => { setAuth({kind: "login"}); toast({tone: "warning", title: t("error.unauthorized")}); });
-		const onHash = () => setHash(location.hash), media = matchMedia("(min-width: 760px)"), onMedia = () => setWide(media.matches);
+		const onHash = () => setHash(location.hash);
 		addEventListener("hashchange", onHash);
-		media.addEventListener("change", onMedia);
-		return () => { removeEventListener("hashchange", onHash); media.removeEventListener("change", onMedia); };
+		return () => removeEventListener("hashchange", onHash);
 	}, []);
 	useEffect(() => { document.title = t("app.title"); }, [t]);
 	useEffect(() => { if (auth.kind === "in") api("get", "/settings").then(setSettings, () => setSettings(null)); }, [auth.kind]);
@@ -70,24 +78,96 @@ function Root({prefs, onPrefs}: {prefs: Prefs, onPrefs: (prefs: Prefs) => void})
 			</Glass>
 		</main>
 	</Backdrop>;
-	const parts = hash.replace(/^#\/?/, "").split("/"), page = parts[0] || "users", userId = page === "users" && parts[1] ? Number(parts[1]) : null;
-	// On a phone the bar has room for four items, so the pages an operator visits less often sit behind More.
-	const items: NavItem[] = wide ? [{id: "users", label: t("nav.users"), icon: "users"}, {id: "subscriptions", label: t("nav.subscriptions"), icon: "globe"}, {id: "node", label: t("nav.node"), icon: "settings"}, {id: "traffic", label: t("nav.traffic"), icon: "chart"}, {id: "tokens", label: t("nav.tokens"), icon: "lock"}, {id: "account", label: t("nav.account"), icon: "device"}] : [{id: "users", label: t("nav.users"), icon: "users"}, {id: "node", label: t("nav.node"), icon: "settings"}, {id: "traffic", label: t("nav.traffic"), icon: "chart"}, {id: "more", label: t("nav.more"), icon: "overview"}];
-	const current = !wide && ["subscriptions", "tokens", "account", "more"].includes(page) ? "more" : page;
 	const logout = () => void api("post", "/logout").finally(() => { session.set(""); setAuth({kind: "login"}); });
-	return <SettingsContext.Provider value={{settings, set: setSettings}}><Backdrop fixed className="p-app">
-		<Shell nav={<Nav value={current} onChange={id => { location.hash = "#/" + id; }} items={items} header={<Brand/>}/>} banner={<>{httpBanner}<UpdateBanner/><NodeBanner/></>}>
-			<div className="p-page" key={hash}>
-				{page === "users" && (userId !== null && Number.isFinite(userId) ? <UserPage id={userId}/> : <UsersPage/>)}
-				{page === "subscriptions" && <SubscriptionsPage/>}
-				{page === "node" && <NodePage tab={parts[1] ?? ""}/>}
-				{page === "traffic" && <TrafficPage/>}
-				{page === "more" && <><PageHead title={t("nav.more")}/><Glass className="p-panel"><List label={t("nav.more")}>{(["subscriptions", "tokens", "account"] as const).map(id => <ListRow key={id} title={t(`nav.${id}`)} detail={t(`more.${id}`)} trailing={<Icon name="chevronForward"/>} onClick={() => { location.hash = "#/" + id; }}/>)}</List></Glass></>}
-				{page === "tokens" && <TokensPage/>}
-				{page === "account" && <AccountPage username={auth.username} prefs={prefs} onPrefs={onPrefs} onLogout={logout}/>}
-			</div>
-		</Shell>
-	</Backdrop></SettingsContext.Provider>;
+	return <SettingsContext.Provider value={{settings, set: setSettings}}><Frame hash={hash} username={auth.username} httpBanner={httpBanner} prefs={prefs} onPrefs={onPrefs} onLogout={logout}/></SettingsContext.Provider>;
+}
+
+// The signed-in frame: sidebar, banners and the page the address names.
+function Frame({hash, username, httpBanner, prefs, onPrefs, onLogout}: {hash: string, username: string, httpBanner: ReactNode, prefs: Prefs, onPrefs: (prefs: Prefs) => void, onLogout: () => void}) {
+	const {t, number} = useP(), path = hash.replace(/^#\/?/, ""), parts = path.split("/"), page = PAGES.includes(parts[0]!) ? parts[0]! : "dashboard", sub = parts[1] ?? "";
+	const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem(SIDEBAR) === "collapsed"; } catch { return false; } }), [open, setOpen] = useState(false), menu = useRef<HTMLButtonElement>(null), side = useRef<HTMLElement>(null);
+	const node = useLoad(() => api("get", "/node"), []), live = useLoad(() => api("get", "/stats/now"), []), links = useLoad(() => api("get", "/links") as Promise<{links: NodeLink[] | null}>, []);
+	const counts = useLoad(() => Promise.allSettled([api("get", "/users"), loadRunning(), api("get", "/xray")]).then(([users, running, xray]) => ({users: users.status === "fulfilled" ? users.value.users.length : undefined, inbounds: running.status === "fulfilled" ? ((running.value.document.inbounds as unknown[] | undefined)?.length ?? 0) + (xray.status === "fulfilled" ? xray.value.inbounds.length : 0) : undefined})), []);
+	useEffect(() => { const moved = MOVED[path] ?? MOVED[parts[0]!]; if (moved) location.replace("#/" + moved); }, [path]);
+	useEffect(() => { const timer = setInterval(() => { node.reload(); live.reload(); links.reload(); counts.reload(); }, 30000); return () => clearInterval(timer); }, [node.reload, live.reload, links.reload, counts.reload]);
+	useEffect(() => setOpen(false), [hash]);
+	// Newer browsers answer scrollTo with a promise, which an effect must not return.
+	useEffect(() => { scrollTo({top: 0}); }, [page, page === "users" ? sub : ""]);
+	useEffect(() => {
+		if (!open) return;
+		side.current?.querySelector<HTMLElement>("a, button")?.focus();
+		const key = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
+		document.addEventListener("keydown", key);
+		return () => { document.removeEventListener("keydown", key); menu.current?.focus(); };
+	}, [open]);
+	const fold = () => { const next = !collapsed; setCollapsed(next); try { localStorage.setItem(SIDEBAR, next ? "collapsed" : "open"); } catch { /* remembered for this visit only */ } };
+	const status = (node.data?.status ?? null) as NodeStatus | null, list = links.data?.links ?? [], up = list.filter(l => l.state === "up").length, online = live.data?.online_users.length;
+	const tone = !node.data ? "muted" : node.data.keys_missing || !node.data.reachable ? "danger" : "success", host = status?.public_addresses?.[0] ?? t("side.thisNode");
+	const stateWord = !node.data ? t("common.loading") : node.data.keys_missing ? t("side.keysMissing") : node.data.reachable ? t("side.running") : t("side.unreachable");
+	const bars = <span className="p-bars" data-off={tone === "success" ? undefined : ""} aria-hidden="true"><i/><i/><i/></span>;
+	const groups: {label?: PanelKey, items: Entry[]}[] = [
+		{items: [{id: "dashboard", icon: "overview"}, {id: "traffic", icon: "chart"}]},
+		{label: "nav.group.people", items: [{id: "users", icon: "users", count: counts.data?.users}]},
+		{label: "nav.group.network", items: [{id: "nodes", icon: "device", count: list.length - up || undefined, warn: true}, {id: "inbounds", icon: "inbox", count: counts.data?.inbounds}, {id: "routing", icon: "upload"}, {id: "profiles", icon: "components"}]},
+		{label: "nav.group.panel", items: [{id: "tokens", icon: "lock"}, {id: "settings", icon: "settings"}]}
+	];
+	const initials = username.split(/[-._]/).filter(Boolean).map(part => part[0]).join("").slice(0, 2).toUpperCase() || username.slice(0, 2).toUpperCase();
+	return <Backdrop fixed className="p-app">
+		<header className="vw-glass p-phone-bar" data-layer="chrome" inert={open}>
+			<button ref={menu} type="button" className="vw-icon-button" aria-label={t("side.open")} aria-expanded={open} onClick={() => setOpen(true)}><svg className="vw-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h14M3 10h14M3 14.5h14"/></svg></button>
+			<strong>{t(`nav.${page}` as PanelKey)}</strong>
+			<span className="p-state" data-tone={tone}>{bars}<span className="vw-code">{host}</span></span>
+			<a className="p-avatar" data-size="sm" href="#/account" aria-label={t("nav.account")}>{initials}</a>
+		</header>
+		<div className="p-frame">
+			{open && <button type="button" className="p-scrim" aria-label={t("side.close")} tabIndex={-1} onClick={() => setOpen(false)}/>}
+			<aside ref={side} className="vw-glass p-side" data-layer={open ? "popover" : "chrome"} data-collapsed={collapsed && !open ? "" : undefined} data-open={open ? "" : undefined} role={open ? "dialog" : undefined} aria-modal={open || undefined} aria-label={t(open ? "side.menu" : "side.label")}>
+				<div className="p-side-top">
+					<Brand/>
+					{open ? <IconButton icon="close" label={t("side.close")} onClick={() => setOpen(false)}/> : <IconButton className="p-collapse" icon="chevronForward" label={t(collapsed ? "side.expand" : "side.collapse")} aria-expanded={!collapsed} onClick={fold}/>}
+				</div>
+				<div className="p-side-scroll">
+					<div className="p-node vw-well" title={collapsed && !open ? host + ", " + stateWord : undefined}>
+						<div className="p-node-head"><span className="p-state" data-tone={tone}>{bars}</span><strong className="vw-code">{host}</strong><span className="p-state" data-tone={tone}>{stateWord}</span></div>
+						{status?.version && <span className="p-node-host vw-small vw-muted">{t("side.version", {version: status.version})}</span>}
+						{node.data?.reachable && <dl className="p-node-meta">
+							<div><dt>{t("side.online")}</dt><dd className="vw-num">{online === undefined ? "" : t("count.users", {count: online})}</dd></div>
+							{status?.generation !== undefined && <div><dt>{t("side.config")}</dt><dd className="vw-num">{t("side.configNo", {generation: number(status.generation)})}</dd></div>}
+							{list.length > 0 && <div><dt>{t("side.links")}</dt><dd className="vw-num">{t("side.linksUp", {up: number(up), total: number(list.length)})}</dd></div>}
+							{status?.uptime_secs !== undefined && <div><dt>{t("side.uptime")}</dt><dd className="vw-num">{(span => t(span.key, {count: span.count}))(ago(status.uptime_secs))}</dd></div>}
+						</dl>}
+					</div>
+					<nav className="vw-nav p-nav" data-layout="rail" aria-label={t("side.nav")}>
+						{groups.map((group, i) => <div key={i} className="p-nav-group" role="group" aria-label={group.label ? t(group.label) : undefined}>
+							{group.label && <span className="p-nav-label" aria-hidden="true">{t(group.label)}</span>}
+							{group.items.map(item => <a key={item.id} className="vw-nav-item" href={"#/" + item.id} aria-current={item.id === page ? "page" : undefined} title={collapsed && !open ? t(`nav.${item.id}` as PanelKey) : undefined}><Icon name={item.icon}/><span>{t(`nav.${item.id}` as PanelKey)}</span>{item.count !== undefined && item.count > 0 && <span className="p-count" data-tone={item.warn ? "warning" : undefined} aria-label={t(item.warn ? "side.down" : "side.count", {count: item.count})}>{number(item.count)}</span>}</a>)}
+						</div>)}
+					</nav>
+				</div>
+				<div className="p-account">
+					<a className="p-account-link" href="#/account" aria-current={page === "account" ? "page" : undefined} title={collapsed && !open ? username : undefined}><span className="p-avatar" aria-hidden="true">{initials}</span><span className="p-account-text"><strong className="vw-code">{username}</strong><span>{t("nav.account")}</span></span></a>
+					<IconButton icon="power" label={t("account.logout")} onClick={onLogout}/>
+				</div>
+			</aside>
+			<main className="p-main" inert={open}>
+				{httpBanner}
+				<UpdateBanner/>
+				<NodeBanner node={node.data} onPushed={node.reload}/>
+				<div className="p-page" key={page === "users" ? page + "/" + sub : page}>
+					{page === "dashboard" && <DashboardPage live={live.data} onLive={live.reload}/>}
+					{page === "traffic" && <TrafficPage/>}
+					{page === "users" && (sub && sub !== "new" && Number.isFinite(Number(sub)) ? <UserPage id={Number(sub)}/> : <UsersPage adding={sub === "new"}/>)}
+					{page === "inbounds" && <InboundsPage/>}
+					{page === "routing" && <RoutingPage tab={sub}/>}
+					{page === "profiles" && <ProfilesPage/>}
+					{page === "nodes" && <NodesPage status={status} reachable={node.data?.reachable ?? false} online={online}/>}
+					{page === "tokens" && <TokensPage/>}
+					{page === "settings" && <SettingsPage/>}
+					{page === "account" && <AccountPage tab={sub} username={username} prefs={prefs} onPrefs={onPrefs} onLogout={onLogout}/>}
+				</div>
+			</main>
+		</div>
+	</Backdrop>;
 }
 
 // A newer release, with the one action that asks the host to install it. The host answers the request itself, so after it the panel goes away and comes back as the new version.
@@ -115,10 +195,10 @@ function UpdateBanner() {
 }
 
 // The node's health in one line at the top of every page, with the one action that can fix a missed push.
-function NodeBanner() {
-	const {t} = useP(), say = useSay(), toast = useToast(), node = useLoad(() => api("get", "/node"), []), [busy, setBusy] = useState(false);
-	if (!node.data) return null;
-	if (node.data.keys_missing) return <Banner tone="danger" title={t("error.keys_missing")}>{t("banner.node.keys")}</Banner>;
-	if (node.data.reachable) return null;
-	return <Banner tone="warning" title={t("banner.node.title")} action={<Button size="sm" icon="refresh" disabled={busy} onClick={() => { setBusy(true); void api("post", "/node/sync").then(answer => { toast(answer.synced ? {tone: "success", title: t("banner.node.pushed")} : {tone: "danger", title: say(new Error(answer.error ?? t("error.node_unreachable")))}); node.reload(); }, failure => toast({tone: "danger", title: say(failure)})).finally(() => setBusy(false)); }}>{t("banner.node.push")}</Button>}>{t("banner.node.body")}</Banner>;
+function NodeBanner({node, onPushed}: {node: {keys_missing: boolean, reachable: boolean} | null, onPushed: () => void}) {
+	const {t} = useP(), say = useSay(), toast = useToast(), [busy, setBusy] = useState(false);
+	if (!node) return null;
+	if (node.keys_missing) return <Banner tone="danger" title={t("error.keys_missing")}>{t("banner.node.keys")}</Banner>;
+	if (node.reachable) return null;
+	return <Banner tone="warning" title={t("banner.node.title")} action={<Button size="sm" icon="refresh" disabled={busy} onClick={() => { setBusy(true); void api("post", "/node/sync").then(answer => { toast(answer.synced ? {tone: "success", title: t("banner.node.pushed")} : {tone: "danger", title: say(new Error(answer.error ?? t("error.node_unreachable")))}); onPushed(); }, failure => toast({tone: "danger", title: say(failure)})).finally(() => setBusy(false)); }}>{t("banner.node.push")}</Button>}>{t("banner.node.body")}</Banner>;
 }

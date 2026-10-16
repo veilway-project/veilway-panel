@@ -1,25 +1,27 @@
 import {Banner, Button, Field, Glass, StateBlock, TextField, useToast} from "@veilway/ui";
 import {useContext, useState} from "react";
 import {api, type Template} from "../api.ts";
-import {ErrorNote, Mark, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {ErrorNote, Mark, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import type {PanelKey} from "../locales/en.ts";
 import {SettingsContext} from "../settings.ts";
 
 const MISSING = ["inbound_public_key", "transport_public_key", "node_host"];
 
 // Profiles are made from the node's inbounds. What the node cannot know (its public keys and its public address) comes from the overrides and the node host, and publishing waits until nothing is missing.
-export function ProfilesTab() {
+export function ProfilesPage() {
 	const {t} = useP(), say = useSay(), guard = useGuard(), toast = useToast(), derived = useLoad(() => api("get", "/profiles/derived") as Promise<{revision: string, templates: Template[]}>, []), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
-	if (derived.error && !derived.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={derived.reload}>{t("action.retry")}</Button>}>{say(derived.error)}</StateBlock>;
-	if (!derived.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
-	const templates = derived.data.templates, blocked = templates.filter(template => template.missing.length).length;
+	const templates = derived.data?.templates ?? [], blocked = templates.filter(template => template.missing.length).length;
 	const publish = () => { setBusy(true); setError(null); void guard(() => api("post", "/profiles/publish")).then(() => toast({tone: "success", title: t("profiles.published")}), setError).finally(() => setBusy(false)); };
-	return <div className="p-stack">
-		<div className="p-row"><p className="vw-muted p-lead">{t("profiles.lead")}</p><Button variant="primary" disabled={busy || blocked > 0 || !templates.length} onClick={publish}>{t("profiles.publish")}</Button></div>
-		{blocked > 0 && <p className="vw-muted vw-small">{t("profiles.blocked", {count: blocked})}</p>}
-		<ErrorNote error={error}/>
-		{templates.length === 0 ? <StateBlock kind="empty" title={t("profiles.empty")} action={<Button onClick={() => { location.hash = "#/node/inbounds"; }}>{t("node.tab.inbounds")}</Button>}>{t("profiles.emptyBody")}</StateBlock> : templates.map(template => <Override key={template.inbound} template={template} onSaved={derived.reload}/>)}
-	</div>;
+	return <>
+		<PageHead title={t("nav.profiles")} lead={t("profiles.lead")}><Button variant="primary" disabled={busy || blocked > 0 || !templates.length} onClick={publish}>{t("profiles.publish")}</Button></PageHead>
+		{derived.error && !derived.data ? <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={derived.reload}>{t("action.retry")}</Button>}>{say(derived.error)}</StateBlock>
+		: !derived.data ? <StateBlock kind="loading" title={t("common.loading")}/>
+		: <>
+			{blocked > 0 && <Banner tone="warning" title={t("profiles.blocked", {count: blocked})}/>}
+			<ErrorNote error={error}/>
+			{templates.length === 0 ? <StateBlock kind="empty" title={t("profiles.empty")} action={<Button onClick={() => { location.hash = "#/inbounds"; }}>{t("nav.inbounds")}</Button>}>{t("profiles.emptyBody")}</StateBlock> : <div className="p-columns">{templates.map(template => <Override key={template.inbound} template={template} onSaved={derived.reload}/>)}</div>}
+		</>}
+	</>;
 }
 
 function Override({template, onSaved}: {template: Template, onSaved: () => void}) {

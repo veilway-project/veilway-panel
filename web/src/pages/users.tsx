@@ -1,11 +1,12 @@
-import {Banner, Button, Checkbox, ConfirmDialog, DataTable, Dialog, Glass, NumberField, RadioGroup, Segmented, SelectField, StateBlock, Switch, TextField, UsageBar, useToast} from "@veilway/ui";
+import {Banner, Button, ConfirmDialog, Dialog, Glass, NumberField, RadioGroup, Segmented, SelectField, StateBlock, Switch, TextField, UsageBar, useToast} from "@veilway/ui";
 import {useEffect, useState} from "react";
 import {api, type LinkView, type NodeState, type NodeUser, type User} from "../api.ts";
-import {DayField, ErrorNote, fromDay, LinkDialog, NodeNote, PageHead, toDay, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {ago, DayField, ErrorNote, fromDay, Mark, NodeNote, PageHead, toDay, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {useSettings} from "../settings.ts";
 
 const GB = 1024 ** 3;
 const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const PAGE = 50;
 type Period = "none" | "daily" | "weekly" | "monthly";
 
 // The expiry in a row: days left, or that it has passed.
@@ -18,14 +19,22 @@ export function useExpiry() {
 	};
 }
 
-export function UsersPage() {
-	const {t, number} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings();
-	const [search, setSearch] = useState(""), [query, setQuery] = useState(""), [shown, setShown] = useState("all"), [picked, setPicked] = useState<Set<number>>(new Set());
-	const [form, setForm] = useState<User | "new" | null>(null), [created, setCreated] = useState<{name: string, link: LinkView} | null>(null);
+// A link made when a user is added, handed to their page so it opens showing it.
+export const handoff: {current: {id: number, link: LinkView} | null} = {current: null};
+
+export function UsersPage({adding}: {adding: boolean}) {
+	const {t, number, bytes, date} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings();
+	const [search, setSearch] = useState(""), [query, setQuery] = useState(""), [shown, setShown] = useState("all"), [group, setGroup] = useState("*"), [sort, setSort] = useState("name"), [page, setPage] = useState(0), [picked, setPicked] = useState<Set<number>>(new Set());
+	const [form, setForm] = useState<User | "new" | null>(adding ? "new" : null);
 	const [confirm, setConfirm] = useState<"delete" | "reset_usage" | null>(null), [more, setMore] = useState(false), [result, setResult] = useState<{done: number, failed: {id: number, error: string}[], node: NodeState} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	useEffect(() => { const timer = setTimeout(() => setQuery(search.trim()), 250); return () => clearTimeout(timer); }, [search]);
-	const users = useLoad(() => api("get", "/users", {query: {q: query, enabled: shown === "all" ? undefined : String(shown === "enabled")}}), [query, shown]);
-	const rows = users.data?.users ?? [], names = new Map(rows.map(u => [u.id, u.name]));
+	useEffect(() => setPage(0), [query, shown, group, sort]);
+	// Every user matching the search comes in one answer, so the counts, the group filter and the order are worked out here.
+	const users = useLoad(() => api("get", "/users", {query: {q: query}}), [query]);
+	const all = users.data?.users ?? [], names = new Map(all.map(u => [u.id, u.name])), groups = [...new Set(all.flatMap(u => u.groups))].sort();
+	const used = (u: User) => (u.node as NodeUser | null)?.used_bytes ?? -1;
+	const rows = all.filter(u => (shown === "all" || u.enabled === (shown === "enabled")) && (group === "*" || u.groups.includes(group))).sort((a, b) => sort === "usage" ? used(b) - used(a) : sort === "expiry" ? (a.expires_at ?? Infinity) - (b.expires_at ?? Infinity) : a.name.localeCompare(b.name));
+	const pages = Math.max(1, Math.ceil(rows.length / PAGE)), visible = rows.slice(page * PAGE, page * PAGE + PAGE);
 	const bulk = async (action: string, value?: unknown) => {
 		setBusy(true);
 		setError(null);
@@ -43,45 +52,63 @@ export function UsersPage() {
 		}
 	};
 	const toggle = (id: number, on: boolean) => setPicked(old => { const next = new Set(old); if (on) next.add(id); else next.delete(id); return next; });
+	const cols = [t("users.col.user"), t("users.col.groups"), t("users.col.usage"), t("users.col.expiry"), t("users.col.devices"), t("users.col.state")];
+	const state = (u: User) => {
+		const node = u.node as NodeUser | null, ages = (node?.devices ?? []).map(d => d.handshake_age_secs).filter((age): age is number => typeof age === "number"), age = ages.length ? Math.min(...ages) : null;
+		if (!u.enabled) return <Mark tone="muted">{t("users.disabled")}</Mark>;
+		if (node?.denied === "quota") return <Mark tone="danger">{t("users.overQuota")}</Mark>;
+		if (node?.denied === "expired") return <Mark tone="muted">{t("users.expired")}</Mark>;
+		// WireGuard makes a new session every two minutes while traffic flows, so an older one means the device went quiet.
+		if (age !== null && age < 180) return <Mark tone="success">{t("users.online")}</Mark>;
+		if (u.pending_devices) return <Mark tone="info">{t("users.pending", {count: u.pending_devices})}</Mark>;
+		return <Mark tone="muted">{age === null ? t("users.notSeen") : (span => t("users.seen", {time: t(span.key, {count: span.count})}))(ago(age))}</Mark>;
+	};
 	return <>
-		<PageHead title={t("users.title")} lead={users.data ? t("count.users", {count: rows.length}) : undefined}><Button variant="primary" icon="plus" onClick={() => setForm("new")}>{t("users.add")}</Button></PageHead>
-		<div className="p-filters">
-			<TextField label={t("users.search")} type="search" placeholder={t("users.searchHint")} value={search} onChange={setSearch}/>
-			{rows.length > 0 && <Checkbox label={t("users.selectAll")} checked={rows.every(u => picked.has(u.id))} onChange={on => setPicked(on ? new Set(rows.map(u => u.id)) : new Set())}/>}
-			<Segmented label={t("users.filter")} value={shown} onChange={setShown} options={[{value: "all", label: t("users.all")}, {value: "enabled", label: t("users.enabledOnly")}, {value: "disabled", label: t("users.disabledOnly")}]}/>
-		</div>
-		{picked.size > 0 && <Glass className="p-bulk" aria-live="polite">
-			<strong>{t("bulk.selected", {count: picked.size})}</strong>
-			<div className="p-cluster">
+		<PageHead title={t("users.title")} lead={users.data ? t("users.lead", {count: all.length}) : undefined}><Button variant="primary" icon="plus" onClick={() => setForm("new")}>{t("users.add")}</Button></PageHead>
+		<Glass className="p-panel">
+			<div className="p-toolbar">
+				<TextField label={t("users.search")} type="search" placeholder={t("users.searchHint")} value={search} onChange={setSearch}/>
+				<SelectField label={t("users.group")} value={group} onChange={setGroup} options={[{value: "*", label: t("users.everyGroup")}, ...groups.map(g => ({value: g, label: g}))]}/>
+				<SelectField label={t("users.sort")} value={sort} onChange={setSort} options={(["name", "usage", "expiry"] as const).map(s => ({value: s, label: t(`users.sort.${s}`)}))}/>
+			</div>
+			<Segmented label={t("users.filter")} value={shown} onChange={setShown} options={[{value: "all", label: t("users.all") + " " + number(all.length)}, {value: "enabled", label: t("users.enabledOnly") + " " + number(all.filter(u => u.enabled).length)}, {value: "disabled", label: t("users.disabledOnly") + " " + number(all.filter(u => !u.enabled).length)}]}/>
+			{picked.size > 0 && <div className="vw-well p-bulk" role="region" aria-label={t("bulk.region")} aria-live="polite">
+				<strong>{t("bulk.selected", {count: picked.size})}</strong>
 				<Button size="sm" disabled={busy} onClick={() => void bulk("enable")}>{t("bulk.enable")}</Button>
 				<Button size="sm" disabled={busy} onClick={() => void bulk("disable")}>{t("bulk.disable")}</Button>
 				<Button size="sm" disabled={busy} onClick={() => setConfirm("reset_usage")}>{t("bulk.resetUsage")}</Button>
 				<Button size="sm" disabled={busy} onClick={() => setMore(true)}>{t("bulk.more")}</Button>
 				<Button size="sm" variant="danger" disabled={busy} onClick={() => setConfirm("delete")}>{t("bulk.delete")}</Button>
 				<Button size="sm" variant="quiet" onClick={() => setPicked(new Set())}>{t("bulk.clear")}</Button>
-			</div>
-		</Glass>}
-		<ErrorNote error={error}/>
-		{result && <Banner tone={result.failed.length ? "warning" : "success"} title={t("bulk.done", {count: result.done}) + (result.failed.length ? ". " + t("bulk.failed", {count: result.failed.length}) : "")}>{result.failed.length ? result.failed.map(f => (names.get(f.id) ?? f.id) + ": " + f.error).join("; ") : undefined}</Banner>}
-		<NodeNote node={result?.node}/>
-		{users.error && !users.data ? <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={users.reload}>{t("action.retry")}</Button>}>{say(users.error)}</StateBlock>
-		: !users.data ? <StateBlock kind="loading" title={t("common.loading")}/>
-		: <Glass className="p-pad"><DataTable caption={t("users.title")} rows={rows} rowKey={u => String(u.id)} empty={query || shown !== "all" ? <StateBlock kind="empty" title={t("users.noMatch")} action={<Button onClick={() => { setSearch(""); setShown("all"); }}>{t("users.clear")}</Button>}>{t("users.noMatchBody")}</StateBlock> : <StateBlock kind="empty" title={t("users.empty")} action={<Button variant="primary" icon="plus" onClick={() => setForm("new")}>{t("users.add")}</Button>}>{t("users.emptyBody")}</StateBlock>} columns={[
-			{id: "pick", header: "", cell: u => <input type="checkbox" className="p-check" aria-label={t("users.select", {name: u.name})} checked={picked.has(u.id)} onChange={event => toggle(u.id, event.target.checked)}/>},
-			{id: "name", header: t("users.col.user"), cell: u => {
-				const node = u.node as NodeUser | null, state = !u.enabled ? t("users.disabled") : node?.denied === "quota" ? t("users.overQuota") : node?.denied === "expired" ? t("users.expired") : u.pending_devices ? t("users.pending", {count: u.pending_devices}) : "";
-				return <span className="p-user"><a className="vw-code p-link" href={"#/users/" + u.id}>{u.name}</a>{state && <span className="vw-muted vw-small">{state}</span>}</span>;
-			}},
-			{id: "groups", header: t("users.col.groups"), cell: u => u.groups.length ? <span className="vw-code">{u.groups.join(", ")}</span> : <span className="vw-muted">{t("common.none")}</span>},
-			{id: "usage", header: t("users.col.usage"), cell: u => {
-				const node = u.node as NodeUser | null;
-				return node?.used_bytes === undefined ? <span className="vw-muted">{t("users.usageUnknown")}</span> : <UsageBar compact label={u.name} used={node.used_bytes} total={u.quota_bytes ?? null}/>;
-			}},
-			{id: "expiry", header: t("users.col.expiry"), cell: u => expiry(u.expires_at)},
-			{id: "devices", header: t("users.col.devices"), align: "end", cell: u => <span className="vw-num">{u.device_limit ? number(u.devices) + " / " + number(u.device_limit) : number(u.devices)}</span>}
-		]}/></Glass>}
-		{form && <UserForm user={form === "new" ? null : form} defaultLimit={settings?.default_device_limit ?? 3} onClose={() => setForm(null)} onSaved={(user, link, linkError) => { setForm(null); users.reload(); toast({tone: "success", title: t("form.created", {name: user.name})}); if (link) setCreated({name: user.name, link}); if (linkError) toast({tone: "warning", title: t("link.failed", {error: linkError})}); }}/>}
-		<LinkDialog name={created?.name ?? ""} link={created?.link ?? null} once={settings?.show_links_once ?? false} onClose={() => setCreated(null)}/>
+			</div>}
+			<ErrorNote error={error}/>
+			{result && <Banner tone={result.failed.length ? "warning" : "success"} title={t("bulk.done", {count: result.done}) + (result.failed.length ? ". " + t("bulk.failed", {count: result.failed.length}) : "")}>{result.failed.length ? result.failed.map(f => (names.get(f.id) ?? f.id) + ": " + f.error).join("; ") : undefined}</Banner>}
+			<NodeNote node={result?.node}/>
+			{users.error && !users.data ? <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={users.reload}>{t("action.retry")}</Button>}>{say(users.error)}</StateBlock>
+			: !users.data ? <StateBlock kind="loading" title={t("common.loading")}/>
+			: rows.length === 0 ? (query || shown !== "all" || group !== "*" ? <StateBlock kind="empty" title={t("users.noMatch")} action={<Button onClick={() => { setSearch(""); setShown("all"); setGroup("*"); }}>{t("users.clear")}</Button>}>{t("users.noMatchBody")}</StateBlock> : <StateBlock kind="empty" title={t("users.empty")} action={<Button variant="primary" icon="plus" onClick={() => setForm("new")}>{t("users.add")}</Button>}>{t("users.emptyBody")}</StateBlock>)
+			: <div className="vw-table-wrap"><table className="vw-table">
+				<caption className="vw-sr">{t("users.title")}</caption>
+				<thead><tr><th scope="col"><input type="checkbox" className="p-check" aria-label={t("users.selectAll")} checked={visible.every(u => picked.has(u.id))} onChange={event => setPicked(old => { const next = new Set(old); for (const u of visible) if (event.target.checked) next.add(u.id); else next.delete(u.id); return next; })}/></th>{cols.map((c, i) => <th key={c} scope="col" data-align={i === 4 ? "end" : undefined}>{c}</th>)}</tr></thead>
+				<tbody>{visible.map(u => {
+					const node = u.node as NodeUser | null, gone = !!u.expires_at && u.expires_at * 1000 < Date.now();
+					return <tr key={u.id} className={gone || !u.enabled ? "p-row-muted" : undefined}>
+						<td><input type="checkbox" className="p-check" aria-label={t("users.select", {name: u.name})} checked={picked.has(u.id)} onChange={event => toggle(u.id, event.target.checked)}/></td>
+						<td data-label={cols[0]}><span className="p-user"><a className="vw-code p-link" href={"#/users/" + u.id}>{u.name}</a>{u.note && <span>{u.note}</span>}</span></td>
+						<td data-label={cols[1]}>{u.groups.length ? <span className="p-tags">{u.groups.map(g => <span key={g} className="p-tag vw-code">{g}</span>)}</span> : <span className="vw-muted">{t("common.none")}</span>}</td>
+						<td data-label={cols[2]} className="p-usage-cell">{node?.used_bytes === undefined ? <span className="vw-muted">{t("users.usageUnknown")}</span> : u.quota_bytes ? <UsageBar compact label={u.name} used={node.used_bytes} total={u.quota_bytes}/> : <span className="p-user"><span className="vw-num">{bytes(node.used_bytes).text}</span><span>{t("users.noLimit")}</span></span>}</td>
+						<td data-label={cols[3]}>{u.expires_at ? <span className="p-user"><span className="vw-num">{date(new Date(u.expires_at * 1000))}</span><span>{expiry(u.expires_at)}</span></span> : <span className="vw-muted">{t("users.noExpiry")}</span>}</td>
+						<td data-label={cols[4]} data-align="end"><span className="vw-num">{u.device_limit ? t("users.devicesOf", {used: number(u.devices), limit: number(u.device_limit)}) : number(u.devices)}</span></td>
+						<td data-label={cols[5]}>{state(u)}</td>
+					</tr>;
+				})}</tbody>
+			</table></div>}
+			{rows.length > PAGE && <div className="p-foot">
+				<span>{t("users.showing", {from: number(page * PAGE + 1), to: number(page * PAGE + visible.length), total: number(rows.length)})}</span>
+				<div className="p-cluster"><Button size="sm" disabled={page === 0} onClick={() => setPage(page - 1)}>{t("users.previous")}</Button><span className="vw-num">{t("users.page", {page: number(page + 1), pages: number(pages)})}</span><Button size="sm" disabled={page + 1 >= pages} onClick={() => setPage(page + 1)}>{t("users.next")}</Button></div>
+			</div>}
+		</Glass>
+		{form && <UserForm user={form === "new" ? null : form} defaultLimit={settings?.default_device_limit ?? 3} onClose={() => { setForm(null); if (adding) location.replace("#/users"); }} onSaved={(user, link, linkError) => { setForm(null); toast({tone: "success", title: t("form.created", {name: user.name})}); if (linkError) toast({tone: "warning", title: t("link.failed", {error: linkError})}); if (link) { handoff.current = {id: user.id, link}; location.hash = "#/users/" + user.id; } else users.reload(); }}/>}
 		<ConfirmDialog open={confirm !== null} onOpenChange={open => { if (!open) setConfirm(null); }} danger={confirm === "delete"} title={t(confirm === "delete" ? "bulk.deleteTitle" : "bulk.resetTitle", {count: picked.size})} body={t(confirm === "delete" ? "bulk.deleteBody" : "bulk.resetBody")} confirmLabel={t(confirm === "delete" ? "bulk.delete" : "bulk.resetUsage")} onConfirm={() => { if (confirm) void bulk(confirm); }}/>
 		{more && <BulkChange count={picked.size} busy={busy} error={error} onClose={() => setMore(false)} onApply={(action, value) => void bulk(action, value)}/>}
 	</>;
@@ -89,7 +116,7 @@ export function UsersPage() {
 
 // The bulk changes that need a value, behind one dialog so the bar stays short.
 function BulkChange({count, busy, error, onClose, onApply}: {count: number, busy: boolean, error: unknown, onClose: () => void, onApply: (action: string, value: unknown) => void}) {
-	const {t} = useP(), [action, setAction] = useState("add_group"), [group, setGroup] = useState(""), [quota, setQuota] = useState<number | "">(""), [period, setPeriod] = useState<Period>("monthly"), [day, setDay] = useState(""), [limit, setLimit] = useState<number | "">(3), [problem, setProblem] = useState("");
+	const {t} = useP(), [action, setAction] = useState("add_group"), [group, setGroup] = useState("*"), [quota, setQuota] = useState<number | "">(""), [period, setPeriod] = useState<Period>("monthly"), [day, setDay] = useState(""), [limit, setLimit] = useState<number | "">(3), [problem, setProblem] = useState("");
 	const apply = () => {
 		if ((action === "add_group" || action === "remove_group") && !NAME.test(group)) return setProblem(t("error.group"));
 		setProblem("");

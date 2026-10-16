@@ -1,18 +1,18 @@
-import {Banner, Button, DataTable, Dialog, Glass, IconButton, NumberField, SecretField, Segmented, SelectField, StateBlock, Switch, Tabs, TextField, useToast} from "@veilway/ui";
+import {Banner, Button, DataTable, Dialog, Glass, Icon, IconButton, NumberField, SecretField, Segmented, SelectField, StateBlock, Switch, Tabs, TextField, useToast} from "@veilway/ui";
 import {useEffect, useState} from "react";
 import {api, ApiError, type Diff, type Report, type Running} from "../api.ts";
 import {check, type Issue, type Schema} from "../check.ts";
-import {ErrorNote, Issues, lines, LinesField, Mark, PageHead, Rating, useLoad, useP, useSay} from "../kit.tsx";
+import {ErrorNote, Issues, lines, LinesField, Mark, PageHead, useLoad, useP, useSay} from "../kit.tsx";
 import type {PanelKey} from "../locales/en.ts";
-import {LinksTab} from "./links.tsx";
-import {ProfilesTab} from "./profiles.tsx";
-import {XrayTab} from "./xray.tsx";
+import {XrayForm, XraySheet} from "./xray.tsx";
 
 type Section = "inbounds" | "outbounds" | "exits" | "routing";
 type Item = Record<string, unknown>;
 type Row = {type: string, listen: string, path: string};
 type Cond = {key: string, values: string};
-const TABS = ["inbounds", "outbounds", "exits", "routing", "profiles", "xray", "links"] as const;
+type Listed = {kind: "veilway" | "wireguard" | "xray", tag: string, index: number, item?: Item, xray?: XrayRow};
+type XrayRow = {tag: string, protocol: string, listen: string, port: number, security: string, clients: number, host: string, managed: boolean, certificate_missing: boolean};
+const TABS = ["exits", "routing", "outbounds"] as const;
 const TRANSPORTS = ["udp", "udp-obfs", "tls", "ws", "fronted"];
 const PATHED = ["tls", "ws", "fronted"];
 const CONDITIONS = ["user", "group", "inbound", "link", "ip", "domain", "protocol", "port", "icmp_type", "icmp_code"];
@@ -26,23 +26,66 @@ export const loadRunning = () => api("get", "/config") as Promise<Running>;
 const str = (value: unknown) => typeof value === "string" ? value : "";
 const list = (value: unknown) => Array.isArray(value) ? value as Item[] : [];
 
-export function NodePage({tab}: {tab: string}) {
-	const {t} = useP(), current = (TABS as readonly string[]).includes(tab) ? tab : "inbounds";
-	// On a phone the tab row scrolls, and a tab opened by its address can sit out of view.
-	useEffect(() => { document.querySelector(".vw-tab[data-state=active]")?.scrollIntoView({block: "nearest", inline: "nearest"}); }, [current]);
-	return <>
-		<PageHead title={t("node.title")} lead={t("node.lead")}/>
-		<Tabs label={t("node.title")} value={current} onChange={id => { location.hash = "#/node/" + id; }} items={TABS.map(id => ({id, label: t(`node.tab.${id}`), content: id === "profiles" ? <ProfilesTab/> : id === "xray" ? <XrayTab/> : id === "links" ? <LinksTab/> : <SectionTab section={id}/>}))}/>
-	</>;
-}
-
 // Says what a check found in the reader's language. The node's own reports are English only and are shown as they come.
 export function useIssueText() {
 	const {t} = useP();
 	return (issues: Issue[]) => issues.map(issue => ({path: issue.path, text: t(issue.key, issue.values)}));
 }
 
-function SectionTab({section}: {section: Section}) {
+// Where devices connect: the node's own inbounds and the Xray add-on's, in one list. Each row says its type (what apps speak) apart from its transports (how the bytes travel).
+export function InboundsPage() {
+	const {t, number} = useP(), say = useSay(), toast = useToast(), config = useLoad(loadRunning, []), schema = useLoad(loadSchema, []), xray = useLoad(() => api("get", "/xray"), []);
+	const [kind, setKind] = useState("all"), [json, setJson] = useState(false), [proposed, setProposed] = useState<unknown>(undefined), [editing, setEditing] = useState<{index: number | null} | null>(null), [adding, setAdding] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null);
+	useEffect(() => { if (adding) document.getElementById("xray-form-title")?.scrollIntoView({block: "nearest"}); }, [adding]);
+	if (config.error && !config.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={config.reload}>{t("action.retry")}</Button>}>{say(config.error)}</StateBlock>;
+	if (!config.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
+	const running = config.data, items = list(running.document.inbounds), outbounds = list(running.document.outbounds).map(item => str(item.tag)).filter(Boolean);
+	const rows: Listed[] = [...items.map((item, index) => ({kind: item.type === "wireguard" ? "wireguard" as const : "veilway" as const, tag: str(item.tag), index, item})), ...(xray.data?.inbounds ?? []).map((row, index) => ({kind: "xray" as const, tag: row.tag, index, xray: row as XrayRow}))];
+	const shown = kind === "all" ? rows : rows.filter(row => row.kind === kind), count = (of: string) => rows.filter(row => row.kind === of).length;
+	const propose = (next: unknown) => { setEditing(null); setProposed(next); };
+	const removeXray = (tag: string) => { setBusy(true); setError(null); void api("delete", "/xray/inbounds/{tag}", {params: {tag}}).then(() => { toast({tone: "success", title: t("xray.removed", {tag})}); xray.reload(); }, setError).finally(() => setBusy(false)); };
+	const port = (listen: string) => listen.slice(listen.lastIndexOf(":") + 1);
+	return <>
+		<PageHead title={t("nav.inbounds")} lead={t("inbounds.lead")}>
+			<Button onClick={() => setJson(!json)}>{t(json ? "inbounds.asList" : "inbounds.asJson")}</Button>
+			<Button variant="primary" icon="plus" onClick={() => setEditing({index: null})}>{t("config.add.inbounds")}</Button>
+		</PageHead>
+		<div className={adding ? "p-grid-main" : "p-stack"}>
+			<div className="p-stack">
+				{json ? <JsonEditor key={running.revision} section="inbounds" value={running.document.inbounds ?? []} schema={schema.data} onReview={propose}/> : <Glass className="p-panel">
+					<Segmented label={t("inbounds.kind")} value={kind} onChange={setKind} options={(["all", "veilway", "wireguard", "xray"] as const).map(of => ({value: of, label: t(`inbounds.kind.${of}`) + " " + number(of === "all" ? rows.length : count(of))}))}/>
+					<DataTable caption={t("nav.inbounds")} rows={shown} rowKey={row => row.kind + row.tag + row.index} empty={<StateBlock kind="empty" title={t("config.empty.inbounds")} action={<Button variant="primary" icon="plus" onClick={() => setEditing({index: null})}>{t("config.add.inbounds")}</Button>}>{t("config.emptyBody.inbounds")}</StateBlock>} columns={[
+						{id: "tag", header: t("config.col.tag"), cell: row => <span className="vw-code p-name">{row.tag}</span>},
+						{id: "type", header: t("inbounds.col.type"), cell: row => row.xray ? t("inbounds.type.xray", {protocol: t(`xray.name.${["vless", "trojan", "shadowsocks"].includes(row.xray.protocol) ? row.xray.protocol as "vless" : "vless"}`)}) : t(`inbounds.type.${row.kind as "veilway"}`)},
+						{id: "at", header: t("inbounds.col.at"), cell: row => row.xray ? <span className="p-user"><span className="vw-code" dir="ltr">{row.xray.host ? `${row.xray.host}:${row.xray.port}` : row.xray.listen}</span>{row.xray.certificate_missing ? <Mark tone="warning">{t("xray.noCertificate")}</Mark> : !row.xray.managed ? <Mark tone="warning" title={t("xray.unmanagedHint")}>{t("xray.unmanaged")}</Mark> : <span>{t("inbounds.users", {count: row.xray.clients})}</span>}</span> : <span className="p-user"><span className="vw-code" dir="ltr">{(row.item!.address as string[] | undefined)?.join(", ")}</span>{typeof row.item!.mtu === "number" && <span>{t("inbounds.mtu", {mtu: number(row.item!.mtu as number, {useGrouping: false})})}</span>}</span>},
+						{id: "transports", header: t("config.col.transports"), cell: row => <span className="p-tags">{row.xray ? <><span className="p-tag vw-code" title={row.xray.listen}>{"tcp " + row.xray.port}</span>{row.xray.security === "tls" && <span className="p-tag vw-code">tls</span>}</> : list(row.item!.transports).map((tr, i) => <span key={i} className="p-tag vw-code" title={str(tr.listen)}>{str(tr.type) + " " + (str(tr.path) || port(str(tr.listen)))}</span>)}</span>},
+						{id: "edit", header: "", align: "end", cell: row => <div className="p-cluster p-end">{row.item && <Button size="sm" variant="quiet" aria-label={t("config.editName", {name: row.tag})} onClick={() => setEditing({index: row.index})}>{t("user.edit")}</Button>}<Button size="sm" variant="quiet" disabled={busy} aria-label={t("config.removeName", {name: row.tag})} onClick={() => row.item ? propose(items.filter((_, i) => i !== row.index)) : removeXray(row.tag)}>{t("common.remove")}</Button></div>}
+					]}/>
+					<ErrorNote error={error}/>
+					<div className="vw-well p-note"><Icon name="info"/><p className="vw-small">{t("inbounds.rating")}</p></div>
+				</Glass>}
+				<p className="vw-muted vw-small">{t("config.reviewNote")}</p>
+				{xray.data && <XraySheet xray={xray.data} onAdd={() => setAdding(true)}/>}
+			</div>
+			{adding && <XrayForm onClose={() => setAdding(false)} onDone={() => { setAdding(false); xray.reload(); }}/>}
+		</div>
+		{editing && <ItemForm section="inbounds" item={editing.index === null ? null : items[editing.index]!} taken={[...items.filter((_, i) => i !== editing.index).map(item => str(item.tag)), ...(xray.data?.inbounds ?? []).map(row => row.tag)]} outbounds={outbounds} schema={schema.data} onSave={item => propose(editing.index === null ? [...items, item] : items.map((old, i) => i === editing.index ? item : old))} onClose={() => setEditing(null)}/>}
+		{proposed !== undefined && <Review section="inbounds" running={running} value={proposed} onClose={() => setProposed(undefined)} onDone={() => { setProposed(undefined); config.reload(); }}/>}
+	</>;
+}
+
+// Where traffic leaves and the rules that pick the way, one tab each.
+export function RoutingPage({tab}: {tab: string}) {
+	const {t} = useP(), current = (TABS as readonly string[]).includes(tab) ? tab : "exits";
+	// On a phone the tab row scrolls, and a tab opened by its address can sit out of view.
+	useEffect(() => { document.querySelector(".vw-tab[data-state=active]")?.scrollIntoView({block: "nearest", inline: "nearest"}); }, [current]);
+	return <>
+		<PageHead title={t("nav.routing")} lead={t("routing.lead")}/>
+		<Tabs label={t("nav.routing")} value={current} onChange={id => { location.hash = "#/routing/" + id; }} items={TABS.map(id => ({id, label: t(`node.tab.${id}`), content: <SectionTab section={id}/>}))}/>
+	</>;
+}
+
+function SectionTab({section}: {section: Exclude<Section, "inbounds">}) {
 	const {t} = useP(), say = useSay(), config = useLoad(loadRunning, []), schema = useLoad(loadSchema, []), [json, setJson] = useState(false), [proposed, setProposed] = useState<unknown>(undefined), [editing, setEditing] = useState<{index: number | null} | null>(null);
 	if (config.error && !config.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={config.reload}>{t("action.retry")}</Button>}>{say(config.error)}</StateBlock>;
 	if (!config.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
@@ -55,14 +98,11 @@ function SectionTab({section}: {section: Section}) {
 		<div className="p-row"><p className="vw-muted p-lead">{t(`config.lead.${section}`)}</p><Segmented label={t("config.view")} value={json ? "json" : "list"} onChange={view => setJson(view === "json")} options={[{value: "list", label: t("config.view.list")}, {value: "json", label: t("config.view.json")}]}/></div>
 		{json ? <JsonEditor key={running.revision} section={section} value={value} schema={schema.data} onReview={propose}/>
 		: section === "routing" ? <Routing routing={value as Item} exits={tags("exits")} onPropose={propose}/>
-		: <Glass className="p-pad p-stack">
+		: <Glass className="p-panel">
 			<div className="p-row p-table-head"><span className="vw-muted vw-small">{t("config.count", {count: items.length})}</span><Button size="sm" icon="plus" onClick={() => edit(null)}>{t(`config.add.${section}`)}</Button></div>
 			<DataTable caption={t(`node.tab.${section}`)} rows={items.map((item, index) => ({item, index}))} rowKey={row => str(row.item.tag) || String(row.index)} empty={<StateBlock kind="empty" title={t(`config.empty.${section}`)} action={<Button variant="primary" icon="plus" onClick={() => edit(null)}>{t(`config.add.${section}`)}</Button>}>{t(`config.emptyBody.${section}`)}</StateBlock>} columns={[
 				{id: "tag", header: t("config.col.tag"), cell: ({item}) => <span className="p-user"><span className="vw-code">{str(item.tag)}</span><span className="vw-muted vw-small">{section === "exits" ? [str(item.name), str(item.country)].filter(Boolean).join(", ") : str(item.type)}</span></span>},
-				...(section === "inbounds" ? [
-					{id: "address", header: t("config.col.address"), cell: ({item}: {item: Item}) => <span className="vw-code">{(item.address as string[] | undefined)?.join(", ")}</span>},
-					{id: "transports", header: t("config.col.transports"), cell: ({item}: {item: Item}) => <ul className="p-transports">{list(item.transports).map((tr, i) => <li key={i}><span className="vw-code">{str(tr.type)} {str(tr.listen)}</span><Rating/></li>)}</ul>}
-				] : section === "outbounds" ? [
+				...(section === "outbounds" ? [
 					{id: "target", header: t("config.col.target"), cell: ({item}: {item: Item}) => item.type === "socks5" ? <span className="vw-code">{str(item.server)}</span> : <span className="vw-muted">{item.bind ? t("config.bind", {address: str(item.bind)}) : t("config.fromNode")}</span>}
 				] : [
 					{id: "backend", header: t("config.col.backend"), cell: ({item}: {item: Item}) => { const backend = (item.backend ?? {}) as Item; return backend.type === "netstack" ? t("config.backend.netstackVia", {outbound: str(backend.outbound)}) : backend.type === "chain" ? t("config.backend.chainVia", {links: (backend.links as string[] | undefined ?? []).join(", ")}) : t(`config.backend.${backend.type === "l3" ? "l3" : "block"}`); }}
@@ -150,20 +190,21 @@ function ItemForm({section, item, taken, outbounds, schema, onSave, onClose}: {s
 		<form className="p-stack" onSubmit={event => { event.preventDefault(); save(); }} noValidate>
 			<TextField label={t("config.col.tag")} hint={t("config.tagHint")} value={tag} onChange={value => set("tag", value.toLowerCase())} error={clash ? t("config.tagTaken") : undefined} technical required autoFocus/>
 			{section === "inbounds" && <>
-				<SelectField label={t("config.type")} value={kind} onChange={value => set("type", value)} options={[{value: "veilway", label: t("config.inbound.veilway"), detail: t("config.inbound.veilwayDetail")}, {value: "wireguard", label: t("config.inbound.wireguard"), detail: t("config.inbound.wireguardDetail")}]}/>
+				<SelectField label={t("inbounds.col.type")} hint={t("inbounds.typeHint")} value={kind} onChange={value => set("type", value)} options={[{value: "veilway", label: t("config.inbound.veilway"), detail: t("config.inbound.veilwayDetail")}, {value: "wireguard", label: t("config.inbound.wireguard"), detail: t("config.inbound.wireguardDetail")}]}/>
 				<SecretField label={t("config.privateKey")} hint={t(item ? "config.privateKeyKeep" : "config.privateKeyNew")} value={str(draft.private_key)} onChange={value => set("private_key", value.trim())} autoComplete="off"/>
 				<LinesField label={t("config.addresses")} hint={t("config.addressesHint")} value={addresses} onChange={setAddresses} rows={2}/>
 				<NumberField label={t("config.mtu")} hint={t("config.mtuHint")} unit={t("config.bytes")} min={1280} max={1500} value={typeof draft.mtu === "number" ? draft.mtu : ""} onChange={value => set("mtu", value === "" ? undefined : value)} optional/>
 				<fieldset className="p-mirror">
 					<legend className="vw-label">{t("config.col.transports")}</legend>
+						<p className="vw-muted vw-small">{t("inbounds.transportHint")}</p>
 					{rows.map((row, i) => <div key={i} className="p-transport-row">
 						<SelectField label={t("config.transport", {number: i + 1})} value={row.type} onChange={type => setRows(rows.map((r, j) => j === i ? {...r, type} : r))} options={(kind === "wireguard" ? ["udp", "ws"] : TRANSPORTS).map(type => ({value: type, label: type, detail: t(`config.transport.${type}` as PanelKey)}))}/>
 						<TextField label={t("config.listen")} placeholder="0.0.0.0:443" value={row.listen} onChange={listen => setRows(rows.map((r, j) => j === i ? {...r, listen} : r))} technical/>
 						{(PATHED.includes(row.type)) && <TextField label={t("config.path")} placeholder="/a-long-random-path" value={row.path} onChange={path => setRows(rows.map((r, j) => j === i ? {...r, path} : r))} technical/>}
-						<div className="p-cluster"><Rating/>{rows.length > 1 && <IconButton icon="close" label={t("config.removeTransport", {number: i + 1})} onClick={() => setRows(rows.filter((_, j) => j !== i))}/>}</div>
+						{rows.length > 1 && <div className="p-cluster"><IconButton icon="close" label={t("config.removeTransport", {number: i + 1})} onClick={() => setRows(rows.filter((_, j) => j !== i))}/></div>}
 					</div>)}
 					{rows.length < 8 && <div><Button size="sm" icon="plus" onClick={() => setRows([...rows, {type: "udp-obfs", listen: "", path: ""}])}>{t("config.addTransport")}</Button></div>}
-					<p className="vw-muted vw-small">{t("rating.detectableBody")}</p>
+					<p className="vw-muted vw-small">{t("inbounds.rating")}</p>
 				</fieldset>
 				{rows.some(row => PATHED.includes(row.type)) && <Banner tone="info" title={t("config.streamNote")}>{t("config.streamNoteBody")}</Banner>}
 			</>}
@@ -204,7 +245,7 @@ function Routing({routing, exits, onPropose}: {routing: Item, exits: string[], o
 			<SelectField label={t("rule.default")} hint={t("rule.defaultHint")} value={fallback} onChange={setFallback} options={exits.map(tag => ({value: tag, label: tag}))}/>
 			{fallback !== str(routing.default) && <div><Button variant="primary" onClick={() => onPropose({...routing, default: fallback})}>{t("config.review")}</Button></div>}
 		</Glass>
-		<Glass className="p-pad p-stack">
+		<Glass className="p-panel">
 			<div className="p-row p-table-head"><span className="vw-muted vw-small">{t("rule.lead")}</span><Button size="sm" icon="plus" onClick={() => setEditing(null)}>{t("rule.add")}</Button></div>
 			<DataTable caption={t("node.tab.routing")} rows={rules.map((rule, index) => ({rule, index}))} rowKey={row => String(row.index)} empty={<StateBlock kind="empty" title={t("rule.empty")} action={<Button icon="plus" onClick={() => setEditing(null)}>{t("rule.add")}</Button>}>{t("rule.emptyBody", {exit: str(routing.default)})}</StateBlock>} columns={[
 				{id: "order", header: t("rule.col.order"), cell: ({index}) => <span className="vw-num">{index + 1}</span>},

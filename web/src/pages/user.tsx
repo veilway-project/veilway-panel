@@ -1,20 +1,24 @@
-import {Banner, Button, Checkbox, ConfirmDialog, Dialog, Glass, Icon, IconButton, List, ListRow, StateBlock, TextField, UsageBar, useToast} from "@veilway/ui";
-import {useState} from "react";
+import {Banner, Button, Checkbox, ConfirmDialog, DataTable, Dialog, Glass, Icon, IconButton, StatRow, StatTile, StateBlock, TextField, useToast} from "@veilway/ui";
+import {useEffect, useState} from "react";
 import {api, type Device, type LinkView, type NodeState, type NodeUser, type XrayLink} from "../api.ts";
-import {Copyable, ErrorNote, LinkDialog, NodeNote, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {Copyable, ErrorNote, Mark, NodeNote, Qr, useCopy, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {useSettings} from "../settings.ts";
-import {useExpiry, UserForm} from "./users.tsx";
+import {handoff, useExpiry, UserForm} from "./users.tsx";
 import {XrayLinksDialog} from "./xray.tsx";
 
 export function UserPage({id}: {id: number}) {
-	const {t, date, bytes, number} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings();
+	const {t, date, time, bytes, number, percent} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings(), copy = useCopy();
 	const page = useLoad(() => Promise.all([api("get", "/users/{id}", {params: {id}}), api("get", "/users/{id}/devices", {params: {id}}), api("get", "/users/{id}/subscription", {params: {id}})]), [id]);
 	const [editing, setEditing] = useState(false), [dialog, setDialog] = useState<"delete" | "usage" | "link" | "device" | "xray" | null>(null), [removing, setRemoving] = useState<Device | null>(null);
 	const [totals, setTotals] = useState(false), [removeOld, setRemoveOld] = useState(false), [deviceName, setDeviceName] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [linkError, setLinkError] = useState<unknown>(null);
-	const [shown, setShown] = useState<{link: LinkView, once: boolean} | null>(null), [exported, setExported] = useState<{name: string, file: string, link?: string | null} | null>(null), [node, setNode] = useState<NodeState | null>(null), [xray, setXray] = useState<XrayLink[] | null>(null);
+	// fresh is a link made just now, by adding the user or resetting the link; otherwise it is the panel's copy, opened after re-authentication.
+	const [shown, setShown] = useState<{link: LinkView, once: boolean, fresh: boolean} | null>(() => { const made = handoff.current?.id === id ? handoff.current : null; handoff.current = null; return made && {link: made.link, once: settings?.show_links_once ?? false, fresh: true}; });
+	const [exported, setExported] = useState<{name: string, file: string, link?: string | null} | null>(null), [node, setNode] = useState<NodeState | null>(null), [xray, setXray] = useState<XrayLink[] | null>(null);
+	useEffect(() => { if (shown) document.getElementById("link-title")?.scrollIntoView({block: "nearest"}); }, [shown]);
 	if (page.error && !page.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={page.reload}>{t("action.retry")}</Button>}>{say(page.error)}</StateBlock>;
 	if (!page.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
 	const [user, {devices}, sub] = page.data, usage = user.node as NodeUser | null, current = devices.filter(d => d.token_gen === sub.token_generation);
+	const fresh = new Set((usage?.devices ?? []).filter(d => typeof d.handshake_age_secs === "number" && d.handshake_age_secs < 180).map(d => d.public_key)), online = devices.filter(d => fresh.has(d.public_key)).length;
 	const act = async (work: () => Promise<unknown>, after?: () => void) => {
 		setBusy(true);
 		setError(null);
@@ -30,58 +34,93 @@ export function UserPage({id}: {id: number}) {
 		}
 	};
 	const open = (next: typeof dialog) => { setError(null); setDialog(next); };
+	const showLink = async () => { setLinkError(null); try { setShown({link: await guard(() => api("post", "/users/{id}/subscription/show", {params: {id}})), once: false, fresh: false}); } catch (failure) { setLinkError(failure); } };
+	const total = usage?.traffic ? (usage.traffic.up_bytes ?? 0) + (usage.traffic.down_bytes ?? 0) : null, amount = usage?.used_bytes === undefined ? null : bytes(usage.used_bytes);
 	return <>
-		<a className="p-back" href="#/users"><Icon name="chevronForward"/>{t("common.back")}</a>
-		<PageHead title={user.name} lead={t(user.enabled ? "user.state.enabled" : "user.state.disabled") + (user.groups.length ? ". " + t("users.col.groups") + ": " + user.groups.join(", ") : "")}>
-			<Button onClick={() => setEditing(true)}>{t("user.edit")}</Button>
-			<Button variant="danger" onClick={() => open("delete")}>{t("user.delete")}</Button>
-		</PageHead>
-		<NodeNote node={node}/>
-		<div className="p-columns">
-			<Glass className="p-panel">
-				<h2 className="vw-h2">{t("user.usage")}</h2>
-				{usage?.used_bytes === undefined ? <p className="vw-muted">{t("users.usageUnknown")}</p> : <UsageBar label={t("user.usageLabel")} used={usage.used_bytes} total={user.quota_bytes ?? null}/>}
-				<ul className="p-facts">
-					{user.quota_period && <li>{t("user.period", {period: t(`user.period.${user.quota_period as "daily" | "weekly" | "monthly"}`)})}</li>}
-					{usage?.period_start ? <li>{t("user.usageSince", {date: date(new Date(usage.period_start * 1000))})}</li> : null}
-					{usage?.traffic && <li>{t("user.total", {amount: bytes((usage.traffic.up_bytes ?? 0) + (usage.traffic.down_bytes ?? 0)).text})}</li>}
-					<li>{user.expires_at ? t("user.expires", {date: date(new Date(user.expires_at * 1000))}) + ". " + expiry(user.expires_at) : t("users.noExpiry")}</li>
-				</ul>
-				<div><Button icon="refresh" onClick={() => { setTotals(false); open("usage"); }}>{t("user.resetUsage")}</Button></div>
-			</Glass>
-			<Glass className="p-panel">
-				<div><h2 className="vw-h2">{t("user.link")}</h2><p className="vw-muted">{t("user.linkLead", {name: user.name})}</p></div>
-				<dl className="p-dl">
-					<div><dt>{t("user.subId")}</dt><dd className="vw-code">{sub.subscription_id}</dd></div>
-					<div><dt>{t("user.linkGen")}</dt><dd>{t("user.linkMade", {generation: number(sub.token_generation), date: date(new Date(sub.token_created * 1000))})}</dd></div>
-					{sub.key_fingerprints.length > 0 && <div><dt>{t("user.keys")}</dt><dd>{sub.key_fingerprints.map(f => <span key={f} className="vw-code vw-small p-block">{f}</span>)}</dd></div>}
-				</dl>
-				{!sub.can_show && <p className="vw-muted vw-small">{t("user.noCopy")}</p>}
-				<ErrorNote error={linkError}/>
-				<div className="p-cluster">
-					{sub.can_show && <Button variant="primary" icon="eye" onClick={async () => { setLinkError(null); try { setShown({link: await guard(() => api("post", "/users/{id}/subscription/show", {params: {id}})), once: false}); } catch (failure) { setLinkError(failure); } }}>{t("user.showLink")}</Button>}
-					<Button onClick={() => { setRemoveOld(false); open("link"); }}>{t("user.resetLink")}</Button>
-					<Button variant="quiet" icon="eye" onClick={async () => { setLinkError(null); try { setXray((await guard(() => api("get", "/users/{id}/xray", {params: {id}}))).links); } catch (failure) { setLinkError(failure); } }}>{t("xray.showLinks")}</Button>
-					<Button variant="quiet" onClick={() => open("xray")}>{t("xray.rotate")}</Button>
+		<header className="p-head">
+			<div>
+				<a className="p-crumb" href="#/users"><Icon name="chevronForward"/>{t("common.back")}</a>
+				<div className="p-title-row">
+					<h1 className="vw-h1 vw-code">{user.name}</h1>
+					<span className="p-flags"><Mark tone={user.enabled ? "success" : "muted"}>{t(user.enabled ? "user.state.enabled" : "user.state.disabled")}</Mark>{online > 0 && <Mark tone="success">{t("user.online", {count: online})}</Mark>}</span>
 				</div>
-			</Glass>
-		</div>
-		<Glass className="p-panel">
-			<div className="p-row">
-				<div><h2 className="vw-h2">{t("user.devices")}</h2><p className="vw-muted">{user.device_limit ? t("user.devicesLead", {used: number(user.devices), limit: number(user.device_limit)}) : t("user.devicesLeadNoLimit", {used: number(user.devices)})}</p></div>
-				<Button variant="quiet" icon="plus" onClick={() => { setDeviceName(""); open("device"); }}>{t("device.add")}</Button>
+				<p>{[user.note, t("user.added", {date: date(new Date(user.created * 1000))})].filter(Boolean).join(". ")}</p>
 			</div>
-			{devices.length === 0 ? <StateBlock kind="empty" title={t("user.noDevices")}>{t("user.noDevicesBody")}</StateBlock> : <List label={t("user.devices")}>{devices.map(d => <ListRow key={d.id} leading={<Icon name="device"/>} title={d.name} detail={<span className="p-meta">
-				<span>{t(d.state === "pending" ? "device.pending" : "device.enrolled")}</span>
-				<span className="vw-code">{d.address}</span>
-				<span>{t(d.key_origin === "panel" ? "device.panelKey" : "device.ownKey")}</span>
-				<span>{d.last_seen ? t("device.lastSeen", {date: date(new Date(d.last_seen * 1000))}) : t("device.neverSeen")}</span>
-			</span>} trailing={<span className="p-cluster">
-				{d.key_origin === "panel" && <IconButton icon="download" label={t("device.export", {name: d.name})} onClick={async () => { setError(null); try { setExported({name: d.name, ...await guard(() => api("post", "/users/{id}/devices/{did}/export", {params: {id, did: d.id}}))}); } catch (failure) { setError(failure); } }}/>}
-				<IconButton icon="close" label={t("device.remove", {name: d.name})} onClick={() => setRemoving(d)}/>
-			</span>}/>)}</List>}
-			{!dialog && <ErrorNote error={error}/>}
-		</Glass>
+			<div className="p-cluster">
+				<Button onClick={() => setEditing(true)}>{t("user.edit")}</Button>
+				<Button onClick={() => { setTotals(false); open("usage"); }}>{t("user.resetUsage")}</Button>
+				<Button variant="danger" onClick={() => open("delete")}>{t("user.delete")}</Button>
+			</div>
+		</header>
+		<NodeNote node={node}/>
+		<div className="p-grid-main">
+			<div className="p-stack">
+				<Glass className="p-panel">
+					<div className="p-sheet-head"><div><h2 className="vw-h2">{t("user.usage")}</h2><p>{usage?.period_start ? t("user.usageSince", {date: date(new Date(usage.period_start * 1000))}) : t("user.usageLabel")}</p></div></div>
+					{amount === null ? <p className="vw-muted">{t("users.usageUnknown")}</p> : <div className="p-big-usage">
+						<div><span className="vw-figure p-figure-big">{amount.value}</span><span className="vw-muted">{user.quota_bytes ? t("user.ofQuota", {unit: amount.unit, total: bytes(user.quota_bytes).text, percent: percent(usage!.used_bytes! / user.quota_bytes)}) : amount.unit + ". " + t("users.noLimit")}</span></div>
+						{user.quota_bytes ? <div className="vw-usage" data-level={usage!.used_bytes! >= user.quota_bytes ? "over" : usage!.used_bytes! / user.quota_bytes >= 0.8 ? "near" : "ok"}><div className="vw-meter" role="meter" aria-label={t("user.usageLabel")} aria-valuemin={0} aria-valuemax={user.quota_bytes} aria-valuenow={usage!.used_bytes}><span style={{inlineSize: Math.min(100, usage!.used_bytes! / user.quota_bytes * 100) + "%"}}/></div></div> : null}
+					</div>}
+					<div className="p-stat-sm"><StatRow>
+						<StatTile label={t("form.period")} value={t(`form.period.${(user.quota_period ?? "none") as "none"}`)}/>
+						<StatTile label={t("form.expiry")} value={user.expires_at ? date(new Date(user.expires_at * 1000)) : t("users.noExpiry")} detail={user.expires_at ? expiry(user.expires_at) : undefined}/>
+						{total !== null && <StatTile label={t("user.totalLabel")} value={bytes(total).text}/>}
+						<StatTile label={t("users.col.groups")} value={user.groups.length ? user.groups.join(", ") : t("common.none")}/>
+					</StatRow></div>
+				</Glass>
+				<Glass className="p-panel">
+					<div className="p-sheet-head">
+						<div><h2 className="vw-h2">{t("user.devices")}</h2><p>{user.device_limit ? t("user.devicesLead", {used: number(user.devices), limit: number(user.device_limit)}) : t("user.devicesLeadNoLimit", {used: number(user.devices)})}</p></div>
+						<Button size="sm" icon="plus" onClick={() => { setDeviceName(""); open("device"); }}>{t("device.add")}</Button>
+					</div>
+					{devices.length === 0 ? <StateBlock kind="empty" title={t("user.noDevices")}>{t("user.noDevicesBody")}</StateBlock> : <DataTable caption={t("user.devices")} rows={devices} rowKey={d => String(d.id)} columns={[
+						{id: "name", header: t("device.col.device"), cell: d => <span className="p-user"><span className="vw-code">{d.name}</span><span>{d.state === "pending" ? t("device.pending") : t("device.enrolledOn", {date: date(new Date((d.confirmed_at ?? d.created) * 1000), {month: "short", day: "numeric"})})}</span></span>},
+						{id: "address", header: t("device.col.address"), cell: d => <span className="vw-code" dir="ltr">{d.address}</span>},
+						{id: "key", header: t("device.col.key"), cell: d => <span className="vw-small">{t(d.key_origin === "panel" ? "device.keyPanel" : "device.keyOwn")}</span>},
+						{id: "seen", header: t("device.col.seen"), cell: d => fresh.has(d.public_key) ? <Mark tone="success">{t("device.online")}</Mark> : d.last_seen ? <span className="vw-small vw-muted vw-num">{date(new Date(d.last_seen * 1000), {month: "short", day: "numeric"}) + " " + time(new Date(d.last_seen * 1000))}</span> : <span className="vw-small vw-muted">{t("device.neverSeen")}</span>},
+						{id: "actions", header: "", align: "end", cell: d => <span className="p-cluster p-end">
+							{d.key_origin === "panel" && <IconButton icon="download" label={t("device.export", {name: d.name})} onClick={async () => { setError(null); try { setExported({name: d.name, ...await guard(() => api("post", "/users/{id}/devices/{did}/export", {params: {id, did: d.id}}))}); } catch (failure) { setError(failure); } }}/>}
+							<IconButton icon="close" label={t("device.remove", {name: d.name})} onClick={() => setRemoving(d)}/>
+						</span>}
+					]}/>}
+					{!dialog && <ErrorNote error={error}/>}
+				</Glass>
+				<Glass className="p-panel">
+					<div className="p-sheet-head">
+						<div><h2 className="vw-h2">{t("xray.userTitle")}</h2><p>{t("xray.userLead")}</p></div>
+						<div className="p-cluster">
+							<Button size="sm" icon="eye" onClick={async () => { setLinkError(null); try { setXray((await guard(() => api("get", "/users/{id}/xray", {params: {id}}))).links); } catch (failure) { setLinkError(failure); } }}>{t("xray.showLinks")}</Button>
+							<Button size="sm" onClick={() => open("xray")}>{t("xray.rotate")}</Button>
+						</div>
+					</div>
+				</Glass>
+			</div>
+			<div className="p-stack">
+				{shown ? <Glass className="p-panel p-sheet-new" aria-labelledby="link-title">
+					<div className="p-sheet-head"><div><h2 className="vw-h2" id="link-title">{t(shown.fresh ? "user.linkNew" : "user.link")}</h2><p>{t(shown.fresh ? "user.linkNewLead" : "link.body")}</p></div></div>
+					{shown.fresh && (shown.once ? <Banner tone="warning" title={t("link.once")}/> : <Banner tone="info" title={t("user.linkSendNow")}>{t("user.linkLater")}</Banner>)}
+					<Qr svg={shown.link.qr_svg} label={t("link.qr")}/>
+					<Copyable label={t("link.native")} value={shown.link.veilway}/>
+					<Copyable label={t("link.https")} value={shown.link.https}/>
+					<div className="p-form-foot"><Button variant="quiet" onClick={() => setShown(null)}>{t(shown.fresh ? "user.linkDone" : "user.linkHide")}</Button><Button variant="primary" icon="copy" onClick={() => copy(shown.link.veilway)}>{t("user.copyNative")}</Button></div>
+				</Glass> : <Glass className="p-panel">
+					<div className="p-sheet-head"><div><h2 className="vw-h2">{t("user.link")}</h2><p>{t("user.linkLead", {name: user.name})}</p></div></div>
+					<div className="vw-well p-hidden-link">
+						<div className="vw-input-group"><input className="vw-input vw-code" dir="ltr" readOnly value={(sub.endpoint_url || "https://") + "#" + "•".repeat(16)} aria-label={t("user.linkHidden")}/><span className="vw-unit">{t("user.hidden")}</span></div>
+						{sub.can_show ? <div className="p-cluster"><Button variant="primary" icon="eye" onClick={() => void showLink()}>{t("user.showLink")}</Button><span className="vw-small vw-muted">{t("user.showNote")}</span></div> : <p className="vw-small vw-muted">{t("user.noCopy")}</p>}
+						<ErrorNote error={linkError}/>
+					</div>
+					<dl className="p-kv">
+						<dt>{t("user.linkGen")}</dt><dd>{t("user.linkMade", {generation: number(sub.token_generation), date: date(new Date(sub.token_created * 1000))})}</dd>
+						<dt>{t("user.linkDevices")}</dt><dd className="vw-num">{number(current.length)}</dd>
+						{sub.key_fingerprints.length > 0 && <><dt>{t("user.keys")}</dt><dd>{sub.key_fingerprints.map(f => <span key={f} className="vw-code p-block">{f}</span>)}</dd></>}
+						<dt>{t("user.subId")}</dt><dd><span className="vw-code">{sub.subscription_id}</span><span className="p-sub">{t("user.subIdNote")}</span></dd>
+					</dl>
+					<div className="p-form-foot"><p>{t("user.resetNote")}</p><Button variant="danger" onClick={() => { setRemoveOld(false); open("link"); }}>{t("user.resetLink")}</Button></div>
+				</Glass>}
+				{shown && <ErrorNote error={linkError}/>}
+			</div>
+		</div>
 		{editing && <UserForm user={user} defaultLimit={settings?.default_device_limit ?? 3} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); page.reload(); }}/>}
 		<ConfirmDialog open={dialog === "delete"} onOpenChange={o => { if (!o) setDialog(null); }} danger title={t("user.deleteTitle", {name: user.name})} body={t("user.deleteBody")} confirmLabel={t("user.delete")} onConfirm={() => void guard(() => api("delete", "/users/{id}", {params: {id}})).then(() => { toast({tone: "success", title: t("user.deleted", {name: user.name})}); location.hash = "#/users"; }, failure => toast({tone: "danger", title: say(failure)}))}/>
 		<ConfirmDialog open={removing !== null} onOpenChange={o => { if (!o) setRemoving(null); }} danger title={t("device.removeTitle", {name: removing?.name ?? ""})} body={t("device.removeBody")} confirmLabel={t("common.remove")} onConfirm={() => { const d = removing!; void guard(() => api("delete", "/users/{id}/devices/{did}", {params: {id, did: d.id}})).then(answer => { setNode(answer.node); toast({tone: "success", title: t("device.removed", {name: d.name})}); page.reload(); }, failure => toast({tone: "danger", title: say(failure)})); }}/>
@@ -99,7 +138,7 @@ export function UserPage({id}: {id: number}) {
 				const answer = await api("post", "/users/{id}/subscription/reset", {params: {id}, body: {remove_devices: removeOld}});
 				setNode(answer.node);
 				toast({tone: "success", title: t(answer.removed ? "user.resetLinkRemoved" : "user.resetLinkKept", {count: answer.old_devices.length})});
-				if (answer.link) setShown({link: answer.link, once: settings?.show_links_once ?? !sub.can_show});
+				if (answer.link) setShown({link: answer.link, once: settings?.show_links_once ?? !sub.can_show, fresh: true});
 				if (answer.link_error) toast({tone: "warning", title: t("link.failed", {error: answer.link_error})});
 			})}>{t("user.resetLinkConfirm")}</Button></div>
 		</Dialog>
@@ -117,7 +156,6 @@ export function UserPage({id}: {id: number}) {
 				{exported.link && <Copyable label={t("device.exportLink")} value={exported.link}/>}
 			</div>}
 		</Dialog>
-		<LinkDialog name={user.name} link={shown?.link ?? null} once={shown?.once ?? false} onClose={() => setShown(null)}/>
 		<XrayLinksDialog name={user.name} links={xray} onClose={() => setXray(null)}/>
 	</>;
 }

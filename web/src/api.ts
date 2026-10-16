@@ -30,7 +30,7 @@ export type Pairings = {offers: {id: string, name: string, direction: string, ex
 export type NodeLink = {tag: string, id: string, half: string, role: string, state: string, state_secs: number, flows: number, traffic: {up_bytes: number, down_bytes: number}};
 export type Pasted = {id: string, name: string, direction: string, half: string, expires_at: number, expired: boolean, overlaps_pool: boolean, dials: {address: string, private: boolean}[], transports: {type: string}[], ws_warning: boolean};
 /** What the node reports for a user. The schema leaves it open, so only the fields the panel reads are named. */
-export type NodeUser = {used_bytes?: number, period_start?: number, denied?: "disabled" | "expired" | "quota" | null, traffic?: {up_bytes?: number, down_bytes?: number}};
+export type NodeUser = {used_bytes?: number, period_start?: number, denied?: "disabled" | "expired" | "quota" | null, traffic?: {up_bytes?: number, down_bytes?: number}, devices?: {public_key?: string, handshake_age_secs?: number | null}[]};
 
 type Method = "get" | "post" | "put" | "patch" | "delete";
 type Operation<P extends keyof paths, M extends Method> = NonNullable<paths[P][M]>;

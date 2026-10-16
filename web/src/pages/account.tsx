@@ -6,11 +6,13 @@ import {ErrorNote, PageHead, TotpShown, useGuard, useLoad, useP, useSay} from ".
 
 export type Prefs = {locale: "en" | "fa", scheme: "system" | "dark" | "light"};
 
-export function AccountPage({username, prefs, onPrefs, onLogout}: {username: string, prefs: Prefs, onPrefs: (prefs: Prefs) => void, onLogout: () => void}) {
-	const {t} = useP(), [tab, setTab] = useState("sessions");
+const TABS = ["sessions", "security", "audit", "backup", "display"];
+
+export function AccountPage({tab, username, prefs, onPrefs, onLogout}: {tab: string, username: string, prefs: Prefs, onPrefs: (prefs: Prefs) => void, onLogout: () => void}) {
+	const {t} = useP();
 	return <>
 		<PageHead title={t("account.title")} lead={t("account.lead", {name: username})}><Button icon="power" onClick={onLogout}>{t("account.logout")}</Button></PageHead>
-		<Tabs label={t("account.title")} value={tab} onChange={setTab} items={[
+		<Tabs label={t("account.title")} value={TABS.includes(tab) ? tab : "sessions"} onChange={id => { location.hash = "#/account/" + id; }} items={[
 			{id: "sessions", label: t("account.tab.sessions"), content: <Sessions/>},
 			{id: "security", label: t("account.tab.security"), content: <Security/>},
 			{id: "audit", label: t("account.tab.audit"), content: <Audit/>},
@@ -77,7 +79,7 @@ function Audit() {
 	if (first.error && !first.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={first.reload}>{t("action.retry")}</Button>}>{say(first.error)}</StateBlock>;
 	if (!first.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
 	const rows = [...first.data.entries, ...older], last = rows[rows.length - 1];
-	return <Glass className="p-pad p-stack">
+	return <Glass className="p-panel">
 		<DataTable caption={t("account.tab.audit")} rows={rows} rowKey={r => String(r.id)} empty={<StateBlock kind="empty" title={t("audit.empty")}>{t("audit.emptyBody")}</StateBlock>} columns={[
 			{id: "when", header: t("audit.col.when"), cell: r => <span className="vw-num">{date(new Date(r.at * 1000), {month: "short", day: "numeric"}) + " " + time(new Date(r.at * 1000))}</span>},
 			{id: "who", header: t("audit.col.who"), cell: r => <span className="vw-code">{r.actor}</span>},

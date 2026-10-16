@@ -1,7 +1,7 @@
-import {Banner, Button, Dialog, Field, IconButton, TextField, useI18n, useToast, type Tone} from "@veilway/ui";
+import {Banner, Button, Dialog, Field, Icon, IconButton, TextField, useI18n, useToast, type Tone} from "@veilway/ui";
 import qrcode from "qrcode-generator";
 import {createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode} from "react";
-import {api, ApiError, type LinkView, type NodeState, type Totp} from "./api.ts";
+import {api, ApiError, type NodeState, type Totp} from "./api.ts";
 import {en, type PanelKey} from "./locales/en.ts";
 
 export const useP = () => useI18n<PanelKey>();
@@ -110,18 +110,6 @@ export function Copyable({label, value, multiline}: {label: string, value: strin
 	</div>}</Field>;
 }
 
-export function LinkDialog({name, link, once, onClose}: {name: string, link: LinkView | null, once: boolean, onClose: () => void}) {
-	const {t} = useP();
-	return <Dialog open={link !== null} onOpenChange={open => { if (!open) onClose(); }} title={t("link.title", {name})} description={t("link.body")}>
-		{link && <div className="p-stack">
-			{once && <Banner tone="warning" title={t("link.once")}/>}
-			<Qr svg={link.qr_svg} label={t("link.qr")}/>
-			<Copyable label={t("link.native")} value={link.veilway}/>
-			<Copyable label={t("link.https")} value={link.https}/>
-		</div>}
-	</Dialog>;
-}
-
 export function TotpShown({totp, done, onDone}: {totp: Totp, done: string, onDone: () => void}) {
 	const {t} = useP();
 	return <div className="p-stack">
@@ -142,15 +130,9 @@ export const toDay = (seconds: number | null | undefined) => seconds ? new Date(
 // The end of the chosen day in UTC, so a user set to expire on a day can use all of it.
 export const fromDay = (day: string) => day ? Math.floor(Date.parse(day + "T23:59:59Z") / 1000) : null;
 
-// A state word on its tone's wash, where status colors are allowed. The word says it on its own; the color repeats it.
-export function Mark({tone, title, children}: {tone?: Tone, title?: string, children: ReactNode}) {
-	return <span className="p-mark" data-tone={tone} title={title}>{children}</span>;
-}
-
-// Operator rating of a transport (PLAN "Ratings"). In this release every transport is Detectable: none has passed the probe, length, timing and fingerprint tests that Protected needs. Operators only; apps never show it.
-export function Rating() {
-	const {t} = useP();
-	return <Mark tone="warning" title={t("rating.detectableBody")}>{t("rating.detectable")}</Mark>;
+// A state word after an icon in its tone. The word says it on its own; the icon and its color repeat it.
+export function Mark({tone, title, children}: {tone?: Tone | "muted", title?: string, children: ReactNode}) {
+	return <span className="p-flag" data-tone={tone} title={title}><Icon name={tone === "success" ? "check" : tone === "warning" ? "warning" : tone === "danger" ? "error" : "info"}/>{children}</span>;
 }
 
 const DIGITS = /[۰-۹٠-٩]/g;
