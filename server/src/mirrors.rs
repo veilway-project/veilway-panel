@@ -1,4 +1,5 @@
 //! Relay mirrors: servers of the provider that forward the subscription endpoint's requests and say, in a signed header, which address a request really came from.
+//! A relay mirror forwards the sealed request unchanged, over https, and the header's mac covers the hash of those sealed bytes. To a request with a valid header the endpoint answers anything it would answer as an unknown path with status 599, which the mirror does not pass on (`subs.rs`).
 //! The header is `X-Veilway-Mirror: v1;name;address;timestamp;nonce;mac`. The mac is HMAC-SHA-256 under the mirror's secret over the label `veilway mirror v1`, then the name, address, timestamp, nonce and the base64url SHA-256 of the request body, each after a line feed. The nonce is 16 random bytes in unpadded base64url, and the mac is written the same way.
 use crate::{app::App, crypto::{self, now}};
 use axum::http::HeaderMap;

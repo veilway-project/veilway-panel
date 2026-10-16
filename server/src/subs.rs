@@ -1,26 +1,26 @@
 //! The subscription side: the link, the signed document, and the public endpoint that answers a valid token and nothing else.
-use crate::{app::{bucket, App, Settings, SigningEntry}, auth, crypto::{self, now}, mirrors, statics};
-use axum::{body::Body, extract::{Request, State}, http::{header::{CACHE_CONTROL, CONTENT_TYPE}, HeaderValue, Method}, response::Response};
+use crate::{app::{bucket, App, Endpoint, SigningEntry}, auth, crypto::{self, now}, gateway, mirrors, statics};
+use axum::{body::Body, extract::{Request, State}, http::{header::{CACHE_CONTROL, CONTENT_TYPE, HOST}, HeaderValue, Method, StatusCode}, response::Response};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
 use ipnet::Ipv4Net;
 use rusqlite::{params, Connection, OptionalExtension, Row};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::{collections::HashSet, sync::{atomic::Ordering, Arc}};
-use veilway_proto::subscription::{envelope::{self, Kid}, link::Link};
+use veilway_proto::subscription::{envelope, exchange::{self, GatewayKey}, fetch::{Op, RequestError}, link::Link};
 
 pub const PENDING_PLACES: i64 = 2;
 pub const PENDING_LAPSE: i64 = 600;
 const NODE_DEVICES_MAX: i64 = 16;
 
 #[derive(Clone, Debug)]
-pub struct UserRow {pub id: i64, pub name: String, pub enabled: bool, pub groups: String, pub exits: String, pub quota_bytes: Option<i64>, pub quota_period: Option<String>, pub expires_at: Option<i64>, pub device_limit: i64, pub note: String, pub created: i64, pub record_id: [u8; 16], pub sub_id: String, pub token_copy: Option<Vec<u8>>, pub token_gen: i64, pub token_created: i64, pub default_exit: Option<String>}
+pub struct UserRow {pub id: i64, pub name: String, pub enabled: bool, pub groups: String, pub exits: String, pub quota_bytes: Option<i64>, pub quota_period: Option<String>, pub expires_at: Option<i64>, pub device_limit: i64, pub note: String, pub created: i64, pub record_id: [u8; 16], pub sub_id: String, pub token_copy: Option<Vec<u8>>, pub token_gen: i64, pub token_created: i64, pub default_exit: Option<String>, pub endpoint: Option<String>}
 
-pub const USER_COLUMNS: &str = "id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_copy, token_gen, token_created, default_exit";
+pub const USER_COLUMNS: &str = "id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_copy, token_gen, token_created, default_exit, endpoint";
 
 impl UserRow {
 	pub fn read(row: &Row) -> rusqlite::Result<Self> {
-		Ok(Self {id: row.get(0)?, name: row.get(1)?, enabled: row.get(2)?, groups: row.get(3)?, exits: row.get(4)?, quota_bytes: row.get(5)?, quota_period: row.get(6)?, expires_at: row.get(7)?, device_limit: row.get(8)?, note: row.get(9)?, created: row.get(10)?, record_id: row.get::<_, Vec<u8>>(11)?.try_into().unwrap_or([0; 16]), sub_id: row.get(12)?, token_copy: row.get(13)?, token_gen: row.get(14)?, token_created: row.get(15)?, default_exit: row.get(16)?})
+		Ok(Self {id: row.get(0)?, name: row.get(1)?, enabled: row.get(2)?, groups: row.get(3)?, exits: row.get(4)?, quota_bytes: row.get(5)?, quota_period: row.get(6)?, expires_at: row.get(7)?, device_limit: row.get(8)?, note: row.get(9)?, created: row.get(10)?, record_id: row.get::<_, Vec<u8>>(11)?.try_into().unwrap_or([0; 16]), sub_id: row.get(12)?, token_copy: row.get(13)?, token_gen: row.get(14)?, token_created: row.get(15)?, default_exit: row.get(16)?, endpoint: row.get(17)?})
 	}
 	pub fn load(db: &Connection, id: i64) -> rusqlite::Result<Self> {db.query_row(&format!("select {USER_COLUMNS} from users where id = ?"), [id], Self::read)}
 }
@@ -51,11 +51,12 @@ pub fn allocate(db: &Connection, pool: &str) -> Option<String> {
 
 pub struct LinkOut {pub veilway: String, pub https: String}
 
-/// The link of a token, built from the text of the format and read back through the format's own parser, so a link the client would refuse is never handed out.
-pub fn link(settings: &Settings, key: &SigningEntry, token: &[u8; 16]) -> Result<LinkOut, String> {
-	let endpoint = settings.endpoint_url.strip_prefix("https://").filter(|rest| rest.contains('/') && !rest.contains('#')).ok_or("the endpoint URL is not set to an https URL with a path")?;
-	let pin = settings.endpoint_pins.first().map(|pin| STANDARD.decode(pin).map(|bytes| format!(".{}", URL_SAFE_NO_PAD.encode(bytes))).map_err(|_| "an endpoint pin is not base64")).transpose()?.unwrap_or_default();
-	let text = format!("veilway://sub/{endpoint}#v1.{}.{}{pin}", URL_SAFE_NO_PAD.encode(key.public()), URL_SAFE_NO_PAD.encode(token));
+/// The link of a token, built from the text of the format and read back through the format's own parser, so a link the client would refuse is never handed out. A plain endpoint gives the `sub-plain` form and never a pin.
+pub fn link(endpoint: &Endpoint, key: &SigningEntry, gateway: &GatewayKey, token: &[u8; 16]) -> Result<LinkOut, String> {
+	let (scheme, address) = match (endpoint.url.strip_prefix("https://"), endpoint.url.strip_prefix("http://")) {(Some(rest), _) => ("sub", rest), (_, Some(rest)) => ("sub-plain", rest), _ => return Err("the endpoint URL is not an https or http URL".into())};
+	if !address.contains('/') || address.contains('#') {return Err("the endpoint URL needs a path and no fragment".into())}
+	let pin = endpoint.pins.first().map(|pin| STANDARD.decode(pin).map(|bytes| format!(".{}", URL_SAFE_NO_PAD.encode(bytes))).map_err(|_| "an endpoint pin is not base64")).transpose()?.unwrap_or_default();
+	let text = format!("veilway://{scheme}/{address}#v1.{}.{}.{}{pin}", URL_SAFE_NO_PAD.encode(key.public()), URL_SAFE_NO_PAD.encode(gateway.link()), URL_SAFE_NO_PAD.encode(token));
 	match Link::parse(&text).map_err(|error| error.to_string())? {Link::Native(native) => Ok(LinkOut {veilway: native.veilway(), https: native.https()}), _ => Err("the link did not read as a native one".into())}
 }
 
@@ -71,7 +72,7 @@ pub fn refusal(entry: &SigningEntry, subscription_id: &str, reason: &str) -> Str
 pub enum Form {Answer, Static, Whole}
 
 /// A signed subscription for one device of one account. Its serial comes from the device's own counter, which the endpoint and the publisher share: the larger of the time and the last serial plus one, so no serial is signed for two bodies.
-pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[SigningEntry], signer: &SigningEntry, form: Form, used: Option<&Value>) -> Result<String, String> {
+pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[SigningEntry], signer: &SigningEntry, form: Form, used: Option<&Value>, host: Option<&str>) -> Result<String, String> {
 	let keys = app.keys.as_ref().ok_or("no key file")?;
 	let settings = app.settings();
 	if settings.profiles.is_empty() {return Err("no profile is configured".into())}
@@ -91,7 +92,20 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 		"devices": devices.iter().map(|other| json!({"name": other.name, "enrolled_at": other.confirmed_at.unwrap_or(other.created), "this": other.id == this.id, "pending": other.state == "pending"})).collect::<Vec<_>>(),
 	});
 	if form != Form::Static {payload["usage"] = json!({"used_bytes": used.and_then(|user| user.get("used_bytes")).and_then(Value::as_u64).unwrap_or(0), "quota_bytes": user.quota_bytes.unwrap_or(0), "period": user.quota_period.as_deref().unwrap_or("none"), "period_start": used.and_then(|user| user.get("period_start")).and_then(Value::as_i64).unwrap_or(0).max(0), "expires_at": user.expires_at.unwrap_or(0), "device_limit": user.device_limit});}
-	if !settings.endpoint_pins.is_empty() {payload["endpoint_pins"] = json!(settings.endpoint_pins);}
+	if form != Form::Whole {
+		let listed = app.gateway.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).listed();
+		if listed.is_empty() {return Err("no gateway key".into())}
+		let keys: Vec<Value> = listed.iter().map(gateway::listed).collect();
+		let resolved = settings.resolve(user.endpoint.as_deref(), &serde_json::from_str::<Vec<String>>(&user.groups).unwrap_or_default()).map(|(found, _)| found);
+		// The pins are those of the endpoint this request came in on, since that is the endpoint the client holds. The move names the endpoint the account is to use, even when it is this one.
+		let reached = host.and_then(|host| settings.by_host(host)).or(resolved);
+		if let Some(reached) = reached.filter(|reached| !reached.pins.is_empty()) {payload["endpoint_pins"] = json!(reached.pins);}
+		payload["gateway_keys"] = json!(keys);
+		if let Some(resolved) = resolved {
+			payload["main_endpoint"] = json!({"url": resolved.url, "gateway_keys": keys});
+			if !resolved.pins.is_empty() {payload["main_endpoint"]["pins"] = json!(resolved.pins);}
+		}
+	}
 	if !settings.refresh_mirrors.is_empty() {payload["refresh_urls"] = json!(settings.refresh_mirrors);}
 	let support: Vec<Value> = [(&settings.terms_url, "Terms of service", "شرایط استفاده"), (&settings.privacy_url, "Privacy policy", "حریم خصوصی")].into_iter().filter(|(url, ..)| !url.is_empty()).map(|(url, label, persian)| json!({"label": {"default": label, "fa": persian}, "url": url})).collect();
 	if !support.is_empty() {payload["support"] = json!(support);}
@@ -99,92 +113,97 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 	Ok(sign(signer, &payload))
 }
 
-fn signed_response(text: String) -> Response {
-	let mut response = Response::new(Body::from(text));
-	response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/jose"));
-	response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+/// How long a signed refusal is reused, half of its age limit of a day, so the client always finds it young enough.
+const REFUSAL_REUSE: i64 = 43_200;
+const REFUSALS_MAX: usize = 100_000;
+
+/// A signed refusal, signed once per account, reason and key and reused while it is fresh, so that a holder of a valid token cannot make the panel sign at will.
+fn refusal_for(app: &App, signer: &SigningEntry, user: &UserRow, reason: &str) -> String {
+	let (key, at) = ((user.id, reason.to_owned(), signer.proto().kid().bytes()), now());
+	let mut cache = app.refusals.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+	if let Some((_, text)) = cache.get(&key).filter(|(made, _)| at - made < REFUSAL_REUSE) {return text.clone()}
+	if cache.len() >= REFUSALS_MAX {cache.retain(|_, (made, _)| at - *made < REFUSAL_REUSE)}
+	let text = refusal(signer, &user.sub_id, reason);
+	cache.insert(key, (at, text.clone()));
+	text
+}
+
+/// The one answer for everything that is not a valid request. To a request with a valid relay mirror header it is status 599, which the mirror does not pass on.
+fn unknown(app: &App, mirrored: bool) -> Response {
+	let mut response = app.not_found();
+	if mirrored {*response.status_mut() = StatusCode::from_u16(599).unwrap_or(StatusCode::NOT_FOUND)}
 	response
 }
 
-const MEMBERS: [&str; 7] = ["v", "token", "kids", "device_public_key", "device_secret", "op", "device_name"];
-
-struct Asked {kids: Vec<Kid>, public_key: String, secret: [u8; 16], op: String, name: Option<String>}
-
-fn asked(map: &Map<String, Value>) -> Option<Asked> {
-	if map.keys().any(|key| !MEMBERS.contains(&key.as_str())) || map.get("v")?.as_u64()? != 1 {return None}
-	let kids: Vec<Kid> = map.get("kids")?.as_array()?.iter().map(|kid| Kid::read(kid.as_str()?)).collect::<Option<_>>()?;
-	if !(1..=2).contains(&kids.len()) {return None}
-	let public_key = map.get("device_public_key")?.as_str()?;
-	let raw: [u8; 32] = STANDARD.decode(public_key).ok()?.try_into().ok()?;
-	if raw == [0; 32] || STANDARD.encode(raw) != public_key {return None}
-	let secret_text = map.get("device_secret")?.as_str()?;
-	let secret: [u8; 16] = URL_SAFE_NO_PAD.decode(secret_text).ok()?.try_into().ok()?;
-	if URL_SAFE_NO_PAD.encode(secret) != secret_text {return None}
-	let op = map.get("op")?.as_str()?;
-	if !["fetch", "confirm", "release"].contains(&op) {return None}
-	let name = match map.get("device_name") {
-		None => None,
-		Some(name) => {
-			if op != "confirm" || name.as_str()?.chars().count() > 32 {return None}
-			let shown = veilway_proto::control::display(name.as_str()?, 32, 128);
-			if shown.is_empty() {return None}
-			Some(shown)
-		}
-	};
-	Some(Asked {kids, public_key: public_key.to_string(), secret, op: op.to_string(), name})
-}
-
-/// Reads the body and says whether it is a valid request. Anything that is not answers as an unknown path.
+/// Reads the body, opens it through the gateway and answers a valid request with a sealed document or refusal. Anything else answers as an unknown path.
 pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response {
 	let post = request.method() == Method::POST;
 	let (direct, headers) = (auth::source(&app, &request), request.headers().clone());
-	// The body is drained to the cap whatever it holds, and the lookup always runs, so an invalid request costs what a valid one does.
-	let body = http_body_util::Limited::new(request.into_body(), 1024).collect().await.map(|body| body.to_bytes()).unwrap_or_default();
-	// A valid mirror header names the real source of the request. One that is not valid, or a source over its limit, is an unknown request, and only an admitted request takes its nonce.
+	let host = headers.get(HOST).and_then(|host| host.to_str().ok()).map(str::to_owned);
+	// "The body is read up to 1,073 bytes and no further": a longer one reads as nothing, and the gateway then takes it for a body of another size.
+	let body = http_body_util::Limited::new(request.into_body(), exchange::REQUEST).collect().await.map(|body| body.to_bytes()).unwrap_or_default();
 	let via = mirrors::check(&app, &headers, &body);
 	let verified = via.as_ref().ok().and_then(Option::as_ref);
+	let mirrored = verified.is_some();
 	let source = verified.map_or(direct, |verified| verified.address.to_string());
 	if let Some(verified) = verified {tracing::debug!("a subscription request relayed by the mirror {} from {source}", verified.name)}
-	let admitted = via.is_ok() && app.limits.hit(&format!("sub:{}", bucket(&source)), 120, 60) && verified.is_none_or(|verified| mirrors::accept(&app, verified));
-	let map = match serde_json::from_slice::<Value>(&body) {Ok(Value::Object(map)) => Some(map), _ => None};
-	let token: Option<[u8; 16]> = map.as_ref().and_then(|map| map.get("token")).and_then(Value::as_str).filter(|text| text.len() == 22).and_then(|text| URL_SAFE_NO_PAD.decode(text).ok()).and_then(|bytes| bytes.try_into().ok());
-	let Some(keys) = app.keys.as_ref() else {return app.not_found()};
-	// One HMAC, one lookup and one comparison, against a dummy value when nothing was found.
-	let lookup = keys.token_lookup(&token.unwrap_or([0; 16]));
-	let found = match app.db.call(move |db| db.query_row(&format!("select {USER_COLUMNS}, token_lookup from users where token_lookup = ?"), [lookup.as_slice()], |row| Ok((UserRow::read(row)?, row.get::<_, Vec<u8>>(17)?))).optional()).await {
-		Ok(Ok(found)) => found,
-		Ok(Err(error)) => {tracing::error!("the subscription lookup failed: {error}"); return app.not_found()}
-		Err(_) => return app.not_found(),
-	};
-	let stored = found.as_ref().map_or(vec![0u8; 32], |(_, stored)| stored.clone());
-	let Some((user, _)) = found.filter(|_| post && admitted && token.is_some() && crypto::equal(&stored, &lookup)) else {return app.not_found()};
-	let Some(map) = map else {return app.not_found()};
+	// The hop from a mirror to the panel is https, always: a proxy that says it was not is not taken as a mirror's hop.
+	let admitted = post && via.is_ok() && !(mirrored && headers.get("x-forwarded-proto").is_some_and(|proto| proto != "https"));
 	let at = now();
+	let key_id = (body.len() == exchange::REQUEST).then(|| body[0]);
+	let opened = app.gateway.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).open(&body, at, || admitted && app.limits.hit(&format!("sub:{}", bucket(&source)), 120, 60) && verified.is_none_or(|verified| mirrors::accept(&app, verified)));
+	let Some(Ok(opened)) = opened else {return unknown(&app, mirrored)};
+	let Some(keys) = app.keys.as_ref() else {return unknown(&app, mirrored)};
+	let reply = opened.reply;
+	let answer = |text: &str| match reply.seal(text.as_bytes(), &mut crypto::fill) {
+		Ok(bytes) => {
+			let mut response = Response::new(Body::from(bytes));
+			response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
+			response.headers_mut().insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+			response
+		}
+		Err(error) => {tracing::error!("an answer could not be sealed: {error}"); unknown(&app, mirrored)}
+	};
+	let (token, received) = match opened.request {
+		Ok(received) => (*received.token().expose(), Some(received)),
+		Err(RequestError::Malformed(token, _)) => (*token.expose(), None),
+		Err(RequestError::Unreadable) => return unknown(&app, mirrored),
+	};
+	// One HMAC and one lookup in memory, so a request with a token that is not known costs the database nothing.
+	let lookup = keys.token_lookup(&token);
+	let Some(id) = app.lookups.read().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&lookup).copied() else {return unknown(&app, mirrored)};
+	let user = match app.db.call(move |db| UserRow::load(db, id).optional()).await {
+		Ok(Ok(Some(user))) => user,
+		Ok(Ok(None)) | Err(_) => return unknown(&app, mirrored),
+		Ok(Err(error)) => {tracing::error!("the subscription lookup failed: {error}"); return unknown(&app, mirrored)}
+	};
 	let (signing, retired): (Vec<SigningEntry>, Vec<SigningEntry>) = {
 		let held = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		(held.current().into_iter().cloned().collect(), held.retired().into_iter().cloned().collect())
 	};
-	let Some(newest) = signing.last().cloned() else {return app.not_found()};
-	let Some(ask) = asked(&map) else {return signed_response(refusal(&newest, &user.sub_id, "bad_request"))};
-	let signer = signing.iter().find(|entry| ask.kids.contains(&entry.proto().kid())).cloned();
+	let Some(newest) = signing.last().cloned() else {return unknown(&app, mirrored)};
+	let Some(ask) = received else {return answer(&refusal_for(&app, &newest, &user, "bad_request"))};
+	let signer = signing.iter().find(|entry| ask.kids().contains(&entry.proto().kid())).cloned();
 	if signer.is_none() {
-		if let Some(old) = retired.iter().find(|entry| ask.kids.contains(&entry.proto().kid())) {return signed_response(refusal(old, &user.sub_id, "key_retired"))}
+		if let Some(old) = retired.iter().find(|entry| ask.kids().contains(&entry.proto().kid())) {return answer(&refusal_for(&app, old, &user, "key_retired"))}
 	}
 	let signer = signer.unwrap_or(newest);
-	let refuse = |reason: &str| signed_response(refusal(&signer, &user.sub_id, reason));
+	let refuse = |reason: &str| answer(&refusal_for(&app, &signer, &user, reason));
 	if !user.enabled {return refuse("disabled")}
 	if user.expires_at.is_some_and(|expires| expires <= at) {return refuse("expired")}
-	let pool = app.settings().pool_v4;
-	let hash = keys.device_secret_hash(&ask.secret);
+	let settings = app.settings();
+	let reached = host.as_deref().and_then(|host| settings.by_host(host)).map(|found| found.name.clone());
+	let hash = keys.device_secret_hash(ask.device_secret().expose());
+	let (public_key, op, name) = (STANDARD.encode(ask.device_public_key()), match ask.op() {Op::Fetch => "fetch", Op::Confirm(_) => "confirm", Op::Release => "release"}, match ask.op() {Op::Confirm(Some(name)) => Some(name.as_str().to_owned()), _ => None});
 	let (changed, outcome) = {
-		let (handle, held, user, public_key, op, name, dirty) = (app.db.clone(), app.clone(), user.clone(), ask.public_key.clone(), ask.op.clone(), ask.name.clone(), app.dirty.clone());
+		let (handle, held, user, dirty, pool) = (app.db.clone(), app.clone(), user.clone(), app.dirty.clone(), settings.pool_v4.clone());
 		match handle.call(move |db| -> rusqlite::Result<(bool, Result<Option<DeviceRow>, &'static str>)> {
 			let (keys, mut changed, tx) = (held.keys.as_ref().expect("checked before the lookup"), false, db.transaction()?);
 			changed |= tx.execute("delete from devices where user_id = ? and state = 'pending' and created < ?", params![user.id, at - PENDING_LAPSE])? > 0;
 			let device = tx.query_row(&format!("select {DEVICE_COLUMNS} from devices where user_id = ? and public_key = ?"), params![user.id, public_key], DeviceRow::read).optional()?;
 			let outcome = match device {
 				Some(device) if !crypto::equal(&device.secret_hash, &hash) => Err("device_mismatch"),
-				Some(device) => match op.as_str() {
+				Some(device) => match op {
 					"release" if device.state == "pending" => {changed |= tx.execute("delete from devices where id = ?", [device.id])? > 0; Ok(None)}
 					"confirm" => {
 						tx.execute("update devices set state = 'enrolled', confirmed_at = coalesce(confirmed_at, ?), name = coalesce(?, name), last_seen = ? where id = ?", params![at, name, at, device.id])?;
@@ -209,13 +228,16 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 					}
 				}
 			};
+			// Which gateway key and which endpoint this account used, for the switch and the move, kept at most hourly.
+			if let Some(key_id) = key_id {tx.execute("insert into gateway_use (key_id, user_id, first_at, last_at) values (?, ?, ?, ?) on conflict (key_id, user_id) do update set last_at = excluded.last_at where excluded.last_at - gateway_use.last_at >= 3600", params![key_id, user.id, at, at])?;}
+			if let Some(reached) = &reached {tx.execute("insert into endpoint_use (endpoint, user_id, last_at) values (?, ?, ?) on conflict (endpoint, user_id) do update set last_at = excluded.last_at where excluded.last_at - endpoint_use.last_at >= 3600", params![reached, user.id, at])?;}
 			tx.commit()?;
 			if changed {dirty.store(true, Ordering::Relaxed)}
 			Ok((changed, outcome))
 		}).await {
 			Ok(Ok(done)) => done,
-			Ok(Err(error)) => {tracing::error!("a device could not be enrolled: {error}"); return app.not_found()}
-			Err(_) => return app.not_found(),
+			Ok(Err(error)) => {tracing::error!("a device could not be enrolled: {error}"); return unknown(&app, mirrored)}
+			Err(_) => return unknown(&app, mirrored),
 		}
 	};
 	if changed {
@@ -227,12 +249,10 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 		Ok(None) => return refuse("released"),
 		Ok(Some(device)) => device,
 	};
-	if device.state == "enrolled" {
-		if let Some(token) = token {statics::remember(&app, &user, &device, &token, &ask.secret).await}
-	}
+	if device.state == "enrolled" {statics::remember(&app, &user, &device, &token, ask.device_secret().expose()).await}
 	let used = crate::node::usage(&app).await.remove(&user.name);
-	match document(&app, &user, &device, &signing, &signer, Form::Answer, used.as_ref()).await {
-		Ok(text) => signed_response(text),
+	match document(&app, &user, &device, &signing, &signer, Form::Answer, used.as_ref(), host.as_deref()).await {
+		Ok(text) => answer(&text),
 		Err(error) => {
 			tracing::error!("a subscription document could not be built: {error}");
 			refuse("disabled")

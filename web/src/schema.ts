@@ -228,6 +228,125 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/endpoints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The named subscription endpoints with the accounts that use each, the groups with their endpoint, and how many moved accounts still refresh on the old one. */
+        get: operations["listEndpoints"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/endpoints/move": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Moves accounts or a group to a named endpoint through the signed main_endpoint of their documents. dry_run only counts. */
+        post: operations["moveToEndpoint"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/gateway-keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The gateway keys requests are sealed to: the active key, the next key, the retired keys with how many accounts used them, the failure counters and the clock. No private part is ever shown. */
+        get: operations["getGatewayKeys"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/gateway-keys/recreate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Makes new gateway keys when none can be read and the next key is not at hand. Old links stop working at a first import. Refused while the keys are readable. */
+        post: operations["recreateGatewayKeys"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/gateway-keys/reset-affected": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Makes a new token and link for every account that sent a request under a stolen key. dry_run only counts. */
+        post: operations["resetAffectedTokens"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/gateway-keys/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Loads the next key (given, or read from the panel's gateway_next file): it becomes active, the old key is kept retired for the retention days, and a new next key is made. Its private half is in the answer, once. */
+        post: operations["rotateGatewayKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/gateway-keys/theft": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Loads the next key like a switch and destroys the old key at once. The accounts that sent a request under it are kept for resetAffectedTokens. */
+        post: operations["gatewayKeyStolen"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/links": {
         parameters: {
             query?: never;
@@ -965,6 +1084,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users/{id}/endpoint": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The endpoint an account's links and documents use now, and where it comes from. */
+        get: operations["getUserEndpoint"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users/{id}/subscription": {
         parameters: {
             query?: never;
@@ -1209,6 +1345,25 @@ export interface components {
             /** @description The eight groups the other operator reads out. Typing this side's own does not confirm. */
             typed: string;
         };
+        /** @description How many requests each kind of refusal turned away since the start, and how many were served. */
+        Counts: {
+            /** Format: uint64 */
+            key: number;
+            /** Format: uint64 */
+            open: number;
+            /** Format: uint64 */
+            replay: number;
+            /** Format: uint64 */
+            request: number;
+            /** Format: uint64 */
+            served: number;
+            /** Format: uint64 */
+            size: number;
+            /** Format: uint64 */
+            source: number;
+            /** Format: uint64 */
+            window: number;
+        };
         Created: {
             link?: components["schemas"]["LinkView"] | null;
             link_error?: string | null;
@@ -1265,6 +1420,46 @@ export interface components {
             file: string;
             filename: string;
         };
+        /** @description One subscription endpoint the panel answers on and puts in links. */
+        Endpoint: {
+            /** @description 1 to 64 characters of a-z, 0-9, dash and underscore. */
+            name: string;
+            /**
+             * @description SHA-256 of the SubjectPublicKeyInfo of the endpoint's certificate, standard base64, at most two. Required for a self-signed certificate (an IP address as host). Empty for a chain-validated or plain endpoint. `https` only.
+             * @default []
+             */
+            pins: string[];
+            /** @description The public URL with the path the web server forwards to the panel's `sub_path`: `https`, or `http` for a plain endpoint, which hides nothing from the network (the exchange stays sealed). At most 256 characters, no fragment. */
+            url: string;
+        };
+        EndpointRow: {
+            /**
+             * Format: int64
+             * @description Of those, the ones given this endpoint by name.
+             */
+            assigned: number;
+            default: boolean;
+            name: string;
+            pins: string[];
+            /** @description A plain http endpoint: the network can tell that the app is used, now and later in its records. The exchange itself stays sealed. */
+            plain: boolean;
+            /**
+             * Format: int64
+             * @description Accounts that resolve to another endpoint now and refreshed on this one in the last 30 days: moved, and not there yet. The endpoint can be retired when this is none.
+             */
+            still_here: number;
+            url: string;
+            /**
+             * Format: int64
+             * @description Accounts whose links and documents use this endpoint, by the resolution.
+             */
+            users: number;
+        };
+        EndpointsOut: {
+            default: string;
+            endpoints: components["schemas"]["EndpointRow"][];
+            groups: components["schemas"]["GroupRow"][];
+        };
         ErrorBody: {
             error: components["schemas"]["ErrorDetail"];
         };
@@ -1301,6 +1496,40 @@ export interface components {
              * @description When this folder was last written.
              */
             written_at?: number | null;
+        };
+        GatewayOut: {
+            /**
+             * Format: int64
+             * @description Accounts with no device yet: they hold a link made under some key and have not imported it.
+             */
+            accounts_without_device: number;
+            active?: components["schemas"]["KeyView"] | null;
+            /**
+             * Format: int64
+             * @description Accounts that sent a request under a key stolen earlier and whose tokens are not reset yet.
+             */
+            affected: number;
+            /** Format: uint64 */
+            clock_steps: number;
+            /** @description Whether the system reports its clock as synchronized, null when it cannot tell. The gateway needs a synchronized clock. */
+            clock_synchronized?: boolean | null;
+            counts: components["schemas"]["Counts"];
+            /** @description False while the keys are lost or unreadable: the endpoint answers every request as an unknown path. */
+            loaded: boolean;
+            next?: components["schemas"]["NextView"] | null;
+            /** Format: uint */
+            remembered: number;
+            retired: components["schemas"]["RetiredView"][];
+            /** Format: uint32 */
+            retired_days: number;
+            /** @description The active key is older than 180 days. */
+            switch_due: boolean;
+        };
+        GroupRow: {
+            endpoint?: string | null;
+            name: string;
+            /** Format: int64 */
+            users: number;
         };
         HistoryOut: {
             kind: string;
@@ -1364,6 +1593,14 @@ export interface components {
             retired_at?: number | null;
             state: string;
         };
+        KeyView: {
+            /** Format: int64 */
+            created: number;
+            /** @description First 16 bytes of the SHA-256 of the key, as the apps show it. */
+            fingerprint: string;
+            /** Format: uint8 */
+            id: number;
+        };
         KeysOut: {
             keys: components["schemas"]["KeyOut"][];
         };
@@ -1412,6 +1649,43 @@ export interface components {
             totp: string;
             username: string;
         };
+        MoveIn: {
+            /**
+             * @description Only count: say who moves and who stays, and change nothing.
+             * @default false
+             */
+            dry_run: boolean;
+            /** @description The endpoint to move to. Null takes the accounts' own choice away (they follow their group or the default), or the group's. */
+            endpoint?: string | null;
+            /** @description The group to move: sets the endpoint of the group, which every member without an endpoint of their own follows. */
+            group?: string | null;
+            /** @description The accounts to move: one, a selection or many. Give this or `group`. */
+            users?: number[] | null;
+        };
+        MoveOut: {
+            applied: boolean;
+            /**
+             * Format: int64
+             * @description Of those who move, the ones whose endpoint is checked another way at the new one (chain, pins or plain http), which the app says when it asks.
+             */
+            changes_check: number;
+            /**
+             * Format: int64
+             * @description Accounts whose endpoint changes. Their next document names the new endpoint, and the app asks its user once.
+             */
+            moving: number;
+            names: string[];
+            /**
+             * Format: int64
+             * @description Accounts the request names (or the group holds) whose endpoint stays.
+             */
+            staying: number;
+            /**
+             * Format: int64
+             * @description Of those who move, the ones moving to a plain http endpoint.
+             */
+            to_plain: number;
+        };
         NewAdmin: {
             password: string;
             username: string;
@@ -1434,9 +1708,22 @@ export interface components {
             /** @description "read" (reads only), "users" (users, devices and links) or "full" (everything an API token may do). */
             scope: string;
         };
+        NextView: {
+            /** Format: int64 */
+            created: number;
+            fingerprint: string;
+            /** Format: uint8 */
+            id: number;
+            /** @description The file of the next key's private half is still on this host. Whoever takes the active key from the host takes the next one with it: move the file away. */
+            on_host: boolean;
+        };
         NodeInfo: {
             /** @description Whether the system reports its clock as synchronized, null when it cannot tell. A panel whose clock is off by more than a day writes static mirror names that no client asks for. */
             clock_synchronized?: boolean | null;
+            /** @description True while no gateway key can be read: the subscription endpoint answers every request as an unknown path. */
+            gateway_missing: boolean;
+            /** @description The active gateway key is older than 180 days: time to load the next key. */
+            gateway_switch_due: boolean;
             keys_missing: boolean;
             last_sync?: string | null;
             reachable: boolean;
@@ -1521,6 +1808,10 @@ export interface components {
              */
             totp: string;
         };
+        RecreateIn: {
+            /** @description Must be true: making new keys on a panel that has accounts means old links do not open at a first import, and clients learn the new key only from a newer document on a static mirror or from a link shown again. */
+            confirm: boolean;
+        };
         /** @description A forwarder on another address that passes bytes to the node unchanged: nginx `stream`, a DNAT rule, HAProxy, or a content delivery network. TLS, the proofs and WireGuard run end to end through it, so it sees nothing and cannot pass for the node. */
         Relay: {
             /** @description An IP address: apps dial candidates by address, never by name. */
@@ -1555,7 +1846,32 @@ export interface components {
             ok: boolean;
             version: string;
         };
+        Reset: {
+            applied: boolean;
+            /**
+             * Format: int64
+             * @description Accounts whose token is reset, or would be.
+             */
+            count: number;
+            /** @description The new links, when applied. A secret, shown once. */
+            links: components["schemas"]["ResetLink"][];
+            node?: components["schemas"]["NodeState"] | null;
+        };
+        ResetIn: {
+            /**
+             * @description Only count the accounts and change nothing.
+             * @default false
+             */
+            dry_run: boolean;
+        };
         ResetLink: {
+            error?: string | null;
+            /** Format: int64 */
+            id: number;
+            link?: string | null;
+            name: string;
+        };
+        ResetLink2: {
             /**
              * @description Remove the devices that were enrolled with the old link. They are listed in the answer either way.
              * @default false
@@ -1575,6 +1891,25 @@ export interface components {
             ok: boolean;
             /** @description The folder in the data directory that holds the database and keys this restore replaced. */
             saved_as: string;
+        };
+        RetiredView: {
+            /**
+             * Format: int64
+             * @description Accounts that ever sent a request under it.
+             */
+            accounts: number;
+            /**
+             * Format: int64
+             * @description Accounts that sent a request under this key in the last 30 days.
+             */
+            accounts_recent: number;
+            /** Format: int64 */
+            destroy_at: number;
+            fingerprint: string;
+            /** Format: uint8 */
+            id: number;
+            /** Format: int64 */
+            retired_at: number;
         };
         Rotated: {
             node: components["schemas"]["NodeState"];
@@ -1626,20 +1961,33 @@ export interface components {
              */
             default_device_limit: number;
             /**
+             * @description The name of the default endpoint. Empty only while there are no endpoints.
+             * @default
+             */
+            default_endpoint: string;
+            /**
              * Format: uint32
              * @default 14
              */
             document_days: number;
             /**
-             * @description SHA-256 of the SubjectPublicKeyInfo of the endpoint's certificate, standard base64, when it has no certificate from an authority. The first is put in links. Empty for a chain-validated endpoint.
+             * @description The named subscription endpoints, at most 16, each on its own host and port. An account's links and documents use the endpoint resolved for it: its own, else the first of its groups that has one in `group_endpoints`, else the default.
              * @default []
              */
-            endpoint_pins: string[];
+            endpoints: components["schemas"]["Endpoint"][];
             /**
-             * @description The public `https` URL of the subscription endpoint, with the path the web server forwards to the panel's `sub_path`. No fragment.
-             * @default
+             * Format: uint32
+             * @description Days a retired gateway key keeps opening requests after a routine switch, 30 to 365.
+             * @default 120
              */
-            endpoint_url: string;
+            gateway_retired_days: number;
+            /**
+             * @description The endpoint of a group, by group name.
+             * @default {}
+             */
+            group_endpoints: {
+                [key: string]: string;
+            };
             /**
              * @description The public host or address of this node, which the profiles' endpoints are made with.
              * @default
@@ -1736,6 +2084,7 @@ export interface components {
         SubscriptionInfo: {
             /** @description Whether the panel holds a sealed copy, so the link can be shown again. False with "show links once". */
             can_show: boolean;
+            /** @description The URL of the endpoint the account's links use now, empty while none is set. */
             endpoint_url: string;
             /** @description Fingerprints of the current signing keys, which are not secret. */
             key_fingerprints: string[];
@@ -1744,6 +2093,22 @@ export interface components {
             token_created: number;
             /** Format: int64 */
             token_generation: number;
+        };
+        SwitchIn: {
+            /** @description The private half of the next key, 43 characters of base64url. Left out, the panel reads it from its `gateway_next` file. */
+            private?: string | null;
+        };
+        Switched: {
+            /**
+             * Format: int64
+             * @description Accounts that sent a request under the stolen key (for a theft only): their tokens are to be reset.
+             */
+            affected: number;
+            gateway: components["schemas"]["GatewayOut"];
+            /** @description False when the file for the new next key could not be written, so the shown key is the only copy. */
+            next_file_written: boolean;
+            /** @description The private half of the new next key. Shown once: move it away from this host and keep it. The panel keeps no copy except the file named in its config, which it lists as still on the host until the file is moved. */
+            next_private: string;
         };
         SyncOut: {
             command: string;
@@ -1807,10 +2172,22 @@ export interface components {
             /** Format: int64 */
             since: number;
         };
+        UserEndpoint: {
+            /** @description The endpoint given to the account by name, null when its group's or the default applies. */
+            own?: string | null;
+            plain: boolean;
+            /** @description The endpoint in use for the account, null while no endpoint is set. */
+            resolved?: string | null;
+            /** @description "user", "group" or "default". */
+            source: string;
+            url?: string | null;
+        };
         UserIn: {
             /** Format: uint16 */
             device_limit?: number | null;
             enabled?: boolean | null;
+            /** @description The name of one of the settings' endpoints, or null for the group's or the default. */
+            endpoint?: string | null;
             /** @description One of the user's exits, or null for the node's default. */
             exit?: string | null;
             exits?: unknown;
@@ -1838,6 +2215,8 @@ export interface components {
             /** Format: int64 */
             devices: number;
             enabled: boolean;
+            /** @description The endpoint given to the user by name, null when the group's or the default applies. The one in use is at `/users/{id}/endpoint`. */
+            endpoint?: string | null;
             /** @description The exit the user's devices leave through when they choose none. Null is the node's default. */
             exit?: string | null;
             /** @description "all" or a list of exit tags. */
@@ -1862,6 +2241,11 @@ export interface components {
             /** Format: uint16 */
             device_limit?: number | null;
             enabled?: boolean | null;
+            /**
+             * @description The name of one of the settings' endpoints, or null for the group's or the default.
+             * @default null
+             */
+            endpoint: string | null;
             /**
              * @description One of the user's exits, or null for the node's default. A default the new exits leave out is cleared.
              * @default null
@@ -2841,6 +3225,418 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    listEndpoints: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EndpointsOut"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    moveToEndpoint: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MoveIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MoveOut"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getGatewayKeys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GatewayOut"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    recreateGatewayKeys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecreateIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Switched"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    resetAffectedTokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResetIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Reset"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    rotateGatewayKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SwitchIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Switched"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    gatewayKeyStolen: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SwitchIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Switched"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */
@@ -5717,6 +6513,64 @@ export interface operations {
             };
         };
     };
+    getUserEndpoint: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserEndpoint"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     getSubscription: {
         parameters: {
             query?: never;
@@ -5786,7 +6640,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ResetLink"];
+                "application/json": components["schemas"]["ResetLink2"];
             };
         };
         responses: {

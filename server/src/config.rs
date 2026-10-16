@@ -40,6 +40,10 @@ pub struct Config {
 	pub keys: PathBuf,
 	/// The subscription signing keys. Mode 600, kept apart from both of the above.
 	pub signing: PathBuf,
+	/// The gateway keys the subscription requests are sealed to: active, retired and the public half of the next. Mode 600, kept apart from the database and from the files above.
+	pub gateway: PathBuf,
+	/// The private half of the next gateway key, written at setup and at every switch for the operator to move off this host.
+	pub gateway_next: PathBuf,
 	pub node_socket: PathBuf,
 	/// Host header values the admin side answers to. Empty accepts any, which is only for a panel behind a web server that checks it.
 	pub allowed_hosts: Vec<String>,
@@ -62,7 +66,7 @@ pub struct Config {
 
 impl Default for Config {
 	fn default() -> Self {
-		Self {listen: "127.0.0.1:8480".parse().unwrap(), prefix: "/panel".into(), sub_path: "/sub".into(), database: "panel.db".into(), keys: "panel.keys".into(), signing: "signing.keys".into(), node_socket: "/run/veilway/control.sock".into(), allowed_hosts: Vec::new(), trusted_proxies: Vec::new(), not_found: NotFound::default(), trusted_mirrors: Vec::new(), secure_cookies: true, direct: false, update_check: true, update_request: "/var/lib/veilway-panel-update/request".into(), two_step: "on".into()}
+		Self {listen: "127.0.0.1:8480".parse().unwrap(), prefix: "/panel".into(), sub_path: "/sub".into(), database: "panel.db".into(), keys: "panel.keys".into(), signing: "signing.keys".into(), gateway: "gateway.keys".into(), gateway_next: "gateway.next".into(), node_socket: "/run/veilway/control.sock".into(), allowed_hosts: Vec::new(), trusted_proxies: Vec::new(), not_found: NotFound::default(), trusted_mirrors: Vec::new(), secure_cookies: true, direct: false, update_check: true, update_request: "/var/lib/veilway-panel-update/request".into(), two_step: "on".into()}
 	}
 }
 

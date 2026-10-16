@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use rusqlite::Connection;
-use std::{collections::{HashMap, VecDeque}, fs, net::IpAddr, os::unix::fs::PermissionsExt, sync::{atomic::AtomicBool, Arc, Mutex, RwLock}};
+use std::{collections::{BTreeMap, HashMap, VecDeque}, fs, net::IpAddr, os::unix::fs::PermissionsExt, sync::{atomic::AtomicBool, Arc, Mutex, RwLock}};
 
 /// 365 days, then a retired signing key is destroyed.
 pub const RETIRED_KEPT: i64 = 365 * 86_400;
@@ -84,6 +84,19 @@ impl Signing {
 	pub fn retired(&self) -> Vec<&SigningEntry> {self.entries.iter().filter(|entry| entry.retired_at.is_some()).collect()}
 }
 
+/// One subscription endpoint the panel answers on and puts in links.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Endpoint {
+	/// 1 to 64 characters of a-z, 0-9, dash and underscore.
+	pub name: String,
+	/// The public URL with the path the web server forwards to the panel's `sub_path`: `https`, or `http` for a plain endpoint, which hides nothing from the network (the exchange stays sealed). At most 256 characters, no fragment.
+	pub url: String,
+	/// SHA-256 of the SubjectPublicKeyInfo of the endpoint's certificate, standard base64, at most two. Required for a self-signed certificate (an IP address as host). Empty for a chain-validated or plain endpoint. `https` only.
+	#[serde(default)]
+	pub pins: Vec<String>,
+}
+
 /// What an operator sets once for the whole panel.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 #[serde(deny_unknown_fields, default)]
@@ -92,10 +105,14 @@ pub struct Settings {
 	/// The provider's own terms and privacy policy, put in every document as two `support` links. An `https` URL, or empty for none.
 	pub terms_url: String,
 	pub privacy_url: String,
-	/// The public `https` URL of the subscription endpoint, with the path the web server forwards to the panel's `sub_path`. No fragment.
-	pub endpoint_url: String,
-	/// SHA-256 of the SubjectPublicKeyInfo of the endpoint's certificate, standard base64, when it has no certificate from an authority. The first is put in links. Empty for a chain-validated endpoint.
-	pub endpoint_pins: Vec<String>,
+	/// The named subscription endpoints, at most 16, each on its own host and port. An account's links and documents use the endpoint resolved for it: its own, else the first of its groups that has one in `group_endpoints`, else the default.
+	pub endpoints: Vec<Endpoint>,
+	/// The name of the default endpoint. Empty only while there are no endpoints.
+	pub default_endpoint: String,
+	/// The endpoint of a group, by group name.
+	pub group_endpoints: BTreeMap<String, String>,
+	/// Days a retired gateway key keeps opening requests after a routine switch, 30 to 365.
+	pub gateway_retired_days: u32,
 	/// The address pool devices get their tunnel address from, an IPv4 network.
 	pub pool_v4: String,
 	pub default_device_limit: u16,
@@ -124,7 +141,7 @@ pub struct Settings {
 
 impl Default for Settings {
 	fn default() -> Self {
-		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), endpoint_url: String::new(), endpoint_pins: Vec::new(), pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new()}
+		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new()}
 	}
 }
 
@@ -134,6 +151,12 @@ pub struct App {
 	/// None when accounts exist and the key file does not: the endpoint then answers like an unknown path and the panel says so.
 	pub keys: Option<Keys>,
 	pub signing: Mutex<Signing>,
+	/// The gateway keys and the gateway that opens requests: held together so a switch of keys and the replay memory change in one step. Never held across an await.
+	pub gateway: Mutex<crate::gateway::Hold>,
+	/// Token lookup value to user id, so that a request never reads the database for a token it does not know. Refreshed inside every job that writes a token.
+	pub lookups: Arc<RwLock<HashMap<[u8; 32], i64>>>,
+	/// The signed refusals made, by account, reason and signing key, reused while they are within their age.
+	pub refusals: Mutex<HashMap<(i64, String, [u8; 8]), (i64, String)>>,
 	pub limits: Limiter,
 	pub setup_token: Mutex<Option<String>>,
 	/// One change of the node's config at a time.
@@ -189,4 +212,13 @@ pub fn store_settings(connection: &Connection, cache: &RwLock<Settings>, change:
 	connection.execute("insert into settings (key, value) values ('settings', ?) on conflict (key) do update set value = excluded.value", [text]).map_err(|error| error.to_string())?;
 	*cache.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = settings;
 	Ok(())
+}
+
+/// Loads the token lookup table from the users. Called inside every job that writes a token or removes a user, so the table and the rows move together.
+pub fn load_lookups(connection: &Connection, table: &RwLock<HashMap<[u8; 32], i64>>) {
+	let rows = connection.prepare("select token_lookup, id from users").and_then(|mut statement| statement.query_map([], |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)))?.collect::<Result<Vec<_>, _>>());
+	match rows {
+		Ok(rows) => *table.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = rows.into_iter().filter_map(|(lookup, id)| Some((lookup.try_into().ok()?, id))).collect(),
+		Err(error) => tracing::error!("the token lookup table could not be loaded: {error}"),
+	}
 }

@@ -35,6 +35,8 @@ pub struct UserOut {
 	pub exits: Value,
 	/// The exit the user's devices leave through when they choose none. Null is the node's default.
 	pub exit: Option<String>,
+	/// The endpoint given to the user by name, null when the group's or the default applies. The one in use is at `/users/{id}/endpoint`.
+	pub endpoint: Option<String>,
 	pub quota_bytes: Option<i64>, pub quota_period: Option<String>, pub expires_at: Option<i64>,
 	/// 0 is no limit beyond the node's own 16.
 	pub device_limit: i64, pub note: String, pub created: i64, pub subscription_id: String,
@@ -44,7 +46,7 @@ pub struct UserOut {
 }
 
 fn out(user: &UserRow, devices: i64, pending: i64, node: Option<Value>) -> UserOut {
-	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, node}
+	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), endpoint: user.endpoint.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, node}
 }
 
 async fn counts(app: &App, id: i64) -> Result<(i64, i64), Failure> {
@@ -84,6 +86,8 @@ pub struct UserIn {
 	pub name: String, pub enabled: Option<bool>, pub groups: Option<Vec<String>>, pub exits: Option<Value>,
 	/// One of the user's exits, or null for the node's default.
 	pub exit: Option<String>,
+	/// The name of one of the settings' endpoints, or null for the group's or the default.
+	pub endpoint: Option<String>,
 	pub quota_bytes: Option<u64>,
 	/// "daily", "weekly" or "monthly". Needs quota_bytes.
 	pub quota_period: Option<String>,
@@ -97,6 +101,8 @@ pub struct UserPatch {
 	pub name: Option<String>, pub enabled: Option<bool>, pub groups: Option<Vec<String>>, pub exits: Option<Value>,
 	/// One of the user's exits, or null for the node's default. A default the new exits leave out is cleared.
 	#[serde(default, deserialize_with = "double")] pub exit: Option<Option<String>>,
+	/// The name of one of the settings' endpoints, or null for the group's or the default.
+	#[serde(default, deserialize_with = "double")] pub endpoint: Option<Option<String>>,
 	#[serde(default, deserialize_with = "double")] pub quota_bytes: Option<Option<u64>>,
 	#[serde(default, deserialize_with = "double")] pub quota_period: Option<Option<String>>,
 	#[serde(default, deserialize_with = "double")] pub expires_at: Option<Option<i64>>,
@@ -125,9 +131,13 @@ pub struct LinkView {
 	pub qr_svg: String,
 }
 
-fn view(settings: &crate::app::Settings, app: &App, token: &[u8; 16]) -> Result<LinkView, String> {
+/// The link of a token for an account: its resolved endpoint, the active gateway key and the current signing key.
+pub fn view(app: &App, user: &UserRow, token: &[u8; 16]) -> Result<LinkView, String> {
 	let key = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).current().last().cloned().cloned().ok_or("no signing key")?;
-	let link = subs::link(settings, &key, token)?;
+	let gateway = app.gateway.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).listed().into_iter().next().ok_or("no gateway key")?;
+	let settings = app.settings();
+	let (endpoint, _) = settings.resolve(user.endpoint.as_deref(), &serde_json::from_str::<Vec<String>>(&user.groups).unwrap_or_default()).ok_or("no subscription endpoint is set")?;
+	let link = subs::link(endpoint, &key, &gateway, token)?;
 	let qr = qrcode::QrCode::new(link.veilway.as_bytes()).map_err(|error| error.to_string())?.render::<qrcode::render::svg::Color>().min_dimensions(240, 240).build();
 	Ok(LinkView {veilway: link.veilway, https: link.https, qr_svg: qr})
 }
@@ -140,20 +150,21 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	check(input.groups.as_ref(), input.exits.as_ref(), input.quota_bytes, input.quota_period.as_deref())?;
 	if input.exit.as_deref().is_some_and(|exit| !default_ok(input.exits.as_ref().unwrap_or(&json!("all")), exit)) {return Err(Failure::bad(DEFAULT_REFUSED))}
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing, so no account can be made."))?;
-	let settings = app.settings();
 	let (token, record, sub_id) = (crypto::random::<16>(), crypto::random::<16>(), URL_SAFE_NO_PAD.encode(crypto::random::<16>()));
 	let lookup = keys.token_lookup(&token);
 	let (held, cache) = (app.clone(), app.settings.clone());
+	if let Some(name) = input.endpoint.as_deref() {if app.settings().named(name).is_none() {return Err(Failure::bad("endpoint is the name of one of the endpoints, or null."))}}
 	let id = app.db.call(move |db| -> rusqlite::Result<i64> {
 		let once = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).show_links_once;
 		let copy = (!once).then(|| held.keys.as_ref().expect("checked before the lookup").seal_copy(&record, &token));
-		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created, default_exit) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(settings.default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, lookup.as_slice(), copy, now(), input.exit])?;
+		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created, default_exit, endpoint) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, lookup.as_slice(), copy, now(), input.exit, input.endpoint])?;
 		let id = db.last_insert_rowid();
+		crate::app::load_lookups(db, &held.lookups);
 		audit(db, &ctx.actor, &ctx.source, "user.create", &format!("user:{id}"), &input.name);
 		Ok(id)
 	}).await??;
 	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
-	let (link, link_error) = match view(&settings, &app, &token) {Ok(link) => (Some(link), None), Err(error) => (None, Some(error))};
+	let (link, link_error) = match view(&app, &user, &token) {Ok(link) => (Some(link), None), Err(error) => (None, Some(error))};
 	ok(&Created {user: out(&user, 0, 0, None), link, link_error})
 }
 
@@ -169,9 +180,11 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	if input.exit.as_ref().is_some_and(|exit| exit.as_deref().is_some_and(|exit| !default_ok(&exits, exit))) {return Err(Failure::bad(DEFAULT_REFUSED))}
 	let exit = input.exit.clone().unwrap_or(user.default_exit.clone()).filter(|exit| default_ok(&exits, exit));
 	if input.name.as_ref().is_some_and(|name| !name_ok(name, true)) {return Err(Failure::bad("name is 1 to 64 characters of a-z, 0-9, dot, dash and underscore, starting with a letter or digit."))}
+	let endpoint = input.endpoint.clone().unwrap_or(user.endpoint.clone());
+	if endpoint.as_deref().is_some_and(|name| app.settings().named(name).is_none()) {return Err(Failure::bad("endpoint is the name of one of the endpoints, or null."))}
 	let dirty = app.dirty.clone();
 	app.db.call(move |db| -> rusqlite::Result<()> {
-		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ?, default_exit = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), serde_json::to_string(&exits).unwrap_or_default(), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), exit, id])?;
+		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ?, default_exit = ?, endpoint = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), serde_json::to_string(&exits).unwrap_or_default(), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), exit, endpoint, id])?;
 		audit(db, &ctx.actor, &ctx.source, "user.update", &format!("user:{id}"), &user.name);
 		dirty.store(true, Ordering::Relaxed);
 		Ok(())
@@ -186,10 +199,11 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 pub struct Deleted {pub node: NodeState}
 
 pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
-	let dirty = app.dirty.clone();
+	let (dirty, lookups) = (app.dirty.clone(), app.lookups.clone());
 	app.db.call(move |db| -> rusqlite::Result<()> {
 		let name: String = db.query_row("select name from users where id = ?", [id], |row| row.get(0))?;
 		db.execute("delete from users where id = ?", [id])?;
+		crate::app::load_lookups(db, &lookups);
 		audit(db, &ctx.actor, &ctx.source, "user.delete", &format!("user:{id}"), &name);
 		dirty.store(true, Ordering::Relaxed);
 		Ok(())
@@ -220,10 +234,10 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 		let result: Result<(), String> = async {
 			let id = *id;
 			let user = app.db.call(move |db| UserRow::load(db, id)).await.map_err(|error| error.to_string())?.map_err(|error| if matches!(error, rusqlite::Error::QueryReturnedNoRows) {"no such user".to_string()} else {error.to_string()})?;
-			let (value, dirty) = (input.value.clone(), app.dirty.clone());
+			let (value, dirty, lookups) = (input.value.clone(), app.dirty.clone(), app.lookups.clone());
 			match input.action.as_str() {
 				"enable" | "disable" => {let enable = input.action == "enable"; app.db.call(move |db| db.execute("update users set enabled = ? where id = ?", params![enable, id]).inspect(|_| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
-				"delete" => {app.db.call(move |db| db.execute("delete from users where id = ?", [id]).inspect(|_| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
+				"delete" => {app.db.call(move |db| db.execute("delete from users where id = ?", [id]).inspect(|_| {crate::app::load_lookups(db, &lookups); dirty.store(true, Ordering::Relaxed)})).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
 				"reset_usage" => {let (status, _) = node::request(&app.cfg.node_socket, "POST", &format!("/v1/users/{}/usage/reset", user.name), None, Some(&json!({"totals": false}))).await?; if status != 200 {return Err(format!("the node answered {status}"))}}
 				"add_group" | "remove_group" => {
 					let group = value.as_ref().and_then(Value::as_str).filter(|group| name_ok(group, true)).ok_or("value is a group name")?;
@@ -357,7 +371,7 @@ pub async fn export_device(State(app): State<Arc<App>>, Extension(ctx): Extensio
 		let signing: Vec<_> = held.current().into_iter().cloned().collect();
 		(signing.clone(), signing.last().cloned().ok_or_else(|| Failure::internal("no signing key"))?)
 	};
-	let document = subs::document(&app, &user, &row, &signing, &signer, subs::Form::Whole, node::usage(&app).await.get(&user.name)).await.map_err(Failure::bad)?;
+	let document = subs::document(&app, &user, &row, &signing, &signer, subs::Form::Whole, node::usage(&app).await.get(&user.name), None).await.map_err(Failure::bad)?;
 	let carried = Carried::file(format!("v1.{}.{}", URL_SAFE_NO_PAD.encode(signer.public()), document).as_bytes()).map_err(|error| Failure::bad(error.to_string()))?;
 	app.db.audit(&ctx.actor, &ctx.source, "device.export", &format!("user:{id}"), &format!("device:{device}")).await;
 	ok(&Exported {link: carried.veilway(), file: carried.file_content()})
@@ -365,7 +379,9 @@ pub async fn export_device(State(app): State<Arc<App>>, Extension(ctx): Extensio
 
 #[derive(Serialize, JsonSchema)]
 pub struct SubscriptionInfo {
-	pub subscription_id: String, pub endpoint_url: String, pub token_generation: i64, pub token_created: i64,
+	pub subscription_id: String,
+	/// The URL of the endpoint the account's links use now, empty while none is set.
+	pub endpoint_url: String, pub token_generation: i64, pub token_created: i64,
 	/// Whether the panel holds a sealed copy, so the link can be shown again. False with "show links once".
 	pub can_show: bool,
 	/// Fingerprints of the current signing keys, which are not secret.
@@ -375,7 +391,7 @@ pub struct SubscriptionInfo {
 pub async fn sub_info(State(app): State<Arc<App>>, Path(id): Path<i64>) -> Result<Response, Failure> {
 	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
 	let fingerprints = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).current().iter().map(|entry| entry.proto().fingerprint().to_string()).collect();
-	ok(&SubscriptionInfo {subscription_id: user.sub_id, endpoint_url: app.settings().endpoint_url, token_generation: user.token_gen, token_created: user.token_created, can_show: user.token_copy.is_some() && app.keys.is_some(), key_fingerprints: fingerprints})
+	ok(&SubscriptionInfo {subscription_id: user.sub_id, endpoint_url: app.settings().resolve(user.endpoint.as_deref(), &serde_json::from_str::<Vec<String>>(&user.groups).unwrap_or_default()).map_or(String::new(), |(endpoint, _)| endpoint.url.clone()), token_generation: user.token_gen, token_created: user.token_created, can_show: user.token_copy.is_some() && app.keys.is_some(), key_fingerprints: fingerprints})
 }
 
 /// Opening the sealed copy is an export of a secret: the route needs a recent re-authentication, and the audit log says that a link was shown, not what it was.
@@ -384,7 +400,7 @@ pub async fn sub_show(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
 	let token = user.token_copy.as_deref().and_then(|copy| keys.open_copy(&user.record_id, copy)).ok_or_else(|| Failure::new(StatusCode::GONE, "no_copy", "No copy of this link is kept. Reset the link to get a new one."))?;
 	app.db.audit(&ctx.actor, &ctx.source, "link.show", &format!("user:{id}"), "").await;
-	ok(&view(&app.settings(), &app, &token).map_err(Failure::bad)?)
+	ok(&view(&app, &user, &token).map_err(Failure::bad)?)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -422,8 +438,7 @@ pub async fn sub_sealed(State(app): State<Arc<App>>, Extension(ctx): Extension<C
 		},
 		None => user.token_copy.as_deref().and_then(|copy| keys.open_copy(&user.record_id, copy)).ok_or_else(|| Failure::new(StatusCode::GONE, "no_copy", "No copy of this link is kept. Reset the link to get a new one, or send the link you just made."))?,
 	};
-	let key = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).current().last().cloned().cloned().ok_or_else(|| Failure::bad("no signing key"))?;
-	let link = subs::link(&app.settings(), &key, &token).map_err(Failure::bad)?.veilway;
+	let link = view(&app, &user, &token).map_err(Failure::bad)?.veilway;
 	let (salt, nonce) = (crypto::random::<16>(), crypto::random::<12>());
 	let file = tokio::task::spawn_blocking(move || sealed_file::seal(&input.password, &link, salt, nonce)).await.map_err(Failure::internal)?.map_err(Failure::internal)?;
 	app.db.audit(&ctx.actor, &ctx.source, "link.sealed", &format!("user:{id}"), "").await;
@@ -442,7 +457,7 @@ pub struct LinkReset {pub link: Option<LinkView>, pub link_error: Option<String>
 
 pub async fn sub_reset(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>, Body(input): Body<ResetLink>) -> Result<Response, Failure> {
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
-	let (settings, token, held, cache, dirty) = (app.settings(), crypto::random::<16>(), app.clone(), app.settings.clone(), app.dirty.clone());
+	let (token, held, cache, dirty) = (crypto::random::<16>(), app.clone(), app.settings.clone(), app.dirty.clone());
 	let (lookup, remove_devices) = (keys.token_lookup(&token), input.remove_devices);
 	let old = app.db.call(move |db| -> Result<Vec<DeviceRow>, Failure> {
 		let keys = held.keys.as_ref().expect("checked before the lookup");
@@ -451,6 +466,7 @@ pub async fn sub_reset(State(app): State<Arc<App>>, Extension(ctx): Extension<Ct
 		let copy = (!once).then(|| keys.seal_copy(&user.record_id, &token));
 		let old: Vec<DeviceRow> = DeviceRow::for_user(db, id)?.into_iter().filter(|device| device.token_gen == user.token_gen).collect();
 		db.execute("update users set token_lookup = ?, token_copy = ?, token_gen = token_gen + 1, token_created = ? where id = ?", params![lookup.as_slice(), copy, now(), id])?;
+		crate::app::load_lookups(db, &held.lookups);
 		if remove_devices {db.execute("delete from devices where user_id = ? and token_gen = ?", params![id, user.token_gen])?;}
 		// A link that was reset is a link that may have leaked, and the Xray share links are the same user's, so they are made new with it and the push below carries them to the node.
 		db.execute("delete from xray_clients where user_id = ?", [id])?;
@@ -458,6 +474,7 @@ pub async fn sub_reset(State(app): State<Arc<App>>, Extension(ctx): Extension<Ct
 		dirty.store(true, Ordering::Relaxed);
 		Ok(old)
 	}).await??;
-	let (link, link_error) = match view(&settings, &app, &token) {Ok(link) => (Some(link), None), Err(error) => (None, Some(error))};
+	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
+	let (link, link_error) = match view(&app, &user, &token) {Ok(link) => (Some(link), None), Err(error) => (None, Some(error))};
 	ok(&LinkReset {link, link_error, old_devices: old.iter().map(device_out).collect(), removed: input.remove_devices, node: push(&app).await})
 }

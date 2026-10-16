@@ -6,6 +6,8 @@ pub mod backup;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod endpoints;
+pub mod gateway;
 pub mod http;
 pub mod links;
 pub mod mirrors;
@@ -47,6 +49,10 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 		(false, _) => None,
 	};
 	let signing = Signing::load(&cfg.signing)?;
+	let gateway = gateway::Hold::load(&cfg.gateway, &cfg.gateway_next, accounts == 0)?;
+	if !gateway.loaded() && accounts > 0 {tracing::error!("no gateway key can be read ({}): the subscription endpoint answers every request as an unknown path", cfg.gateway.display())}
+	let lookups = Arc::new(RwLock::new(HashMap::new()));
+	let table = lookups.clone();
 	let not_found = settings.not_found.clone();
 	let setup_needed = admins == 0;
 	let two_step = if cfg.two_step_on() {"on"} else {"off"};
@@ -68,11 +74,12 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 		}
 		let _ = connection.execute("insert into settings (key, value) values ('two_step', ?) on conflict (key) do update set value = excluded.value", [two_step]);
 		if let Some(keys) = &keys {admin::complete_secrets(connection, keys)}
+		app::load_lookups(connection, &table);
 		keys
 	}).map_err(|error| error.to_string())?;
 	let token = setup_needed.then(|| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<20>()));
 	if let Some(token) = &token {println!("Setup token (one time): {token}\nPOST it with a username and password to {}/api/setup", cfg.prefix);}
-	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: Arc::new(AtomicBool::new(false)), settings: Arc::new(RwLock::new(settings)), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), mirrors_seen: Default::default(), publishing: tokio::sync::Mutex::new(())}))
+	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), gateway: Mutex::new(gateway), lookups, refusals: Mutex::new(HashMap::new()), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: Arc::new(AtomicBool::new(false)), settings: Arc::new(RwLock::new(settings)), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), mirrors_seen: Default::default(), publishing: tokio::sync::Mutex::new(())}))
 }
 
 /// What the upkeep loop remembers between passes.
@@ -102,6 +109,21 @@ pub async fn upkeep_once(app: &Arc<App>, state: &mut Upkeep) {
 			stats::prune(db, at);
 		}).await.is_err() {tracing::warn!("the database clean-up did not run: the database cannot take the call")}
 		if let Err(error) = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).prune() {tracing::error!("the signing keys could not be pruned: {error}")}
+		let days = app.settings().gateway_retired_days;
+		let (pruned, loaded, due) = {
+			let mut hold = app.gateway.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+			(hold.prune(days), hold.loaded(), hold.active().is_some_and(|key| at - key.created > gateway::REMIND_AFTER))
+		};
+		match pruned {
+			Ok(gone) if !gone.is_empty() => {
+				tracing::info!("retired gateway keys destroyed: {gone:?}");
+				let _ = app.db.call(move |db| for id in gone {let _ = db.execute("delete from gateway_use where key_id = ?", [id]);}).await;
+			}
+			Ok(_) => {}
+			Err(error) => tracing::error!("the retired gateway keys could not be pruned: {error}"),
+		}
+		if !loaded {tracing::error!("no gateway key can be read: the subscription endpoint answers every request as an unknown path. Load the next key, or make new gateway keys in the panel")}
+		if due {tracing::warn!("the active gateway key is more than 180 days old: load the next key")}
 		if app.keys.is_none() {tracing::error!("the key file is missing: the subscription endpoint answers every request as an unknown path and no secret can be opened")}
 	}
 	if at - state.polled_at >= stats::POLL {

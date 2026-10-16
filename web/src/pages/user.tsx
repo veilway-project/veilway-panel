@@ -3,22 +3,23 @@ import {useEffect, useState} from "react";
 import {api, type Device, type LinkView, type NodeState, type NodeUser, type UserPatch, type XrayLink} from "../api.ts";
 import {Copyable, ErrorNote, Mark, NodeNote, Qr, useCopy, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {useSettings} from "../settings.ts";
+import {EndpointPick, PlainNote} from "./endpoints.tsx";
 import {ExitPicker, type Exits, handoff, keptExits, keptFallback, useExits, useExpiry, UserForm} from "./users.tsx";
 import {XrayLinksDialog} from "./xray.tsx";
 
 export function UserPage({id}: {id: number}) {
 	const {t, date, time, bytes, number, percent} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings(), copy = useCopy();
-	const page = useLoad(() => Promise.all([api("get", "/users/{id}", {params: {id}}), api("get", "/users/{id}/devices", {params: {id}}), api("get", "/users/{id}/subscription", {params: {id}})]), [id]);
+	const page = useLoad(() => Promise.all([api("get", "/users/{id}", {params: {id}}), api("get", "/users/{id}/devices", {params: {id}}), api("get", "/users/{id}/subscription", {params: {id}}), api("get", "/users/{id}/endpoint", {params: {id}})]), [id]);
 	const [editing, setEditing] = useState(false), [dialog, setDialog] = useState<"delete" | "usage" | "link" | "device" | "xray" | "sealed" | null>(null), [removing, setRemoving] = useState<Device | null>(null);
 	const [totals, setTotals] = useState(false), [removeOld, setRemoveOld] = useState(false), [deviceName, setDeviceName] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [linkError, setLinkError] = useState<unknown>(null), [sealPass, setSealPass] = useState(""), [sealAgain, setSealAgain] = useState(""), [sealTried, setSealTried] = useState(false);
 	// fresh is a link made just now, by adding the user or resetting the link; otherwise it is the panel's copy, opened after re-authentication.
 	const [shown, setShown] = useState<{link: LinkView, once: boolean, fresh: boolean} | null>(() => { const made = handoff.current?.id === id ? handoff.current : null; handoff.current = null; return made && {link: made.link, once: settings?.show_links_once ?? false, fresh: true}; });
 	const [exported, setExported] = useState<{name: string, file: string, link?: string | null} | null>(null), [node, setNode] = useState<NodeState | null>(null), [xray, setXray] = useState<XrayLink[] | null>(null);
-	const nodeExits = useExits(), [exits, setExits] = useState<Exits | null>(null), [exitsTried, setExitsTried] = useState(false), [exitsBusy, setExitsBusy] = useState(false), [exitsError, setExitsError] = useState<unknown>(null), [fallback, setFallback] = useState<string | null | undefined>(undefined);
+	const nodeExits = useExits(), [exits, setExits] = useState<Exits | null>(null), [exitsTried, setExitsTried] = useState(false), [exitsBusy, setExitsBusy] = useState(false), [exitsError, setExitsError] = useState<unknown>(null), [fallback, setFallback] = useState<string | null | undefined>(undefined), [ownEndpoint, setOwnEndpoint] = useState<string | undefined>(undefined), [endpointBusy, setEndpointBusy] = useState(false), [endpointError, setEndpointError] = useState<unknown>(null);
 	useEffect(() => { if (shown) document.getElementById("link-title")?.scrollIntoView({block: "nearest"}); }, [shown]);
 	if (page.error && !page.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={page.reload}>{t("action.retry")}</Button>}>{say(page.error)}</StateBlock>;
 	if (!page.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
-	const [user, {devices}, sub] = page.data, usage = user.node as NodeUser | null, current = devices.filter(d => d.token_gen === sub.token_generation);
+	const [user, {devices}, sub, where] = page.data, usage = user.node as NodeUser | null, current = devices.filter(d => d.token_gen === sub.token_generation);
 	const fresh = new Set((usage?.devices ?? []).filter(d => typeof d.handshake_age_secs === "number" && d.handshake_age_secs < 180).map(d => d.public_key)), online = devices.filter(d => fresh.has(d.public_key)).length;
 	const act = async (work: () => Promise<unknown>, after?: () => void) => {
 		setBusy(true);
@@ -74,6 +75,20 @@ export function UserPage({id}: {id: number}) {
 			setExitsError(failure);
 		} finally {
 			setExitsBusy(false);
+		}
+	};
+	const saveEndpoint = async () => {
+		setEndpointBusy(true);
+		setEndpointError(null);
+		try {
+			setNode((await guard(() => api("patch", "/users/{id}", {params: {id}, body: {endpoint: ownEndpoint || null} as UserPatch}))).node);
+			setOwnEndpoint(undefined);
+			toast({tone: "success", title: t("endpoint.saved")});
+			page.reload();
+		} catch (failure) {
+			setEndpointError(failure);
+		} finally {
+			setEndpointBusy(false);
 		}
 	};
 	const total = usage?.traffic ? (usage.traffic.up_bytes ?? 0) + (usage.traffic.down_bytes ?? 0) : null, amount = usage?.used_bytes === undefined ? null : bytes(usage.used_bytes);
@@ -165,6 +180,17 @@ export function UserPage({id}: {id: number}) {
 					<ExitPicker value={held} onChange={setExits} exits={nodeExits} problem={exitsTried ? exitsProblem : undefined} fallback={fallback === undefined ? user.exit : fallback} onFallback={setFallback}/>
 					<ErrorNote error={exitsError}/>
 					{(exitsChanged || exitsEdited) && <div className="p-form-foot">{exitsEdited && <Button variant="quiet" onClick={() => { setExits(null); setFallback(undefined); setExitsTried(false); }}>{t("action.cancel")}</Button>}<Button variant="primary" disabled={exitsBusy || !exitsChanged} onClick={() => void saveExits()}>{t("exits.save")}</Button></div>}
+				</Glass>
+				<Glass className="p-panel">
+					<div className="p-sheet-head"><div><h2 className="vw-h2">{t("endpoint.title")}</h2><p>{t("endpoint.lead")}</p></div></div>
+					<dl className="p-kv">
+						<dt>{t("endpoint.inUse")}</dt><dd>{where.resolved ? <><strong className="vw-code">{where.resolved}</strong>{where.url && <span className="p-block vw-code" dir="ltr">{where.url}</span>}</> : t("endpoint.unset")}</dd>
+						<dt>{t("endpoint.source")}</dt><dd>{t(`endpoint.source.${where.source as "user"}`)}</dd>
+					</dl>
+					{where.plain && <PlainNote/>}
+					<EndpointPick label={t("endpoint.label")} hint={t("endpoint.hint")} value={ownEndpoint ?? where.own ?? ""} onChange={setOwnEndpoint} followLabel={t("endpoint.follow")}/>
+					<ErrorNote error={endpointError}/>
+					{ownEndpoint !== undefined && ownEndpoint !== (where.own ?? "") && <div className="p-form-foot"><Button variant="quiet" onClick={() => setOwnEndpoint(undefined)}>{t("action.cancel")}</Button><Button variant="primary" disabled={endpointBusy} onClick={() => void saveEndpoint()}>{t("endpoint.save")}</Button></div>}
 				</Glass>
 			</div>
 		</div>

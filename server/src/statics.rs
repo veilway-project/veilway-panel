@@ -31,7 +31,7 @@ pub fn label(base: &str) -> String {
 pub fn check(input: &Settings) -> Result<(), String> {
 	if !(1..=12).contains(&input.static_interval) {return Err("static_interval is 1 to 12 hours.".into())}
 	if input.static_mirrors.len() > mirror::MIRRORS_MAX {return Err(format!("static_mirrors has at most {} entries.", mirror::MIRRORS_MAX))}
-	let taken: Vec<String> = std::iter::once(input.endpoint_url.as_str()).chain(input.refresh_mirrors.iter().filter_map(|entry| entry.as_str().or_else(|| entry.get("url").and_then(|url| url.as_str())))).filter_map(|text| Url::pinned(text, 1024, true, true)).map(|url| url.authority()).collect();
+	let taken: Vec<String> = input.endpoints.iter().map(|endpoint| endpoint.url.as_str()).chain(input.refresh_mirrors.iter().filter_map(|entry| entry.as_str().or_else(|| entry.get("url").and_then(|url| url.as_str())))).filter_map(|text| Url::pinned(text, 1024, true, true)).map(|url| url.authority()).collect();
 	let mut seen: Vec<Url> = Vec::new();
 	for base in &input.static_mirrors {
 		let url = Url::parse(base, mirror::BASE_MAX, false, false).filter(|_| base.ends_with('/')).ok_or_else(|| format!("{base} is not a base URL: it is https with a host name (no address), no user, query or fragment, at most {} characters, and a path that ends in /.", mirror::BASE_MAX))?;
@@ -146,7 +146,7 @@ async fn publish(app: &App, at: i64, state: &mut Memory) -> Result<(), String> {
 			let public: [u8; 32] = STANDARD.decode(&device.public_key).ok().and_then(|bytes| bytes.try_into().ok()).ok_or("a device key is not 32 bytes")?;
 			let open = |label: &[u8], sealed: &[u8]| keys.open_secret(&user.record_id, [label, &public[..]].concat(), sealed).and_then(|plain| <[u8; 32]>::try_from(plain).ok()).ok_or("a stored static mirror key does not open: the key file is not the one that sealed it, so nothing is published and nothing is deleted");
 			let mirror_keys = MirrorKeys::restore(open(b"mirror_name", &name)?, open(b"mirror_key", &key)?);
-			let text = match reason {Some(reason) => subs::refusal(signer, &user.sub_id, reason), None => subs::document(app, user, &device, &signing, signer, Form::Static, None).await?};
+			let text = match reason {Some(reason) => subs::refusal(signer, &user.sub_id, reason), None => subs::document(app, user, &device, &signing, signer, Form::Static, None, None).await?};
 			devices.push((mirror_keys, text.into_bytes()));
 		}
 	}

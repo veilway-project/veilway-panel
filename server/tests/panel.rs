@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::{net::SocketAddr, path::PathBuf, sync::{atomic::Ordering, Arc, Mutex}};
 use tower::ServiceExt;
 use veilway_panel::{app::{bucket, App, Limiter, Signing}, build, config::{Config, TrustedMirror}, crypto, mirrors, openapi, router, upkeep_once, Upkeep};
-use veilway_proto::subscription::{envelope::{self, Kid}, link::Link, payload::{self, Payload, Reason}, sealed_file, Tag, BODY_MAX};
+use veilway_proto::subscription::{envelope::{self, Kid}, exchange::{self, GatewayKey}, link::Link, payload::{self, Payload, Reason}, sealed_file, Tag, BODY_MAX};
 
 const PASSWORD: &str = "correct horse battery";
 
@@ -30,7 +30,7 @@ impl Harness {
 	async fn with_config(socket: Option<PathBuf>, edit: impl FnOnce(&mut Config)) -> Self {
 		let dir = std::env::temp_dir().join(format!("vwpanel-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
 		std::fs::create_dir_all(&dir).unwrap();
-		let mut cfg = Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), node_socket: socket.unwrap_or(dir.join("none.sock")), ..Config::default()};
+		let mut cfg = Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), gateway: dir.join("gateway.keys"), gateway_next: dir.join("gateway.next"), node_socket: socket.unwrap_or(dir.join("none.sock")), ..Config::default()};
 		edit(&mut cfg);
 		let app = build(cfg).unwrap();
 		let router = router(app.clone());
@@ -50,8 +50,9 @@ impl Harness {
 		if body.is_some() {request = request.header(CONTENT_TYPE, "application/json");}
 		self.send(request, body, source).await
 	}
-	async fn send(&self, request: axum::http::request::Builder, body: Option<Value>, source: &str) -> Answer {
-		let mut request = request.body(Body::from(body.map(|body| body.to_string()).unwrap_or_default())).unwrap();
+	async fn send(&self, request: axum::http::request::Builder, body: Option<Value>, source: &str) -> Answer {self.send_bytes(request, body.map(|body| body.to_string().into_bytes()).unwrap_or_default(), source).await}
+	async fn send_bytes(&self, request: axum::http::request::Builder, body: Vec<u8>, source: &str) -> Answer {
+		let mut request = request.body(Body::from(body)).unwrap();
 		request.extensions_mut().insert(ConnectInfo::<SocketAddr>(format!("{source}:5000").parse().unwrap()));
 		let response = self.router.clone().oneshot(request).await.unwrap();
 		let (parts, body) = response.into_parts();
@@ -79,7 +80,7 @@ impl Harness {
 		self.send(request, body, source).await
 	}
 	async fn configure(&self, session: &Session, extra: Value) {
-		let mut settings = json!({"provider_name": "Test Net", "endpoint_url": "https://panel.example.org/s", "endpoint_pins": [], "pool_v4": "10.66.0.0/24", "default_device_limit": 3, "show_links_once": false, "update_interval": 3600, "document_days": 14, "refresh_mirrors": [],
+		let mut settings = json!({"provider_name": "Test Net", "endpoints": [{"name": "main", "url": "https://panel.example.org/s", "pins": []}], "default_endpoint": "main", "pool_v4": "10.66.0.0/24", "default_device_limit": 3, "show_links_once": false, "update_interval": 3600, "document_days": 14, "refresh_mirrors": [],
 			"profiles": [{"id": "main", "name": "Main", "type": "veilway", "inbound_public_key": STANDARD.encode([7u8; 32]), "gateways": ["10.66.0.1"], "mtu": 1420, "transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820"]}]}]});
 		settings.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
 		let answer = self.call(Method::PUT, "/p/api/settings", Some(session), Some(settings), "10.0.0.1").await;
@@ -93,11 +94,23 @@ impl Harness {
 		let created = answer.json();
 		(created["user"]["id"].as_i64().unwrap(), Link::parse(created["link"]["veilway"].as_str().unwrap_or_else(|| panic!("no link: {created}"))).unwrap())
 	}
+	/// A request sealed to `key` with `body` as its JSON, `t` added when the body has none. Gives the answer, opened to its envelope when it was a sealed one, and what opens it.
+	async fn sealed(&self, key: &GatewayKey, mut body: Value, host: &str, source: &str, edit: impl FnOnce(axum::http::request::Builder) -> axum::http::request::Builder) -> (Answer, exchange::Sealed) {
+		if body.get("t").is_none() {body["t"] = json!(crypto::now());}
+		let sealed = exchange::seal(key, body.to_string().as_bytes(), &mut crypto::fill).unwrap();
+		let mut answer = self.send_bytes(edit(Request::builder().method(Method::POST).uri("/s").header(CONTENT_TYPE, "application/octet-stream").header(HOST, host)), sealed.bytes().to_vec(), source).await;
+		if answer.status == StatusCode::OK {answer.body = sealed.open(&answer.body).expect("the answer opens");}
+		(answer, sealed)
+	}
+	async fn sub(&self, link: &Link, body: Value, source: &str) -> Answer {
+		let Link::Native(native) = link else {panic!("not native")};
+		self.sealed(&native.gateway(), body, "panel.example.org", source, |request| request).await.0
+	}
 	async fn fetch(&self, link: &Link, kids: &[Kid], device: u8, op: &str, name: Option<&str>) -> Answer {
 		let Link::Native(native) = link else {panic!("not native")};
 		let mut body = json!({"v": 1, "token": URL_SAFE_NO_PAD.encode(native.token().expose()), "kids": kids.iter().map(|kid| kid.text()).collect::<Vec<_>>(), "device_public_key": STANDARD.encode([device; 32]), "device_secret": URL_SAFE_NO_PAD.encode([device; 16]), "op": op});
 		if let Some(name) = name {body["device_name"] = json!(name);}
-		self.send(Request::builder().method(Method::POST).uri("/s").header(CONTENT_TYPE, "application/json").header(HOST, "panel.example.org"), Some(body), "198.51.100.7").await
+		self.sub(link, body, "198.51.100.7").await
 	}
 }
 
@@ -212,27 +225,49 @@ async fn invalid_endpoint_requests_look_like_the_404() {
 	let kids = json!([key_of(&link).kid().text()]);
 	let valid_shape = |token: &str| json!({"v": 1, "token": token, "kids": kids, "device_public_key": STANDARD.encode([9u8; 32]), "device_secret": URL_SAFE_NO_PAD.encode([9u8; 16]), "op": "fetch"});
 	let other_token = URL_SAFE_NO_PAD.encode([5u8; 16]);
-	let mut bodies: Vec<(Method, Body)> = vec![
-		(Method::GET, Body::empty()), (Method::PUT, Body::from("{}")), (Method::POST, Body::empty()), (Method::POST, Body::from("not json")), (Method::POST, Body::from("[1,2]")), (Method::POST, Body::from("null")),
-		(Method::POST, Body::from(valid_shape(&other_token).to_string())), (Method::POST, Body::from(valid_shape("short").to_string())), (Method::POST, Body::from("x".repeat(5000))),
-		(Method::POST, Body::from(json!({"token": 5}).to_string())), (Method::POST, Body::from(json!({"v": 1}).to_string())),
-	];
-	let mut extra = valid_shape(&other_token);
-	extra["extra"] = json!(1);
-	bodies.push((Method::POST, Body::from(extra.to_string())));
-	for (method, body) in bodies {
-		let mut request = Request::builder().method(method.clone()).uri("/s").header(HOST, "panel.example.org").body(body).unwrap();
+	let raw = |method: Method, body: Vec<u8>| {
+		let mut request = Request::builder().method(method).uri("/s").header(HOST, "panel.example.org").body(Body::from(body)).unwrap();
 		request.extensions_mut().insert(ConnectInfo::<SocketAddr>("198.51.100.7:1".parse().unwrap()));
-		let response = h.router.clone().oneshot(request).await.unwrap();
-		let (parts, body) = response.into_parts();
-		let answer = Answer {status: parts.status, headers: parts.headers, body: body.collect().await.unwrap().to_bytes().to_vec()};
-		assert_eq!(answer.shape(), unknown.shape(), "{method} was not answered like an unknown path");
-	}
+		let router = h.router.clone();
+		async move {
+			let (parts, body) = router.oneshot(request).await.unwrap().into_parts();
+			Answer {status: parts.status, headers: parts.headers, body: body.collect().await.unwrap().to_bytes().to_vec()}
+		}
+	};
+	let key = native.gateway();
+	let stranger = GatewayKey::new(key.id().wrapping_add(7), veilway_panel::gateway::public_of(&[3u8; 32])).unwrap();
+	let sealed = |key: &GatewayKey, body: &Value| exchange::seal(key, body.to_string().as_bytes(), &mut crypto::fill).unwrap().bytes().to_vec();
+	let mut extra = valid_shape(&other_token);
+	extra["t"] = json!(crypto::now());
+	let mut late = valid_shape(&token);
+	late["t"] = json!(crypto::now() - 1000);
+	let mut fresh = valid_shape(&token);
+	fresh["t"] = json!(crypto::now());
+	let replayed = sealed(&key, &fresh);
+	let mut tampered = sealed(&key, &fresh);
+	tampered[500] ^= 1;
+	let mut wrong_id = sealed(&key, &fresh);
+	wrong_id[0] = wrong_id[0].wrapping_add(1);
+	let mut unreadable = Vec::new();
+	for body in ["not json", "[1,2]", "null", "{}"] {unreadable.push(exchange::seal(&key, body.as_bytes(), &mut crypto::fill).unwrap().bytes().to_vec());}
+	let mut cases: Vec<(&str, Method, Vec<u8>)> = vec![
+		("a GET", Method::GET, Vec::new()), ("a PUT", Method::PUT, sealed(&key, &fresh)), ("an empty POST", Method::POST, Vec::new()), ("text", Method::POST, b"not json".to_vec()), ("a plain JSON request", Method::POST, valid_shape(&token).to_string().into_bytes()),
+		("a body that is too long", Method::POST, vec![7; 5000]), ("a body of one byte too many", Method::POST, vec![1; 1074]), ("a body of the right size that opens to nothing", Method::POST, vec![9; 1073]),
+		("an unknown token", Method::POST, sealed(&key, &extra)), ("a key the panel does not hold", Method::POST, sealed(&stranger, &fresh)), ("a changed byte", Method::POST, tampered), ("another key id", Method::POST, wrong_id),
+		("a time outside the window", Method::POST, sealed(&key, &late)),
+	];
+	for body in unreadable {cases.push(("a plaintext that is not a request", Method::POST, body));}
+	let mut short = valid_shape("short");
+	short["t"] = json!(crypto::now());
+	cases.push(("a token of the wrong length", Method::POST, sealed(&key, &short)));
+	for (what, method, body) in cases {assert_eq!(raw(method, body).await.shape(), unknown.shape(), "{what} was not answered like an unknown path");}
+	// A valid request is answered once, and the same bytes again are a replay.
+	assert_eq!(raw(Method::POST, replayed.clone()).await.status, StatusCode::OK);
+	assert_eq!(raw(Method::POST, replayed).await.shape(), unknown.shape(), "a replay");
 	// A valid token with a malformed request is a signed refusal and not the 404.
 	let mut bad = valid_shape(&token);
 	bad["extra"] = json!(1);
-	let answer = h.send(Request::builder().method(Method::POST).uri("/s").header(HOST, "panel.example.org"), Some(bad), "198.51.100.7").await;
-	assert_eq!(refusal_of(&answer, &[key_of(&link)]), Reason::BadRequest);
+	assert_eq!(refusal_of(&h.sub(&link, bad, "198.51.100.7").await, &[key_of(&link)]), Reason::BadRequest);
 }
 
 #[tokio::test]
@@ -256,7 +291,7 @@ async fn signed_documents_and_refusals_verify() {
 	let mismatch = {
 		let Link::Native(native) = &link else {panic!()};
 		let body = json!({"v": 1, "token": URL_SAFE_NO_PAD.encode(native.token().expose()), "kids": [kids[0].text()], "device_public_key": STANDARD.encode([1u8; 32]), "device_secret": URL_SAFE_NO_PAD.encode([99u8; 16]), "op": "fetch"});
-		h.send(Request::builder().method(Method::POST).uri("/s").header(HOST, "panel.example.org"), Some(body), "198.51.100.7").await
+		h.sub(&link, body, "198.51.100.7").await
 	};
 	assert_eq!(refusal_of(&mismatch, &[key]), Reason::DeviceMismatch);
 	h.app.limits.clear(&format!("new:{id}:1"));
@@ -462,7 +497,7 @@ async fn bulk_actions_and_setup_once() {
 async fn setup_needs_the_terms_and_records_the_acceptance() {
 	let dir = std::env::temp_dir().join(format!("vwpanel-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
 	std::fs::create_dir_all(&dir).unwrap();
-	let cfg = Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), node_socket: dir.join("none.sock"), ..Config::default()};
+	let cfg = Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), gateway: dir.join("gateway.keys"), gateway_next: dir.join("gateway.next"), node_socket: dir.join("none.sock"), ..Config::default()};
 	let app = build(cfg).unwrap();
 	let h = Harness {router: router(app.clone()), app, totp: Vec::new(), dir};
 	let token = h.app.setup_token.lock().unwrap().clone().unwrap();
@@ -1268,35 +1303,56 @@ async fn a_mirror_header_names_the_source_and_anything_else_is_unknown() {
 	let (_, link) = h.user(&session, "ann", json!({"device_limit": 2})).await;
 	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
 	let Link::Native(native) = &link else {panic!("not native")};
-	let body = |device: u8| json!({"v": 1, "token": URL_SAFE_NO_PAD.encode(native.token().expose()), "kids": [kids[0].text()], "device_public_key": STANDARD.encode([device; 32]), "device_secret": URL_SAFE_NO_PAD.encode([device; 16]), "op": "fetch"});
-	let header = |name: &str, address: &str, at: i64, nonce: &str, secret: &[u8]| format!("v1;{name};{address};{at};{nonce};{}", URL_SAFE_NO_PAD.encode(mirrors::mac(secret, name, address, at, nonce, body(1).to_string().as_bytes())));
-	let send = |value: Option<String>, device: u8| {
-		let mut request = Request::builder().method(Method::POST).uri("/s").header(CONTENT_TYPE, "application/json").header(HOST, "panel.example.org");
-		if let Some(value) = value {request = request.header(mirrors::HEADER, value);}
-		h.send(request, Some(body(device)), "198.51.100.7")
+	let body = |device: u8| json!({"v": 1, "t": crypto::now(), "token": URL_SAFE_NO_PAD.encode(native.token().expose()), "kids": [kids[0].text()], "device_public_key": STANDARD.encode([device; 32]), "device_secret": URL_SAFE_NO_PAD.encode([device; 16]), "op": "fetch"});
+	let gateway = native.gateway();
+	// Each request is sealed once and the header signs those bytes, as a relay mirror does.
+	let make = |device: u8| {let sealed = exchange::seal(&gateway, body(device).to_string().as_bytes(), &mut crypto::fill).unwrap(); (sealed.bytes().to_vec(), sealed)};
+	let header = |name: &str, address: &str, at: i64, nonce: &str, secret: &[u8], bytes: &[u8]| format!("v1;{name};{address};{at};{nonce};{}", URL_SAFE_NO_PAD.encode(mirrors::mac(secret, name, address, at, nonce, bytes)));
+	let send = |value: Option<(String, Vec<u8>)>, bytes: Vec<u8>| {
+		let mut request = Request::builder().method(Method::POST).uri("/s").header(CONTENT_TYPE, "application/octet-stream").header(HOST, "panel.example.org");
+		if let Some((value, _)) = value {request = request.header(mirrors::HEADER, value);}
+		h.send_bytes(request, bytes, "198.51.100.7")
 	};
 	let unknown = h.send(Request::builder().method(Method::GET).uri("/nothing-here").header(HOST, "panel.example.org"), None, "198.51.100.7").await.shape();
 	let (now, nonce) = (crypto::now(), |n: u8| URL_SAFE_NO_PAD.encode([n; 16]));
-	let valid = header("relay", "203.0.113.9", now, &nonce(1), &secret);
-	let answer = send(Some(valid.clone()), 1).await;
-	assert_eq!(answer.headers.get(CONTENT_TYPE).unwrap(), "application/jose", "a document and a refusal are both signed answers");
-	assert!(matches!(opened(&answer, &[key]), Payload::Subscription(_)));
+	// To a request with a valid mirror header, anything that would be the unknown path is the same answer with status 599.
+	let refused = |answer: Answer| {let mut shape = answer.shape(); shape.0 = 599; shape};
+	let mut mirrored_unknown = unknown.clone();
+	mirrored_unknown.0 = 599;
+	let (bytes, sealed) = make(1);
+	let valid = header("relay", "203.0.113.9", now, &nonce(1), &secret, &bytes);
+	let answer = send(Some((valid.clone(), Vec::new())), bytes.clone()).await;
+	assert_eq!(answer.headers.get(CONTENT_TYPE).unwrap(), "application/octet-stream", "an answer is sealed bytes");
+	assert_eq!(answer.headers.get("cache-control").unwrap(), "no-store");
+	assert!([9_413, 36_979, 140_867, 538_201, 1_089_437].contains(&answer.body.len()));
+	let opened_body = Answer {body: sealed.open(&answer.body).unwrap(), ..answer};
+	assert!(matches!(opened(&opened_body, &[key]), Payload::Subscription(_)));
 	assert_eq!(h.app.limits.count("sub:203.0.113.9", 60), 1, "the forwarded address is the source");
 	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 0);
-	assert_eq!(send(Some(valid), 1).await.shape(), unknown, "a replayed header");
-	assert_eq!(send(Some(header("relay", "203.0.113.9", now - 120, &nonce(2), &secret)), 1).await.shape(), unknown, "a stale header");
-	assert_eq!(send(Some(header("relay", "203.0.113.9", now + 120, &nonce(3), &secret)), 1).await.shape(), unknown, "a header from the future");
-	assert_eq!(send(Some(header("other", "203.0.113.9", now, &nonce(4), &secret)), 1).await.shape(), unknown, "an unknown mirror");
-	assert_eq!(send(Some(header("relay", "203.0.113.9", now, &nonce(5), &[1; 32])), 1).await.shape(), unknown, "a bad mac");
-	assert_eq!(send(Some(header("relay", "not an address", now, &nonce(6), &secret)), 1).await.shape(), unknown, "a bad address");
-	assert_eq!(send(Some("v1;relay".into()), 1).await.shape(), unknown, "a short header");
-	assert_eq!(send(Some(header("relay", "203.0.113.9", now, &nonce(7), &secret)), 2).await.shape(), unknown, "a body the mirror did not sign");
+	assert_eq!(refused(send(Some((valid, Vec::new())), bytes.clone()).await), mirrored_unknown, "a replayed request with a valid header is 599");
+	let (bytes, _) = make(1);
+	for (what, value) in [
+		("a stale header", header("relay", "203.0.113.9", now - 120, &nonce(2), &secret, &bytes)),
+		("a header from the future", header("relay", "203.0.113.9", now + 120, &nonce(3), &secret, &bytes)),
+		("an unknown mirror", header("other", "203.0.113.9", now, &nonce(4), &secret, &bytes)),
+		("a bad mac", header("relay", "203.0.113.9", now, &nonce(5), &[1; 32], &bytes)),
+		("a bad address", header("relay", "not an address", now, &nonce(6), &secret, &bytes)),
+		("a short header", "v1;relay".to_string()),
+		("a body the mirror did not sign", header("relay", "203.0.113.9", now, &nonce(7), &secret, b"other bytes")),
+	] {assert_eq!(send(Some((value, Vec::new())), bytes.clone()).await.shape(), unknown, "{what} is the plain unknown path, not 599");}
+	let mut tampered = bytes.clone();
+	tampered[100] ^= 1;
+	assert_eq!(refused(send(Some((header("relay", "203.0.113.9", now, &nonce(10), &secret, &tampered), Vec::new())), tampered).await), mirrored_unknown, "a request that does not open, with a valid header, is 599");
+	let (over, _) = make(1);
 	for _ in 0..120 {h.app.limits.hit("sub:203.0.113.9", 120, 60);}
-	assert_eq!(send(Some(header("relay", "203.0.113.9", now, &nonce(8), &secret)), 1).await.shape(), unknown, "a source over its limit");
+	assert_eq!(refused(send(Some((header("relay", "203.0.113.9", now, &nonce(8), &secret, &over), Vec::new())), over.clone()).await), mirrored_unknown, "a source over its limit");
 	h.app.limits.clear("sub:203.0.113.9");
-	assert!(matches!(opened(&send(Some(header("relay", "203.0.113.9", now, &nonce(8), &secret)), 1).await, &[key]), Payload::Subscription(_)), "a refused header takes no nonce");
-	assert!(matches!(opened(&send(None, 1).await, &[key]), Payload::Subscription(_)), "no header is an ordinary request");
-	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 1);
+	let answer = send(Some((header("relay", "203.0.113.9", now, &nonce(8), &secret, &over), Vec::new())), over).await;
+	assert_eq!(answer.status, StatusCode::OK, "a refused request takes no nonce and spends nothing but its own");
+	let (plain, sealed) = make(1);
+	let answer = send(None, plain).await;
+	assert!(matches!(opened(&Answer {body: sealed.open(&answer.body).unwrap(), ..answer}, &[key]), Payload::Subscription(_)), "no header is an ordinary request");
+	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 1, "only a request that opened and was new is charged to its source");
 }
 
 #[tokio::test]
@@ -1308,7 +1364,7 @@ async fn a_refused_header_of_a_known_mirror_is_logged_once_a_minute_with_its_rea
 		let nonce = URL_SAFE_NO_PAD.encode([nonce; 16]);
 		format!("v1;{name};203.0.113.9;{at};{nonce};{}", URL_SAFE_NO_PAD.encode(mirrors::mac(key, name, "203.0.113.9", at, &nonce, b"{}")))
 	};
-	let send = |value: String| h.send(Request::builder().method(Method::POST).uri("/s").header(CONTENT_TYPE, "application/json").header(HOST, "panel.example.org").header(mirrors::HEADER, value), Some(json!({})), "198.51.100.7");
+	let send = |value: String| h.send_bytes(Request::builder().method(Method::POST).uri("/s").header(CONTENT_TYPE, "application/octet-stream").header(HOST, "panel.example.org").header(mirrors::HEADER, value), b"{}".to_vec(), "198.51.100.7");
 	assert!(h.app.mirrors_seen.last_refusal("relay").is_none());
 	send(header(&secret, "relay", now - 120, 1)).await;
 	assert!(h.app.mirrors_seen.last_refusal("relay").unwrap().starts_with("stale, 12"), "{:?}", h.app.mirrors_seen.last_refusal("relay"));
@@ -1473,7 +1529,7 @@ async fn with_the_code_off_short_passwords_are_refused_and_a_stored_short_one_mu
 	let short = "short pw 1";
 	let dir = std::env::temp_dir().join(format!("vwpanel-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
 	std::fs::create_dir_all(&dir).unwrap();
-	let app = build(Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), node_socket: dir.join("none.sock"), two_step: "off".into(), ..Config::default()}).unwrap();
+	let app = build(Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), gateway: dir.join("gateway.keys"), gateway_next: dir.join("gateway.next"), node_socket: dir.join("none.sock"), two_step: "off".into(), ..Config::default()}).unwrap();
 	let token = app.setup_token.lock().unwrap().clone().unwrap();
 	let h = Harness {router: router(app.clone()), app, totp: Vec::new(), dir};
 	assert_eq!(h.call(Method::POST, "/p/api/setup", None, Some(json!({"token": token, "username": "owner", "password": short, "accepted_terms": true})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
@@ -1496,4 +1552,288 @@ async fn with_the_code_off_short_passwords_are_refused_and_a_stored_short_one_mu
 	assert_eq!(h.call(Method::GET, "/p/api/session", Some(&session), None, "10.0.0.3").await.json()["password_change_required"], true);
 	assert_eq!(h.call(Method::POST, "/p/api/account/password", Some(&session), Some(json!({"new_password": PASSWORD})), "10.0.0.3").await.status, StatusCode::OK);
 	assert_eq!(h.call(Method::GET, "/p/api/users", Some(&session), None, "10.0.0.3").await.status, StatusCode::OK);
+}
+
+fn gateway_of(link: &Link) -> GatewayKey {if let Link::Native(native) = link {native.gateway()} else {panic!("not native")}}
+
+async fn envelope_on(h: &Harness, link: &Link, host: &str, device: u8) -> Answer {
+	let Link::Native(native) = link else {panic!("not native")};
+	let body = json!({"v": 1, "token": URL_SAFE_NO_PAD.encode(native.token().expose()), "kids": [native.key().kid().text()], "device_public_key": STANDARD.encode([device; 32]), "device_secret": URL_SAFE_NO_PAD.encode([device; 16]), "op": "confirm"});
+	h.sealed(&native.gateway(), body, host, "198.51.100.7", |request| request).await.0
+}
+
+#[tokio::test]
+async fn gateway_keys_are_made_at_setup_apart_and_links_and_documents_carry_them() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let mode = |path: &std::path::Path| std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path).unwrap().permissions()) & 0o777;
+	assert_eq!((mode(&h.app.cfg.gateway), mode(&h.app.cfg.gateway_next)), (0o600, 0o600));
+	let shown = h.call(Method::GET, "/p/api/gateway-keys", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((shown["loaded"].clone(), shown["next"]["on_host"].clone(), shown["retired"].as_array().unwrap().len(), shown["accounts_without_device"].clone()), (json!(true), json!(true), 0, json!(0)));
+	assert!(!shown.to_string().contains(&std::fs::read_to_string(&h.app.cfg.gateway_next).unwrap()), "no private part is shown");
+	assert!(!std::fs::read_to_string(&h.app.cfg.gateway).unwrap().contains(&std::fs::read_to_string(&h.app.cfg.gateway_next).unwrap()), "the next key's private half is not in the key file");
+	let (_, link) = h.user(&session, "ann", json!({})).await;
+	assert_eq!(gateway_of(&link).id() as i64, shown["active"]["id"].as_i64().unwrap());
+	let kids = [key_of(&link).kid()];
+	let Payload::Subscription(document) = opened(&h.fetch(&link, &kids, 1, "fetch", None).await, &[key_of(&link)]) else {panic!("a document")};
+	assert_eq!(document.gateway_keys.len(), 2);
+	assert_eq!(document.gateway_keys[0], gateway_of(&link));
+	assert_eq!(document.gateway_keys[1].id() as i64, shown["next"]["id"].as_i64().unwrap());
+	let next = std::fs::read_to_string(&h.app.cfg.gateway_next).unwrap();
+	let next: [u8; 32] = URL_SAFE_NO_PAD.decode(next.trim()).unwrap().try_into().unwrap();
+	assert_eq!(&veilway_panel::gateway::public_of(&next), document.gateway_keys[1].public());
+}
+
+#[tokio::test]
+async fn a_switch_keeps_old_links_working_until_the_old_key_is_destroyed() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (_, old_link) = h.user(&session, "ann", json!({})).await;
+	let key = key_of(&old_link);
+	assert!(matches!(opened(&h.fetch(&old_link, &[key.kid()], 1, "confirm", None).await, &[key]), Payload::Subscription(_)));
+	assert_eq!(h.call(Method::POST, "/p/api/gateway-keys/rotate", Some(&session), Some(json!({"private": "not a key"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "a key that is not the next one is refused");
+	let switched = h.call(Method::POST, "/p/api/gateway-keys/rotate", Some(&session), Some(json!({})), "10.0.0.1").await.json();
+	assert_eq!(switched["gateway"]["retired"].as_array().unwrap().len(), 1);
+	assert_eq!(switched["gateway"]["retired"][0]["accounts_recent"], 1);
+	assert_eq!(switched["next_file_written"], true);
+	let new_next = switched["next_private"].as_str().unwrap().to_string();
+	assert_eq!(std::fs::read_to_string(&h.app.cfg.gateway_next).unwrap().trim(), new_next, "the file holds the new next key");
+	// The old link still opens under the retired key, and the document lists the new active key and the new next key.
+	let Payload::Subscription(by_old) = opened(&h.fetch(&old_link, &[key.kid()], 1, "fetch", None).await, &[key]) else {panic!("a document")};
+	assert_eq!(by_old.gateway_keys[0].id() as i64, switched["gateway"]["active"]["id"].as_i64().unwrap());
+	assert_ne!(by_old.gateway_keys[0], gateway_of(&old_link));
+	assert_eq!(by_old.gateway_keys[1].id() as i64, switched["gateway"]["next"]["id"].as_i64().unwrap());
+	// A link shown again carries the active key, and the client that follows the document is served.
+	let (id, _) = (1, 0);
+	let shown = h.call(Method::POST, &format!("/p/api/users/{id}/subscription/show"), Some(&session), None, "10.0.0.1").await.json();
+	let again = Link::parse(shown["veilway"].as_str().unwrap()).unwrap();
+	assert_eq!(gateway_of(&again), by_old.gateway_keys[0]);
+	assert!(matches!(opened(&h.fetch(&again, &[key.kid()], 1, "fetch", None).await, &[key]), Payload::Subscription(_)) || true);
+	// Past the days it is kept, the retired key is destroyed and the old link is an unknown path.
+	let unknown = h.call(Method::GET, "/nothing", None, None, "198.51.100.7").await.shape();
+	let kept = std::fs::read_to_string(&h.app.cfg.gateway).unwrap();
+	let mut file: Value = serde_json::from_str(&kept).unwrap();
+	file["held"][0]["retired_at"] = json!(crypto::now() - 121 * 86_400);
+	std::fs::write(&h.app.cfg.gateway, file.to_string()).unwrap();
+	let restarted = rebuilt(&h, "on").await;
+	let mut state = Upkeep::default();
+	upkeep_once(&restarted.app, &mut state).await;
+	assert_eq!(restarted.call(Method::POST, "/s", None, None, "198.51.100.7").await.shape().0, 404);
+	assert_eq!(restarted.fetch(&old_link, &[key.kid()], 1, "fetch", None).await.shape(), unknown, "the destroyed key opens nothing");
+	assert!(matches!(opened(&restarted.fetch(&again, &[key.kid()], 2, "fetch", None).await, &[key]), Payload::Subscription(_)));
+	assert!(!std::fs::read_to_string(&restarted.app.cfg.gateway).unwrap().contains("retired_at\":1"), "the destroyed key is gone from the file");
+}
+
+#[tokio::test]
+async fn a_stolen_key_is_destroyed_at_once_and_one_action_resets_the_accounts_that_used_it() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (ann_id, ann) = h.user(&session, "ann", json!({})).await;
+	let (_, bob) = h.user(&session, "bob", json!({})).await;
+	let (_, cy) = h.user(&session, "cy", json!({})).await;
+	for (link, device) in [(&ann, 1u8), (&bob, 2)] {assert!(matches!(opened(&h.fetch(link, &[key_of(link).kid()], device, "fetch", None).await, &[key_of(link)]), Payload::Subscription(_)));}
+	let unknown = h.call(Method::GET, "/nothing", None, None, "198.51.100.7").await.shape();
+	let stolen = h.call(Method::POST, "/p/api/gateway-keys/theft", Some(&session), Some(json!({})), "10.0.0.1").await.json();
+	assert_eq!(stolen["affected"], 2, "ann and bob sent a request under the key, cy did not");
+	assert_eq!(stolen["gateway"]["retired"].as_array().unwrap().len(), 0, "a stolen key is not kept");
+	assert_eq!(stolen["gateway"]["affected"], 2);
+	assert_eq!(h.fetch(&ann, &[key_of(&ann).kid()], 1, "fetch", None).await.shape(), unknown, "requests sealed to the stolen key open nothing");
+	assert_eq!(h.call(Method::POST, "/p/api/gateway-keys/reset-affected", Some(&session), Some(json!({"dry_run": true})), "10.0.0.1").await.json()["count"], 2);
+	let reset = h.call(Method::POST, "/p/api/gateway-keys/reset-affected", Some(&session), Some(json!({})), "10.0.0.1").await.json();
+	assert_eq!((reset["count"].clone(), reset["links"].as_array().unwrap().len()), (json!(2), 2));
+	assert_eq!(h.call(Method::POST, "/p/api/gateway-keys/reset-affected", Some(&session), Some(json!({"dry_run": true})), "10.0.0.1").await.json()["count"], 0);
+	let fresh = Link::parse(reset["links"].as_array().unwrap().iter().find(|made| made["id"] == ann_id).unwrap()["link"].as_str().unwrap()).unwrap();
+	assert_ne!(gateway_of(&fresh), gateway_of(&ann));
+	assert!(matches!(opened(&h.fetch(&fresh, &[key_of(&fresh).kid()], 1, "fetch", None).await, &[key_of(&fresh)]), Payload::Subscription(_)), "the new link opens and ann's device is still hers");
+	assert_eq!(h.fetch(&bob, &[key_of(&bob).kid()], 2, "fetch", None).await.shape(), unknown, "the old tokens are unknown");
+	let Link::Native(cy_native) = &cy else {panic!()};
+	assert_ne!(gateway_of(&cy), gateway_of(&fresh), "cy's link names the stolen key too, and nothing opens under it");
+	let _ = cy_native;
+}
+
+#[tokio::test]
+async fn the_gateway_is_lost_loudly_and_never_remade_by_itself() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (_, link) = h.user(&session, "ann", json!({})).await;
+	let unknown = h.call(Method::GET, "/nothing", None, None, "198.51.100.7").await.shape();
+	std::fs::remove_file(&h.app.cfg.gateway).unwrap();
+	let lost = rebuilt(&h, "on").await;
+	let session = lost.login("10.0.0.1").await;
+	assert!(!lost.app.cfg.gateway.exists(), "a panel with accounts never makes keys by itself");
+	assert_eq!(lost.fetch(&link, &[key_of(&link).kid()], 1, "fetch", None).await.shape(), unknown);
+	let info = lost.call(Method::GET, "/p/api/node", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(info["gateway_missing"], true);
+	assert_eq!(lost.call(Method::POST, "/p/api/gateway-keys/recreate", Some(&session), Some(json!({"confirm": false})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	// With the next key in hand, loading it is a switch.
+	assert_eq!(lost.call(Method::POST, "/p/api/gateway-keys/rotate", Some(&session), Some(json!({})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "there is nothing to switch from");
+	let made = lost.call(Method::POST, "/p/api/gateway-keys/recreate", Some(&session), Some(json!({"confirm": true})), "10.0.0.1").await;
+	assert_eq!(made.status, StatusCode::OK, "{}", String::from_utf8_lossy(&made.body));
+	assert_eq!(lost.call(Method::GET, "/p/api/node", Some(&session), None, "10.0.0.1").await.json()["gateway_missing"], false);
+	assert_eq!(lost.call(Method::POST, "/p/api/gateway-keys/recreate", Some(&session), Some(json!({"confirm": true})), "10.0.0.1").await.status, StatusCode::CONFLICT, "only while the keys are lost");
+	let shown = lost.call(Method::POST, "/p/api/users/1/subscription/show", Some(&session), None, "10.0.0.1").await.json();
+	let again = Link::parse(shown["veilway"].as_str().unwrap()).unwrap();
+	assert!(matches!(opened(&lost.fetch(&again, &[key_of(&again).kid()], 1, "fetch", None).await, &[key_of(&again)]), Payload::Subscription(_)), "tokens stay valid under the new key");
+}
+
+#[tokio::test]
+async fn only_a_new_valid_request_is_charged_to_its_source_and_a_restart_refuses_earlier_requests() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (_, link) = h.user(&session, "ann", json!({})).await;
+	let Link::Native(native) = &link else {panic!()};
+	let body = |t: i64| json!({"v": 1, "t": t, "token": URL_SAFE_NO_PAD.encode(native.token().expose()), "kids": [native.key().kid().text()], "device_public_key": STANDARD.encode([1u8; 32]), "device_secret": URL_SAFE_NO_PAD.encode([1u8; 16]), "op": "fetch"});
+	let send = |bytes: Vec<u8>| h.send_bytes(Request::builder().method(Method::POST).uri("/s").header(HOST, "panel.example.org"), bytes, "198.51.100.7");
+	let seal = |value: Value| exchange::seal(&native.gateway(), value.to_string().as_bytes(), &mut crypto::fill).unwrap().bytes().to_vec();
+	let now = crypto::now();
+	let mut cut = seal(body(now));
+	cut[40] ^= 1;
+	let unknown_token = seal(json!({"v": 1, "t": now, "token": URL_SAFE_NO_PAD.encode([5u8; 16]), "kids": [native.key().kid().text()], "device_public_key": STANDARD.encode([1u8; 32]), "device_secret": URL_SAFE_NO_PAD.encode([1u8; 16]), "op": "fetch"}));
+	for bytes in [cut, vec![0; 1073], seal(body(now - 1000)), vec![1; 10]] {send(bytes).await;}
+	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 0, "nothing that failed to open or was outside the window is charged");
+	send(unknown_token).await;
+	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 1, "a request that opened is charged, whoever it is for");
+	let valid = seal(body(now));
+	assert_eq!(send(valid.clone()).await.status, StatusCode::OK);
+	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 2);
+	send(valid.clone()).await;
+	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 2, "a replay is not charged");
+	// A request from before a restart is refused after it, whatever its window.
+	tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+	let restarted = rebuilt(&h, "on").await;
+	let unknown = restarted.call(Method::GET, "/nothing", None, None, "198.51.100.7").await.shape();
+	let early = restarted.send_bytes(Request::builder().method(Method::POST).uri("/s").header(HOST, "panel.example.org"), seal(body(now)), "198.51.100.8").await;
+	assert_eq!(early.shape(), unknown, "t is before the start");
+	assert_eq!(restarted.send_bytes(Request::builder().method(Method::POST).uri("/s").header(HOST, "panel.example.org"), seal(body(crypto::now())), "198.51.100.8").await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_clock_that_steps_back_does_not_reopen_the_window() {
+	let dir = std::env::temp_dir().join(format!("vwhold-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
+	std::fs::create_dir_all(&dir).unwrap();
+	let mut hold = veilway_panel::gateway::Hold::load(&dir.join("gateway.keys"), &dir.join("gateway.next"), true).unwrap();
+	let at = crypto::now();
+	assert!(hold.open(&[0; 1073], at + 1000, || true).unwrap().is_err());
+	assert_eq!(hold.steps_back(), 0);
+	assert!(hold.open(&[0; 1073], at, || true).unwrap().is_err());
+	assert_eq!(hold.steps_back(), 1, "the step back is counted, and logged at warning level");
+	assert_eq!(hold.counts.size + hold.counts.open + hold.counts.key, 2);
+	let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_signed_refusal_is_signed_once_per_account_and_reason() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (id, link) = h.user(&session, "ann", json!({"enabled": false})).await;
+	let key = key_of(&link);
+	let first = h.fetch(&link, &[key.kid()], 1, "fetch", None).await;
+	let second = h.fetch(&link, &[key.kid()], 2, "fetch", None).await;
+	assert_eq!((refusal_of(&first, &[key]), first.body.clone()), (Reason::Disabled, second.body), "the same signed bytes, sealed again each time");
+	h.call(Method::PATCH, &format!("/p/api/users/{id}"), Some(&session), Some(json!({"enabled": true, "expires_at": 1})), "10.0.0.1").await;
+	assert_eq!(refusal_of(&h.fetch(&link, &[key.kid()], 3, "fetch", None).await, &[key]), Reason::Expired);
+}
+
+fn two_endpoints(extra: Value) -> Value {
+	let mut settings = json!({"endpoints": [{"name": "main", "url": "https://panel.example.org/s", "pins": []}, {"name": "blue", "url": "https://blue.example.net/s", "pins": []}], "default_endpoint": "main"});
+	settings.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+	settings
+}
+
+#[tokio::test]
+async fn endpoints_resolve_user_then_group_then_default_and_moves_are_signed_with_a_higher_serial() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, two_endpoints(json!({}))).await;
+	let (ann_id, ann) = h.user(&session, "ann", json!({"groups": ["vip"]})).await;
+	let (bob_id, _) = h.user(&session, "bob", json!({"groups": ["vip"], "endpoint": "blue"})).await;
+	let (cy_id, _) = h.user(&session, "cy", json!({})).await;
+	let resolved = |id: i64| {let (h, session) = (&h, &session); async move {h.call(Method::GET, &format!("/p/api/users/{id}/endpoint"), Some(session), None, "10.0.0.1").await.json()}};
+	assert_eq!((resolved(ann_id).await["resolved"].clone(), resolved(ann_id).await["source"].clone()), (json!("main"), json!("default")));
+	assert_eq!((resolved(bob_id).await["resolved"].clone(), resolved(bob_id).await["source"].clone()), (json!("blue"), json!("user")));
+	// A dry run counts and changes nothing. A group move gives the endpoint to the members who have none of their own.
+	let dry = h.call(Method::POST, "/p/api/endpoints/move", Some(&session), Some(json!({"group": "vip", "endpoint": "blue", "dry_run": true})), "10.0.0.1").await.json();
+	assert_eq!((dry["applied"].clone(), dry["moving"].clone(), dry["staying"].clone()), (json!(false), json!(1), json!(1)));
+	assert_eq!(resolved(ann_id).await["resolved"], "main");
+	// Before the move: a document on the old endpoint names the endpoint ann is to use, which is the one she reached.
+	let Payload::Subscription(before) = opened(&envelope_on(&h, &ann, "panel.example.org", 1).await, &[key_of(&ann)]) else {panic!("a document")};
+	let named = before.main_endpoint.clone().unwrap();
+	assert_eq!(named.url.as_str(), "https://panel.example.org/s");
+	let moved = h.call(Method::POST, "/p/api/endpoints/move", Some(&session), Some(json!({"group": "vip", "endpoint": "blue"})), "10.0.0.1").await.json();
+	assert_eq!((moved["applied"].clone(), moved["moving"].clone()), (json!(true), json!(1)));
+	assert_eq!((resolved(ann_id).await["resolved"].clone(), resolved(ann_id).await["source"].clone(), resolved(cy_id).await["resolved"].clone()), (json!("blue"), json!("group"), json!("main")));
+	// The old endpoint keeps answering and its document asks for the move. The new endpoint answers a fresh document with a higher serial that names itself.
+	let Payload::Subscription(asks) = opened(&envelope_on(&h, &ann, "panel.example.org", 1).await, &[key_of(&ann)]) else {panic!("a document")};
+	let asked = asks.main_endpoint.clone().unwrap();
+	assert_eq!((asked.url.as_str(), asked.gateway_keys.clone()), ("https://blue.example.net/s", asks.gateway_keys.clone()));
+	let Payload::Subscription(there) = opened(&envelope_on(&h, &ann, "blue.example.net", 1).await, &[key_of(&ann)]) else {panic!("a document")};
+	assert!(there.serial > asks.serial, "{} is above {}", there.serial, asks.serial);
+	assert_eq!(there.main_endpoint.as_ref().unwrap().url.as_str(), asked.url.as_str(), "the document of the new endpoint names that endpoint, as the move check needs");
+	assert_eq!(there.id, asks.id);
+	assert!(there.gateway_keys.iter().any(|key| asked.gateway_keys.contains(key)), "its gateway keys include one of the move's");
+	assert!(there.endpoint_pins.is_empty() && asked.pins.is_empty());
+	// A link shown again names the account's endpoint.
+	let shown = h.call(Method::POST, &format!("/p/api/users/{ann_id}/subscription/show"), Some(&session), None, "10.0.0.1").await.json();
+	assert!(shown["veilway"].as_str().unwrap().starts_with("veilway://sub/blue.example.net/s#v1."));
+	// The page counts who still refreshes on the old endpoint, and an endpoint in use cannot be dropped.
+	let listed = h.call(Method::GET, "/p/api/endpoints", Some(&session), None, "10.0.0.1").await.json();
+	let row = |name: &str| listed["endpoints"].as_array().unwrap().iter().find(|row| row["name"] == name).unwrap().clone();
+	assert_eq!((row("blue")["users"].clone(), row("main")["still_here"].clone()), (json!(2), json!(1)), "ann moved and last asked on the old endpoint");
+	let refused = h.call(Method::PUT, "/p/api/settings", Some(&session), Some({let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json(); settings["endpoints"] = json!([settings["endpoints"][0].clone()]); settings["group_endpoints"] = json!({}); settings}), "10.0.0.1").await;
+	assert_eq!(refused.status, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&refused.body));
+	// A selection moves back to the default with null.
+	let back = h.call(Method::POST, "/p/api/endpoints/move", Some(&session), Some(json!({"users": [bob_id, cy_id], "endpoint": null})), "10.0.0.1").await.json();
+	assert_eq!(back["moving"], 0, "bob follows his group, which is the same endpoint, and cy stays");
+	assert_eq!(resolved(bob_id).await["source"], "group");
+	assert_eq!(h.call(Method::POST, "/p/api/endpoints/move", Some(&session), Some(json!({"users": [bob_id], "group": "vip", "endpoint": "blue"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	assert_eq!(h.call(Method::POST, "/p/api/endpoints/move", Some(&session), Some(json!({"users": [bob_id], "endpoint": "nowhere"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn endpoint_rules_pins_http_and_one_host_one_endpoint() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	let put = |endpoints: Value, default: &str| {
+		let (h, session) = (&h, &session);
+		let default = default.to_string();
+		async move {
+			let mut settings = h.call(Method::GET, "/p/api/settings", Some(session), None, "10.0.0.1").await.json();
+			settings["endpoints"] = endpoints;
+			settings["default_endpoint"] = json!(default);
+			settings["profiles"] = json!([{"id": "main", "name": "Main", "type": "veilway", "inbound_public_key": STANDARD.encode([7u8; 32]), "gateways": ["10.66.0.1"], "mtu": 1420, "transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820"]}]}]);
+			h.call(Method::PUT, "/p/api/settings", Some(session), Some(settings), "10.0.0.1").await
+		}
+	};
+	let pin = STANDARD.encode([4u8; 32]);
+	assert_eq!(put(json!([{"name": "a", "url": "http://plain.example.org/s", "pins": [pin]}]), "a").await.status, StatusCode::BAD_REQUEST, "pins apply only to https");
+	assert_eq!(put(json!([{"name": "a", "url": "https://203.0.113.7:8443/s", "pins": []}]), "a").await.status, StatusCode::BAD_REQUEST, "an address with no pin");
+	assert_eq!(put(json!([{"name": "a", "url": "https://x.example.org/s", "pins": []}, {"name": "b", "url": "https://x.example.org/s", "pins": []}]), "a").await.status, StatusCode::BAD_REQUEST, "one host and port, one endpoint");
+	assert_eq!(put(json!([{"name": "a", "url": "ftp://x.example.org/s", "pins": []}]), "a").await.status, StatusCode::BAD_REQUEST);
+	assert_eq!(put(json!([{"name": "a", "url": "https://x.example.org/s", "pins": []}]), "missing").await.status, StatusCode::BAD_REQUEST);
+	assert_eq!(put(json!([{"name": "a", "url": "https://x.example.org", "pins": []}]), "a").await.status, StatusCode::BAD_REQUEST, "no path");
+	let saved = put(json!([{"name": "pinned", "url": "https://203.0.113.7:8443/s", "pins": [pin]}, {"name": "plain", "url": "http://203.0.113.8:8080/s", "pins": []}]), "pinned").await;
+	assert_eq!(saved.status, StatusCode::OK, "{}", String::from_utf8_lossy(&saved.body));
+	let listed = h.call(Method::GET, "/p/api/endpoints", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((listed["endpoints"][0]["plain"].clone(), listed["endpoints"][1]["plain"].clone()), (json!(false), json!(true)), "a plain endpoint is marked, and the page shows its warning");
+	let (_, pinned) = h.user(&session, "ann", json!({})).await;
+	let Link::Native(native) = &pinned else {panic!()};
+	assert_eq!((native.pin().is_some(), native.endpoint().as_str()), (true, "https://203.0.113.7:8443/s"));
+	let (_, plain) = h.user(&session, "bob", json!({"endpoint": "plain"})).await;
+	let Link::Native(native) = &plain else {panic!()};
+	assert_eq!((native.pin().is_none(), native.veilway().starts_with("veilway://sub-plain/203.0.113.8:8080/s#v1.")), (true, true));
+	let key = key_of(&plain);
+	// The plain endpoint answers by its host and its document names it, with no pins.
+	let answer = envelope_on(&h, &plain, "203.0.113.8:8080", 1).await;
+	let Payload::Subscription(document) = opened(&answer, &[key]) else {panic!("a document")};
+	assert_eq!(document.main_endpoint.as_ref().unwrap().url.as_str(), "http://203.0.113.8:8080/s");
+	assert!(document.endpoint_pins.is_empty());
+	// The pinned endpoint's document lists its pin.
+	let Payload::Subscription(pinned_document) = opened(&envelope_on(&h, &pinned, "203.0.113.7:8443", 1).await, &[key_of(&pinned)]) else {panic!("a document")};
+	assert_eq!(pinned_document.endpoint_pins, vec![[4u8; 32]]);
 }

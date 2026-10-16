@@ -229,6 +229,62 @@
         ],
         "type": "object"
       },
+      "Counts": {
+        "description": "How many requests each kind of refusal turned away since the start, and how many were served.",
+        "properties": {
+          "key": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "open": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "replay": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "request": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "served": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "size": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "window": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "served",
+          "size",
+          "key",
+          "open",
+          "request",
+          "window",
+          "replay",
+          "source"
+        ],
+        "type": "object"
+      },
       "Created": {
         "properties": {
           "link": {
@@ -420,6 +476,107 @@
         ],
         "type": "object"
       },
+      "Endpoint": {
+        "additionalProperties": false,
+        "description": "One subscription endpoint the panel answers on and puts in links.",
+        "properties": {
+          "name": {
+            "description": "1 to 64 characters of a-z, 0-9, dash and underscore.",
+            "type": "string"
+          },
+          "pins": {
+            "default": [],
+            "description": "SHA-256 of the SubjectPublicKeyInfo of the endpoint's certificate, standard base64, at most two. Required for a self-signed certificate (an IP address as host). Empty for a chain-validated or plain endpoint. `https` only.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "url": {
+            "description": "The public URL with the path the web server forwards to the panel's `sub_path`: `https`, or `http` for a plain endpoint, which hides nothing from the network (the exchange stays sealed). At most 256 characters, no fragment.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url"
+        ],
+        "type": "object"
+      },
+      "EndpointRow": {
+        "properties": {
+          "assigned": {
+            "description": "Of those, the ones given this endpoint by name.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "default": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pins": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "plain": {
+            "description": "A plain http endpoint: the network can tell that the app is used, now and later in its records. The exchange itself stays sealed.",
+            "type": "boolean"
+          },
+          "still_here": {
+            "description": "Accounts that resolve to another endpoint now and refreshed on this one in the last 30 days: moved, and not there yet. The endpoint can be retired when this is none.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "url": {
+            "type": "string"
+          },
+          "users": {
+            "description": "Accounts whose links and documents use this endpoint, by the resolution.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "url",
+          "pins",
+          "default",
+          "plain",
+          "users",
+          "assigned",
+          "still_here"
+        ],
+        "type": "object"
+      },
+      "EndpointsOut": {
+        "properties": {
+          "default": {
+            "type": "string"
+          },
+          "endpoints": {
+            "items": {
+              "$ref": "#/components/schemas/EndpointRow"
+            },
+            "type": "array"
+          },
+          "groups": {
+            "items": {
+              "$ref": "#/components/schemas/GroupRow"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "default",
+          "endpoints",
+          "groups"
+        ],
+        "type": "object"
+      },
       "ErrorBody": {
         "properties": {
           "error": {
@@ -520,6 +677,113 @@
           "shared_host",
           "path",
           "sync"
+        ],
+        "type": "object"
+      },
+      "GatewayOut": {
+        "properties": {
+          "accounts_without_device": {
+            "description": "Accounts with no device yet: they hold a link made under some key and have not imported it.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "active": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/KeyView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "affected": {
+            "description": "Accounts that sent a request under a key stolen earlier and whose tokens are not reset yet.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "clock_steps": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "clock_synchronized": {
+            "description": "Whether the system reports its clock as synchronized, null when it cannot tell. The gateway needs a synchronized clock.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "counts": {
+            "$ref": "#/components/schemas/Counts"
+          },
+          "loaded": {
+            "description": "False while the keys are lost or unreadable: the endpoint answers every request as an unknown path.",
+            "type": "boolean"
+          },
+          "next": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NextView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remembered": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "retired": {
+            "items": {
+              "$ref": "#/components/schemas/RetiredView"
+            },
+            "type": "array"
+          },
+          "retired_days": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "switch_due": {
+            "description": "The active key is older than 180 days.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "loaded",
+          "retired",
+          "retired_days",
+          "switch_due",
+          "accounts_without_device",
+          "affected",
+          "counts",
+          "remembered",
+          "clock_steps"
+        ],
+        "type": "object"
+      },
+      "GroupRow": {
+        "properties": {
+          "endpoint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "users": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "users"
         ],
         "type": "object"
       },
@@ -738,6 +1002,30 @@
         ],
         "type": "object"
       },
+      "KeyView": {
+        "properties": {
+          "created": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "fingerprint": {
+            "description": "First 16 bytes of the SHA-256 of the key, as the apps show it.",
+            "type": "string"
+          },
+          "id": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "fingerprint",
+          "created"
+        ],
+        "type": "object"
+      },
       "KeysOut": {
         "properties": {
           "keys": {
@@ -898,6 +1186,84 @@
         ],
         "type": "object"
       },
+      "MoveIn": {
+        "additionalProperties": false,
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "description": "Only count: say who moves and who stays, and change nothing.",
+            "type": "boolean"
+          },
+          "endpoint": {
+            "description": "The endpoint to move to. Null takes the accounts' own choice away (they follow their group or the default), or the group's.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "group": {
+            "description": "The group to move: sets the endpoint of the group, which every member without an endpoint of their own follows.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "users": {
+            "description": "The accounts to move: one, a selection or many. Give this or `group`.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "MoveOut": {
+        "properties": {
+          "applied": {
+            "type": "boolean"
+          },
+          "changes_check": {
+            "description": "Of those who move, the ones whose endpoint is checked another way at the new one (chain, pins or plain http), which the app says when it asks.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "moving": {
+            "description": "Accounts whose endpoint changes. Their next document names the new endpoint, and the app asks its user once.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "staying": {
+            "description": "Accounts the request names (or the group holds) whose endpoint stays.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "to_plain": {
+            "description": "Of those who move, the ones moving to a plain http endpoint.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "applied",
+          "moving",
+          "staying",
+          "changes_check",
+          "to_plain",
+          "names"
+        ],
+        "type": "object"
+      },
       "NewAdmin": {
         "additionalProperties": false,
         "properties": {
@@ -959,6 +1325,34 @@
         ],
         "type": "object"
       },
+      "NextView": {
+        "properties": {
+          "created": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "on_host": {
+            "description": "The file of the next key's private half is still on this host. Whoever takes the active key from the host takes the next one with it: move the file away.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "fingerprint",
+          "created",
+          "on_host"
+        ],
+        "type": "object"
+      },
       "NodeInfo": {
         "properties": {
           "clock_synchronized": {
@@ -967,6 +1361,14 @@
               "boolean",
               "null"
             ]
+          },
+          "gateway_missing": {
+            "description": "True while no gateway key can be read: the subscription endpoint answers every request as an unknown path.",
+            "type": "boolean"
+          },
+          "gateway_switch_due": {
+            "description": "The active gateway key is older than 180 days: time to load the next key.",
+            "type": "boolean"
           },
           "keys_missing": {
             "type": "boolean"
@@ -984,7 +1386,9 @@
         },
         "required": [
           "reachable",
-          "keys_missing"
+          "keys_missing",
+          "gateway_missing",
+          "gateway_switch_due"
         ],
         "type": "object"
       },
@@ -1221,6 +1625,19 @@
         ],
         "type": "object"
       },
+      "RecreateIn": {
+        "additionalProperties": false,
+        "properties": {
+          "confirm": {
+            "description": "Must be true: making new keys on a panel that has accounts means old links do not open at a first import, and clients learn the new key only from a newer document on a static mirror or from a link shown again.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "confirm"
+        ],
+        "type": "object"
+      },
       "Relay": {
         "additionalProperties": false,
         "description": "A forwarder on another address that passes bytes to the node unchanged: nginx `stream`, a DNAT rule, HAProxy, or a content delivery network. TLS, the proofs and WireGuard run end to end through it, so it sees nothing and cannot pass for the node.",
@@ -1291,7 +1708,81 @@
         ],
         "type": "object"
       },
+      "Reset": {
+        "properties": {
+          "applied": {
+            "type": "boolean"
+          },
+          "count": {
+            "description": "Accounts whose token is reset, or would be.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "links": {
+            "description": "The new links, when applied. A secret, shown once.",
+            "items": {
+              "$ref": "#/components/schemas/ResetLink"
+            },
+            "type": "array"
+          },
+          "node": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NodeState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "applied",
+          "count",
+          "links"
+        ],
+        "type": "object"
+      },
+      "ResetIn": {
+        "additionalProperties": false,
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "description": "Only count the accounts and change nothing.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "ResetLink": {
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "link": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "ResetLink2": {
         "additionalProperties": false,
         "properties": {
           "remove_devices": {
@@ -1341,6 +1832,46 @@
         "required": [
           "ok",
           "saved_as"
+        ],
+        "type": "object"
+      },
+      "RetiredView": {
+        "properties": {
+          "accounts": {
+            "description": "Accounts that ever sent a request under it.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "accounts_recent": {
+            "description": "Accounts that sent a request under this key in the last 30 days.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "destroy_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "id": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "retired_at": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "fingerprint",
+          "retired_at",
+          "destroy_at",
+          "accounts_recent",
+          "accounts"
         ],
         "type": "object"
       },
@@ -1498,24 +2029,39 @@
             "minimum": 0,
             "type": "integer"
           },
+          "default_endpoint": {
+            "default": "",
+            "description": "The name of the default endpoint. Empty only while there are no endpoints.",
+            "type": "string"
+          },
           "document_days": {
             "default": 14,
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
           },
-          "endpoint_pins": {
+          "endpoints": {
             "default": [],
-            "description": "SHA-256 of the SubjectPublicKeyInfo of the endpoint's certificate, standard base64, when it has no certificate from an authority. The first is put in links. Empty for a chain-validated endpoint.",
+            "description": "The named subscription endpoints, at most 16, each on its own host and port. An account's links and documents use the endpoint resolved for it: its own, else the first of its groups that has one in `group_endpoints`, else the default.",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/Endpoint"
             },
             "type": "array"
           },
-          "endpoint_url": {
-            "default": "",
-            "description": "The public `https` URL of the subscription endpoint, with the path the web server forwards to the panel's `sub_path`. No fragment.",
-            "type": "string"
+          "gateway_retired_days": {
+            "default": 120,
+            "description": "Days a retired gateway key keeps opening requests after a routine switch, 30 to 365.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "group_endpoints": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "The endpoint of a group, by group name.",
+            "type": "object"
           },
           "node_host": {
             "default": "",
@@ -1700,6 +2246,7 @@
             "type": "boolean"
           },
           "endpoint_url": {
+            "description": "The URL of the endpoint the account's links use now, empty while none is set.",
             "type": "string"
           },
           "key_fingerprints": {
@@ -1728,6 +2275,46 @@
           "token_created",
           "can_show",
           "key_fingerprints"
+        ],
+        "type": "object"
+      },
+      "SwitchIn": {
+        "additionalProperties": false,
+        "properties": {
+          "private": {
+            "description": "The private half of the next key, 43 characters of base64url. Left out, the panel reads it from its `gateway_next` file.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "Switched": {
+        "properties": {
+          "affected": {
+            "description": "Accounts that sent a request under the stolen key (for a theft only): their tokens are to be reset.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "gateway": {
+            "$ref": "#/components/schemas/GatewayOut"
+          },
+          "next_file_written": {
+            "description": "False when the file for the new next key could not be written, so the shown key is the only copy.",
+            "type": "boolean"
+          },
+          "next_private": {
+            "description": "The private half of the new next key. Shown once: move it away from this host and keep it. The panel keeps no copy except the file named in its config, which it lists as still on the host until the file is moved.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "gateway",
+          "next_private",
+          "next_file_written",
+          "affected"
         ],
         "type": "object"
       },
@@ -1947,6 +2534,42 @@
         ],
         "type": "object"
       },
+      "UserEndpoint": {
+        "properties": {
+          "own": {
+            "description": "The endpoint given to the account by name, null when its group's or the default applies.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plain": {
+            "type": "boolean"
+          },
+          "resolved": {
+            "description": "The endpoint in use for the account, null while no endpoint is set.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "description": "\"user\", \"group\" or \"default\".",
+            "type": "string"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "source",
+          "plain"
+        ],
+        "type": "object"
+      },
       "UserIn": {
         "additionalProperties": false,
         "properties": {
@@ -1962,6 +2585,13 @@
           "enabled": {
             "type": [
               "boolean",
+              "null"
+            ]
+          },
+          "endpoint": {
+            "description": "The name of one of the settings' endpoints, or null for the group's or the default.",
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -2037,6 +2667,13 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "endpoint": {
+            "description": "The endpoint given to the user by name, null when the group's or the default applies. The one in use is at `/users/{id}/endpoint`.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "exit": {
             "description": "The exit the user's devices leave through when they choose none. Null is the node's default.",
@@ -2125,6 +2762,14 @@
           "enabled": {
             "type": [
               "boolean",
+              "null"
+            ]
+          },
+          "endpoint": {
+            "default": null,
+            "description": "The name of one of the settings' endpoints, or null for the group's or the default.",
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -3439,6 +4084,476 @@
         },
         "summary": "Replaces one section and applies the result like putConfig. A secret left as the node's marker keeps its value. links, log, dns and notices need a recent re-authentication, and no API token can change them. A null removes an optional section: dns, log, notices, replay and links.",
         "x-access": "full"
+      }
+    },
+    "/endpoints": {
+      "get": {
+        "operationId": "listEndpoints",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EndpointsOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The named subscription endpoints with the accounts that use each, the groups with their endpoint, and how many moved accounts still refresh on the old one.",
+        "x-access": "read"
+      }
+    },
+    "/endpoints/move": {
+      "post": {
+        "operationId": "moveToEndpoint",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MoveOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Moves accounts or a group to a named endpoint through the signed main_endpoint of their documents. dry_run only counts.",
+        "x-access": "users"
+      }
+    },
+    "/gateway-keys": {
+      "get": {
+        "operationId": "getGatewayKeys",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The gateway keys requests are sealed to: the active key, the next key, the retired keys with how many accounts used them, the failure counters and the clock. No private part is ever shown.",
+        "x-access": "session"
+      }
+    },
+    "/gateway-keys/recreate": {
+      "post": {
+        "operationId": "recreateGatewayKeys",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecreateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Switched"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Makes new gateway keys when none can be read and the next key is not at hand. Old links stop working at a first import. Refused while the keys are readable.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/gateway-keys/reset-affected": {
+      "post": {
+        "operationId": "resetAffectedTokens",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Reset"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Makes a new token and link for every account that sent a request under a stolen key. dry_run only counts.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/gateway-keys/rotate": {
+      "post": {
+        "operationId": "rotateGatewayKey",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwitchIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Switched"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Loads the next key (given, or read from the panel's gateway_next file): it becomes active, the old key is kept retired for the retention days, and a new next key is made. Its private half is in the answer, once.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/gateway-keys/theft": {
+      "post": {
+        "operationId": "gatewayKeyStolen",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwitchIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Switched"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Loads the next key like a switch and destroys the old key at once. The accounts that sent a request under it are kept for resetAffectedTokens.",
+        "x-access": "session-reauth"
       }
     },
     "/links": {
@@ -6638,6 +7753,75 @@
         "x-access": "session-reauth"
       }
     },
+    "/users/{id}/endpoint": {
+      "get": {
+        "operationId": "getUserEndpoint",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserEndpoint"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The endpoint an account's links and documents use now, and where it comes from.",
+        "x-access": "read"
+      }
+    },
     "/users/{id}/subscription": {
       "get": {
         "operationId": "getSubscription",
@@ -6724,7 +7908,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/ResetLink"
+                "$ref": "#/components/schemas/ResetLink2"
               }
             }
           },

@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::{collections::HashSet, fs, net::SocketAddr, path::{Path, PathBuf}, sync::Arc};
 use tower::ServiceExt;
 use veilway_panel::{app::App, build, config::Config, crypto, router, statics};
-use veilway_proto::{keys::MirrorKeys, subscription::{envelope, link::Link, mirror, payload::{self, Payload, Reason}, BODY_MAX}, NoRandom};
+use veilway_proto::{keys::MirrorKeys, subscription::{envelope, exchange, link::Link, mirror, payload::{self, Payload, Reason}, BODY_MAX}, NoRandom};
 
 const PASSWORD: &str = "correct horse battery";
 const BASE: &str = "https://files.example.net/vw/";
@@ -26,7 +26,7 @@ impl Harness {
 	async fn new() -> Self {
 		let dir = std::env::temp_dir().join(format!("vwstatic-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
 		fs::create_dir_all(&dir).unwrap();
-		let cfg = Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), node_socket: dir.join("none.sock"), ..Config::default()};
+		let cfg = Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), gateway: dir.join("gateway.keys"), gateway_next: dir.join("gateway.next"), node_socket: dir.join("none.sock"), ..Config::default()};
 		let app = build(cfg).unwrap();
 		let mut harness = Self {router: router(app.clone()), app, totp: Vec::new(), dir};
 		let token = harness.app.setup_token.lock().unwrap().clone().unwrap();
@@ -44,8 +44,9 @@ impl Harness {
 		if body.is_some() {request = request.header(CONTENT_TYPE, "application/json");}
 		self.send(request, body, source).await
 	}
-	async fn send(&self, request: axum::http::request::Builder, body: Option<Value>, source: &str) -> Answer {
-		let mut request = request.body(Body::from(body.map(|body| body.to_string()).unwrap_or_default())).unwrap();
+	async fn send(&self, request: axum::http::request::Builder, body: Option<Value>, source: &str) -> Answer {self.send_bytes(request, body.map(|body| body.to_string().into_bytes()).unwrap_or_default(), source).await}
+	async fn send_bytes(&self, request: axum::http::request::Builder, body: Vec<u8>, source: &str) -> Answer {
+		let mut request = request.body(Body::from(body)).unwrap();
 		request.extensions_mut().insert(ConnectInfo::<SocketAddr>(format!("{source}:5000").parse().unwrap()));
 		let response = self.router.clone().oneshot(request).await.unwrap();
 		let (parts, body) = response.into_parts();
@@ -59,7 +60,7 @@ impl Harness {
 		Session {cookie, csrf: answer.json()["csrf"].as_str().unwrap().to_string()}
 	}
 	fn settings(extra: Value) -> Value {
-		let mut settings = json!({"provider_name": "Test Net", "endpoint_url": "https://panel.example.org/s", "endpoint_pins": [], "pool_v4": "10.66.0.0/24", "default_device_limit": 3, "show_links_once": false, "update_interval": 3600, "document_days": 14, "refresh_mirrors": [],
+		let mut settings = json!({"provider_name": "Test Net", "endpoints": [{"name": "main", "url": "https://panel.example.org/s", "pins": []}], "default_endpoint": "main", "pool_v4": "10.66.0.0/24", "default_device_limit": 3, "show_links_once": false, "update_interval": 3600, "document_days": 14, "refresh_mirrors": [],
 			"profiles": [{"id": "main", "name": "Main", "type": "veilway", "inbound_public_key": STANDARD.encode([7u8; 32]), "gateways": ["10.66.0.1"], "mtu": 1420, "transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820"]}]}]});
 		settings.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
 		settings
@@ -78,8 +79,11 @@ impl Harness {
 	async fn fetch(&self, link: &Link, device: u8, op: &str) -> Answer {
 		let Link::Native(native) = link else {panic!("not native")};
 		let kid = native.key().kid();
-		let body = json!({"v": 1, "token": URL_SAFE_NO_PAD.encode(native.token().expose()), "kids": [kid.text()], "device_public_key": STANDARD.encode([device; 32]), "device_secret": URL_SAFE_NO_PAD.encode([device; 16]), "op": op});
-		self.send(Request::builder().method(Method::POST).uri("/s").header(CONTENT_TYPE, "application/json").header(HOST, "panel.example.org"), Some(body), "198.51.100.7").await
+		let body = json!({"v": 1, "t": crypto::now(), "token": URL_SAFE_NO_PAD.encode(native.token().expose()), "kids": [kid.text()], "device_public_key": STANDARD.encode([device; 32]), "device_secret": URL_SAFE_NO_PAD.encode([device; 16]), "op": op});
+		let sealed = exchange::seal(&native.gateway(), body.to_string().as_bytes(), &mut crypto::fill).unwrap();
+		let mut answer = self.send_bytes(Request::builder().method(Method::POST).uri("/s").header(CONTENT_TYPE, "application/octet-stream").header(HOST, "panel.example.org"), sealed.bytes().to_vec(), "198.51.100.7").await;
+		if answer.status == StatusCode::OK {answer.body = sealed.open(&answer.body).expect("the answer opens");}
+		answer
 	}
 	fn forget_limits(&self, id: i64, device: u8) {self.app.limits.clear(&format!("dev:{id}:{}", STANDARD.encode([device; 32])));}
 	fn root(&self, base: &str) -> PathBuf {self.dir.join("static").join(statics::label(base))}

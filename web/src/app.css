@@ -430,3 +430,5 @@
 .p-static-facts dt { font-size: var(--text-2); color: var(--c-text-muted); }
 .p-static-facts dd { margin: 0; }
 .p-static .p-mirror .p-flag { white-space: normal; }
+.p-flag.p-wrap { white-space: normal; align-items: start; }
+.p-flag.p-wrap .vw-icon { margin-block-start: 0.15em; }

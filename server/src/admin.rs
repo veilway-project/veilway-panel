@@ -472,8 +472,7 @@ pub async fn get_settings(State(app): State<Arc<App>>) -> Result<Response, Failu
 pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Settings>) -> Result<Response, Failure> {
 	if [&input.terms_url, &input.privacy_url].iter().any(|url| !url.is_empty() && Url::parse(url, URL_MAX, true, true).is_none()) {return Err(Failure::bad("terms_url and privacy_url are https URLs of at most 512 characters, or empty."))}
 	if input.pool_v4.parse::<Ipv4Net>().map_or(true, |pool| pool.prefix_len() < 16 || pool.prefix_len() > 30) {return Err(Failure::bad("pool_v4 is an IPv4 network from /16 to /30."))}
-	if !input.endpoint_url.is_empty() && !(input.endpoint_url.starts_with("https://") && input.endpoint_url.len() <= 256 && !input.endpoint_url.contains('#')) {return Err(Failure::bad("endpoint_url is an https URL of at most 256 characters, without a fragment."))}
-	if input.endpoint_pins.len() > 2 || input.endpoint_pins.iter().any(|pin| STANDARD.decode(pin).map_or(true, |bytes| bytes.len() != 32)) {return Err(Failure::bad("endpoint_pins is at most two SHA-256 pins in standard base64."))}
+	crate::endpoints::validate(&input).map_err(Failure::bad)?;
 	if !(900..=604_800).contains(&input.update_interval) || !(1..=90).contains(&input.document_days) || input.provider_name.is_empty() || input.provider_name.chars().count() > 64 {return Err(Failure::bad("update_interval is 900 to 604800, document_days is 1 to 90 and provider_name is 1 to 64 characters."))}
 	if input.profiles.len() > 64 || input.profiles.iter().any(|profile| !profile.is_object() || profile.get("device").is_some()) || input.refresh_mirrors.len() > 4 {return Err(Failure::bad("profiles are at most 64 objects without a device, and refresh_mirrors at most 4."))}
 	crate::statics::check(&input).map_err(Failure::bad)?;
@@ -484,6 +483,7 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 	let detail = app.db.call(move |db| -> Result<&'static str, Failure> {
 		let tx = db.transaction()?;
 		let before = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+		crate::endpoints::in_use(&tx, &saved).map_err(Failure::conflict)?;
 		if saved.show_links_once && !before.show_links_once {tx.execute("update users set token_copy = null", [])?;}
 		let detail = if before.profiles != saved.profiles {"profiles changed"} else {""};
 		store_settings(&tx, &cache, move |settings| *settings = saved).map_err(Failure::internal)?;
@@ -539,12 +539,17 @@ pub async fn finish_signing(State(app): State<Arc<App>>, Extension(ctx): Extensi
 
 #[derive(Serialize, JsonSchema)]
 pub struct NodeInfo {pub reachable: bool, pub status: Option<Value>, pub last_sync: Option<String>, pub keys_missing: bool,
+	/// True while no gateway key can be read: the subscription endpoint answers every request as an unknown path.
+	pub gateway_missing: bool,
+	/// The active gateway key is older than 180 days: time to load the next key.
+	pub gateway_switch_due: bool,
 	/// Whether the system reports its clock as synchronized, null when it cannot tell. A panel whose clock is off by more than a day writes static mirror names that no client asks for.
 	pub clock_synchronized: Option<bool>}
 
 pub async fn node_info(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let status = match node::request(&app.cfg.node_socket, "GET", "/v1/status", None, None).await {Ok((200, body)) => serde_json::from_slice(&body).ok(), _ => None};
-	ok(&NodeInfo {reachable: status.is_some(), status, last_sync: app.last_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(), keys_missing: app.keys.is_none(), clock_synchronized: crate::statics::clock_synchronized()})
+	let (gateway_missing, gateway_switch_due) = {let hold = app.gateway.lock().unwrap_or_else(|poisoned| poisoned.into_inner()); (!hold.loaded(), hold.active().is_some_and(|key| now() - key.created > crate::gateway::REMIND_AFTER))};
+	ok(&NodeInfo {reachable: status.is_some(), status, last_sync: app.last_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(), keys_missing: app.keys.is_none(), gateway_missing, gateway_switch_due, clock_synchronized: crate::statics::clock_synchronized()})
 }
 
 pub async fn node_sync(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {

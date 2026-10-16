@@ -3,15 +3,17 @@ import {useContext, useEffect, useState} from "react";
 import {api, type NotFound, type Settings} from "../api.ts";
 import {ErrorNote, lines, LinesField, Mark, PageHead, useGuard, useLoad, useP, useReorder, useSay} from "../kit.tsx";
 import {SettingsContext} from "../settings.ts";
+import {EndpointsSection, isPlain, type EndpointDraft} from "./endpoints.tsx";
+import {GatewaySection} from "./gateway.tsx";
 import {ProfilesEditor} from "./handwritten.tsx";
 import {RelaysEditor} from "./relays.tsx";
 import {StaticMirrors} from "./statics.tsx";
 
 type Mirror = {url: string, pins: string};
-const SECTIONS = ["endpoint", "refresh", "new-users", "mirrors", "static", "relays", "strangers", "profiles", "keys"] as const;
+const SECTIONS = ["endpoint", "endpoints", "refresh", "new-users", "mirrors", "static", "relays", "strangers", "profiles", "gateway", "keys"] as const;
 
 // Every setting on one page. The settings are one document saved with PUT, so the whole form saves at once from the bar that shows while anything is changed; signing keys act on their own.
-export function SettingsPage() {
+export function SettingsPage({at: target}: {at?: string}) {
 	const {t} = useP(), say = useSay(), settings = useLoad(() => api("get", "/settings"), []), [at, setAt] = useState<string>("endpoint");
 	useEffect(() => {
 		if (!settings.data) return;
@@ -20,6 +22,7 @@ export function SettingsPage() {
 		return () => watch.disconnect();
 	}, [settings.data]);
 	const jump = (id: string) => { setAt(id); const found = document.getElementById("set-" + id); found?.scrollIntoView({behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start"}); found?.querySelector<HTMLElement>("h2")?.focus({preventScroll: true}); };
+	useEffect(() => { if (settings.data && target && (SECTIONS as readonly string[]).includes(target)) requestAnimationFrame(() => jump(target)); }, [!!settings.data, target]);
 	return <>
 		<PageHead title={t("nav.settings")} lead={t("subs.lead")}/>
 		{settings.error && !settings.data ? <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={settings.reload}>{t("action.retry")}</Button>}>{say(settings.error)}</StateBlock>
@@ -36,9 +39,9 @@ export function SettingsPage() {
 
 function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings: Settings) => void}) {
 	const {t} = useP(), toast = useToast(), guard = useGuard(), shared = useContext(SettingsContext);
-	const start = (from: Settings) => ({draft: from, pins: (from.endpoint_pins ?? []).join("\n"), profiles: JSON.stringify(from.profiles ?? [], null, 2), custom: from.not_found != null, answer: {status: from.not_found?.status ?? 404 as number | "", headers: (from.not_found?.headers ?? [["content-type", "text/html"]]).map(([name, value]) => name + ": " + value).join("\n"), body: from.not_found?.body ?? ""}, mirrors: (from.refresh_mirrors ?? []).map(m => typeof m === "string" ? {url: m, pins: ""} : {url: String((m as {url?: string}).url ?? ""), pins: ((m as {pins?: string[]}).pins ?? []).join("\n")}) as Mirror[]});
+	const start = (from: Settings) => ({draft: from, endpoints: (from.endpoints ?? []).map(e => ({name: e.name, url: e.url, pins: (e.pins ?? []).join("\n")})) as EndpointDraft[], profiles: JSON.stringify(from.profiles ?? [], null, 2), custom: from.not_found != null, answer: {status: from.not_found?.status ?? 404 as number | "", headers: (from.not_found?.headers ?? [["content-type", "text/html"]]).map(([name, value]) => name + ": " + value).join("\n"), body: from.not_found?.body ?? ""}, mirrors: (from.refresh_mirrors ?? []).map(m => typeof m === "string" ? {url: m, pins: ""} : {url: String((m as {url?: string}).url ?? ""), pins: ((m as {pins?: string[]}).pins ?? []).join("\n")}) as Mirror[]});
 	const [base, setBase] = useState(() => start(initial)), [form, setForm] = useState(base), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
-	const {draft, pins, profiles, custom, answer, mirrors} = form, changed = JSON.stringify(form) !== JSON.stringify(base);
+	const {draft, endpoints, profiles, custom, answer, mirrors} = form, changed = JSON.stringify(form) !== JSON.stringify(base);
 	const patch = (change: Partial<Settings>) => setForm({...form, draft: {...draft, ...change}});
 	const set = (change: Partial<typeof form>) => setForm({...form, ...change});
 	// The mirrors reach clients in this order, so the order is part of the form and saves with it.
@@ -53,7 +56,7 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 		const notFound: NotFound | null = custom ? {status: answer.status === "" ? 404 : answer.status, headers: headers as [string, string][], body: answer.body} : null;
 		setBusy(true);
 		try {
-			const saved = await guard(() => api("put", "/settings", {body: {...draft, not_found: notFound, endpoint_pins: lines(pins), profiles: parsed as Settings["profiles"], refresh_mirrors: mirrors.filter(m => m.url.trim()).map(m => lines(m.pins).length ? {url: m.url.trim(), pins: lines(m.pins)} : m.url.trim())}}));
+			const saved = await guard(() => api("put", "/settings", {body: {...draft, not_found: notFound, endpoints: endpoints.filter(e => e.name || e.url).map(e => ({name: e.name, url: e.url, pins: isPlain(e.url) ? [] : lines(e.pins)})), profiles: parsed as Settings["profiles"], refresh_mirrors: mirrors.filter(m => m.url.trim()).map(m => lines(m.pins).length ? {url: m.url.trim(), pins: lines(m.pins)} : m.url.trim())}}));
 			onSaved(saved);
 			shared.set(saved);
 			const next = start(saved);
@@ -66,7 +69,7 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 			setBusy(false);
 		}
 	};
-	const head = (key: "endpoint" | "refresh" | "newUsers" | "mirrors" | "relays" | "strangers" | "profiles") => <div><h2 className="vw-h3" tabIndex={-1}>{t(`settings.${key}`)}</h2><p>{t(`settings.${key}Lead`)}</p></div>;
+	const head = (key: "endpoint" | "endpoints" | "refresh" | "newUsers" | "mirrors" | "relays" | "strangers" | "profiles") => <div><h2 className="vw-h3" tabIndex={-1}>{t(`settings.${key}`)}</h2><p>{t(`settings.${key}Lead`)}</p></div>;
 	return <form className="p-stack" onSubmit={event => { event.preventDefault(); void save(); }} noValidate>
 		<Glass className="p-panel p-sections">
 			<section className="p-section" id="set-endpoint">
@@ -75,11 +78,10 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 					<TextField label={t("subs.provider")} hint={t("subs.providerHint")} value={draft.provider_name ?? ""} onChange={value => patch({provider_name: value})} maxLength={64}/>
 					<TextField label={t("subs.terms")} hint={t("subs.termsHint")} type="url" placeholder="https://" value={draft.terms_url ?? ""} onChange={value => patch({terms_url: value.trim()})} technical/>
 					<TextField label={t("subs.privacy")} hint={t("subs.privacyHint")} type="url" placeholder="https://" value={draft.privacy_url ?? ""} onChange={value => patch({privacy_url: value.trim()})} technical/>
-					<TextField label={t("subs.endpoint")} hint={t("subs.endpointHint")} type="url" placeholder="https://" value={draft.endpoint_url ?? ""} onChange={value => patch({endpoint_url: value.trim()})} technical/>
 					<TextField label={t("subs.nodeHost")} hint={t("subs.nodeHostHint")} placeholder="vpn.example.org" value={draft.node_host ?? ""} onChange={value => patch({node_host: value.trim()})} technical/>
-					<LinesField label={t("subs.pins")} hint={t("subs.pinsHint")} value={pins} onChange={value => set({pins: value})} rows={2}/>
 				</div>
 			</section>
+			<EndpointsSection rows={endpoints} onRows={rows => set({endpoints: rows})} draft={draft} patch={patch} saved={initial} onMoved={() => void api("get", "/settings").then(fresh => { const groups = fresh.group_endpoints; setBase(old => ({...old, draft: {...old.draft, group_endpoints: groups}})); setForm(old => ({...old, draft: {...old.draft, group_endpoints: groups}})); onSaved(fresh); shared.set(fresh); }, () => {})}/>
 			<section className="p-section" id="set-refresh">
 				{head("refresh")}
 				<div className="p-pair">
@@ -130,6 +132,7 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 				{head("profiles")}
 				<ProfilesEditor value={profiles} onChange={text => set({profiles: text})}/>
 			</section>
+			<GatewaySection draft={draft} patch={patch}/>
 		</Glass>
 		{(changed || error !== null) && <Glass className="p-savebar" layer="chrome" role="region" aria-label={t("settings.unsaved")}>
 			{error ? <ErrorNote error={error}/> : <span>{t("settings.unsavedBody")}</span>}

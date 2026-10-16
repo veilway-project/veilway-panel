@@ -3,6 +3,7 @@ import {useEffect, useId, useState} from "react";
 import {api, type LinkView, type NodeState, type NodeUser, type User, type UserPatch} from "../api.ts";
 import {ago, DayField, ErrorNote, fromDay, Mark, NodeNote, PageHead, toDay, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {useSettings} from "../settings.ts";
+import {EndpointPick, MoveDialog} from "./endpoints.tsx";
 
 const GB = 1024 ** 3;
 const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -28,7 +29,7 @@ export function UsersPage({adding}: {adding: boolean}) {
 	const {t, number, bytes, date} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings();
 	const [search, setSearch] = useState(""), [query, setQuery] = useState(""), [shown, setShown] = useState("all"), [group, setGroup] = useState("*"), [sort, setSort] = useState("name"), [page, setPage] = useState(0), [picked, setPicked] = useState<Set<number>>(new Set());
 	const [form, setForm] = useState<User | "new" | null>(adding ? "new" : null);
-	const [confirm, setConfirm] = useState<"delete" | "reset_usage" | null>(null), [more, setMore] = useState(false), [result, setResult] = useState<{done: number, failed: {id: number, error: string}[], node: NodeState} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
+	const [confirm, setConfirm] = useState<"delete" | "reset_usage" | null>(null), [more, setMore] = useState(false), [moving, setMoving] = useState(false), [result, setResult] = useState<{done: number, failed: {id: number, error: string}[], node: NodeState} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	useEffect(() => { const timer = setTimeout(() => setQuery(search.trim()), 250); return () => clearTimeout(timer); }, [search]);
 	useEffect(() => setPage(0), [query, shown, group, sort]);
 	// Every user matching the search comes in one answer, so the counts, the group filter and the order are worked out here.
@@ -79,6 +80,7 @@ export function UsersPage({adding}: {adding: boolean}) {
 				<Button size="sm" disabled={busy} onClick={() => void bulk("enable")}>{t("bulk.enable")}</Button>
 				<Button size="sm" disabled={busy} onClick={() => void bulk("disable")}>{t("bulk.disable")}</Button>
 				<Button size="sm" disabled={busy} onClick={() => setConfirm("reset_usage")}>{t("bulk.resetUsage")}</Button>
+				<Button size="sm" disabled={busy} onClick={() => setMoving(true)}>{t("bulk.moveEndpoint")}</Button>
 				<Button size="sm" disabled={busy} onClick={() => setMore(true)}>{t("bulk.more")}</Button>
 				<Button size="sm" variant="danger" disabled={busy} onClick={() => setConfirm("delete")}>{t("bulk.delete")}</Button>
 				<Button size="sm" variant="quiet" onClick={() => setPicked(new Set())}>{t("bulk.clear")}</Button>
@@ -113,6 +115,7 @@ export function UsersPage({adding}: {adding: boolean}) {
 		</Glass>
 		{form && <UserForm user={form === "new" ? null : form} defaultLimit={settings?.default_device_limit ?? 3} onClose={() => { setForm(null); if (adding) location.replace("#/users"); }} onSaved={(user, link, linkError) => { setForm(null); toast({tone: "success", title: t("form.created", {name: user.name})}); if (linkError) toast({tone: "warning", title: t("link.failed", {error: linkError})}); if (link) { handoff.current = {id: user.id, link}; location.hash = "#/users/" + user.id; } else users.reload(); }}/>}
 		<ConfirmDialog open={confirm !== null} onOpenChange={open => { if (!open) setConfirm(null); }} danger={confirm === "delete"} title={t(confirm === "delete" ? "bulk.deleteTitle" : "bulk.resetTitle", {count: picked.size})} body={t(confirm === "delete" ? "bulk.deleteBody" : "bulk.resetBody")} confirmLabel={t(confirm === "delete" ? "bulk.delete" : "bulk.resetUsage")} onConfirm={() => { if (confirm) void bulk(confirm); }}/>
+		{moving && <MoveDialog users={[...picked]} onClose={() => setMoving(false)} onDone={() => { setMoving(false); users.reload(); toast({tone: "success", title: t("move.done")}); }}/>}
 		{more && <BulkChange count={picked.size} busy={busy} error={error} onClose={() => setMore(false)} onApply={(action, value) => void bulk(action, value)}/>}
 	</>;
 }
@@ -188,10 +191,10 @@ export function ExitPicker({value, onChange, exits, problem, fallback, onFallbac
 }
 
 export function UserForm({user, defaultLimit, onClose, onSaved}: {user: User | null, defaultLimit: number, onClose: () => void, onSaved: (user: User, link: LinkView | null, linkError: string | null) => void}) {
-	const {t} = useP(), guard = useGuard();
+	const {t} = useP(), guard = useGuard(), choices = (useSettings()?.endpoints ?? []).length;
 	const [name, setName] = useState(user?.name ?? ""), [groups, setGroups] = useState(user?.groups.join(", ") ?? ""), [quota, setQuota] = useState<number | "">(user?.quota_bytes ? Math.round(user.quota_bytes / GB * 100) / 100 : "");
 	const [period, setPeriod] = useState<Period>((user?.quota_period as Period | null) ?? "none"), [day, setDay] = useState(toDay(user?.expires_at)), [limit, setLimit] = useState<number | "">(user?.device_limit ?? defaultLimit), [note, setNote] = useState(user?.note ?? ""), [enabled, setEnabled] = useState(user?.enabled ?? true);
-	const [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [tried, setTried] = useState(false), [exits, setExits] = useState<Exits>("all"), [fallback, setFallback] = useState<string | null>(null), nodeExits = useExits(!user);
+	const [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [tried, setTried] = useState(false), [exits, setExits] = useState<Exits>("all"), [fallback, setFallback] = useState<string | null>(null), [endpoint, setEndpoint] = useState(""), nodeExits = useExits(!user);
 	const list = groups.split(",").map(g => g.trim().toLowerCase()).filter(Boolean);
 	const problems = {name: NAME.test(name) ? undefined : t("error.userName"), groups: list.every(g => NAME.test(g)) ? undefined : t("error.group"), exits: keptExits(exits, nodeExits.data).length === 0 ? t("exits.pick") : undefined};
 	const save = async () => {
@@ -204,7 +207,7 @@ export function UserForm({user, defaultLimit, onClose, onSaved}: {user: User | n
 			// The schema lists the nullable fields as required, but the server leaves out what is not sent, so the default exit stays.
 			if (user) onSaved((await guard(() => api("patch", "/users/{id}", {params: {id: user.id}, body: body as UserPatch}))).user, null, null);
 			else {
-				const answer = await guard(() => api("post", "/users", {body: {...body, exits: keptExits(exits, nodeExits.data), exit: keptFallback(exits, fallback, nodeExits.data)}}));
+				const answer = await guard(() => api("post", "/users", {body: {...body, exits: keptExits(exits, nodeExits.data), exit: keptFallback(exits, fallback, nodeExits.data), endpoint: endpoint || null}}));
 				onSaved(answer.user, answer.link ?? null, answer.link_error ?? null);
 			}
 		} catch (failure) {
@@ -226,6 +229,7 @@ export function UserForm({user, defaultLimit, onClose, onSaved}: {user: User | n
 				<NumberField label={t("form.limit")} hint={t("form.limitHint")} unit={t("form.devices")} min={0} max={65535} value={limit} onChange={setLimit}/>
 			</div>
 			{!user && <div className="vw-field"><span className="vw-label">{t("exits.title")}</span><p className="vw-note">{t("exits.lead")}</p><ExitPicker value={exits} onChange={setExits} exits={nodeExits} problem={tried ? problems.exits : undefined} fallback={fallback} onFallback={setFallback}/></div>}
+			{!user && choices > 0 && <EndpointPick label={t("endpoint.label")} hint={t("endpoint.hint")} value={endpoint} onChange={setEndpoint} followLabel={t("endpoint.follow")}/>}
 			<TextField label={t("form.note")} hint={t("form.noteHint")} value={note} onChange={setNote} optional/>
 			<Switch label={t("form.enabled")} hint={t("form.enabledHint")} checked={enabled} onChange={setEnabled}/>
 			<ErrorNote error={error}/>

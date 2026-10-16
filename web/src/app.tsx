@@ -105,8 +105,8 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 	}, [open]);
 	const fold = () => { const next = !collapsed; setCollapsed(next); try { localStorage.setItem(SIDEBAR, next ? "collapsed" : "open"); } catch { /* remembered for this visit only */ } };
 	const status = (node.data?.status ?? null) as NodeStatus | null, list = links.data?.links ?? [], up = list.filter(l => l.state === "up").length, online = live.data?.online_users.length;
-	const tone = !node.data ? "muted" : node.data.keys_missing || !node.data.reachable ? "danger" : "success", host = status?.public_addresses?.[0] ?? t("side.thisNode");
-	const stateWord = !node.data ? t("common.loading") : node.data.keys_missing ? t("side.keysMissing") : node.data.reachable ? t("side.running") : t("side.unreachable");
+	const tone = !node.data ? "muted" : node.data.keys_missing || node.data.gateway_missing || !node.data.reachable ? "danger" : "success", host = status?.public_addresses?.[0] ?? t("side.thisNode");
+	const stateWord = !node.data ? t("common.loading") : node.data.keys_missing ? t("side.keysMissing") : node.data.gateway_missing ? t("side.gatewayMissing") : node.data.reachable ? t("side.running") : t("side.unreachable");
 	const bars = <span className="p-bars" data-off={tone === "success" ? undefined : ""} aria-hidden="true"><i/><i/><i/></span>;
 	const groups: {label?: PanelKey, items: Entry[]}[] = [
 		{items: [{id: "dashboard", icon: "overview"}, {id: "traffic", icon: "chart"}]},
@@ -157,6 +157,8 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 				{!twoStep && <Banner tone="danger" title={t("twostep.banner.title")}>{t("twostep.banner.body")}</Banner>}
 				<UpdateBanner/>
 				<NodeBanner node={node.data} onPushed={node.reload}/>
+				{node.data?.gateway_missing && <Banner tone="danger" title={t("banner.gateway.missing")} action={<Button size="sm" onClick={() => { location.hash = "#/settings/gateway"; }}>{t("banner.gateway.open")}</Button>}>{t("banner.gateway.missingBody")}</Banner>}
+				{node.data?.gateway_switch_due && !node.data.gateway_missing && <Banner tone="info" title={t("banner.gateway.due")} action={<Button size="sm" onClick={() => { location.hash = "#/settings/gateway"; }}>{t("banner.gateway.open")}</Button>}>{t("banner.gateway.dueBody")}</Banner>}
 				{node.data?.clock_synchronized === false && <Banner tone="warning" title={t("banner.clock.title")}>{t("banner.clock.body")}</Banner>}
 				<div className="p-page" key={page === "users" ? page + "/" + sub : page}>
 					{page === "dashboard" && <DashboardPage live={live.data} onLive={live.reload}/>}
@@ -168,7 +170,7 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 					{page === "profiles" && <ProfilesPage/>}
 					{page === "nodes" && <NodesPage status={status} reachable={node.data?.reachable ?? false} online={online}/>}
 					{page === "tokens" && <TokensPage/>}
-					{page === "settings" && <SettingsPage/>}
+					{page === "settings" && <SettingsPage at={sub}/>}
 					{page === "account" && <AccountPage tab={sub} username={username} prefs={prefs} onPrefs={onPrefs} onLogout={onLogout}/>}
 				</div>
 			</main>
