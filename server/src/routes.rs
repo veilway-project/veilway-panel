@@ -36,15 +36,16 @@ pub fn routes(schemas: &mut SchemaGenerator) -> Vec<Route> {
 	let s = schemas;
 	vec![
 		route::<Nothing, serde_json::Value, _, _>(s, M::GET, "/openapi.json", "openapi", "This document.", Access::Public, openapi_document),
-		route::<Nothing, admin::Status, _, _>(s, M::GET, "/status", "status", "Whether first-run setup is still to be done.", Access::Public, admin::status),
+		route::<Nothing, admin::Status, _, _>(s, M::GET, "/status", "status", "Whether first-run setup is still to be done, and whether two-step sign-in is on.", Access::Public, admin::status),
 		route::<admin::Setup, admin::TotpEnrolled, _, _>(s, M::POST, "/setup", "setup", "Creates the first admin from the one-time setup token printed to the console. The TOTP secret in the answer is shown once.", Access::Public, admin::setup),
-		route::<admin::Login, admin::LoggedIn, _, _>(s, M::POST, "/login", "login", "Logs in with password and TOTP code. Sets the session cookie and returns the CSRF token to send as X-CSRF-Token on every change.", Access::Public, admin::login),
+		route::<admin::Login, admin::LoggedIn, _, _>(s, M::POST, "/login", "login", "Logs in with password and TOTP code (password only while the panel's config file turns two-step sign-in off). Sets the session cookie and returns the CSRF token to send as X-CSRF-Token on every change.", Access::Public, admin::login),
 		route::<Nothing, admin::Done, _, _>(s, M::POST, "/logout", "logout", "Ends this session.", Access::Admin, admin::logout),
 		route::<Nothing, admin::SessionInfo, _, _>(s, M::GET, "/session", "session", "This session: its CSRF token and until when a re-authentication holds.", Access::Admin, admin::session),
 		route::<admin::Reauth, admin::Done, _, _>(s, M::POST, "/session/reauth", "reauth", "Confirms password and code again, which the routes marked session-reauth ask for within five minutes.", Access::Admin, admin::reauth),
 		route::<Nothing, admin::SessionsOut, _, _>(s, M::GET, "/sessions", "listSessions", "The admin's sessions.", Access::Admin, admin::sessions),
 		route::<Nothing, admin::Done, _, _>(s, M::DELETE, "/sessions/{sid}", "revokeSession", "Ends a session.", Access::Admin, admin::revoke_session),
 		route::<admin::NewPassword, admin::Done, _, _>(s, M::POST, "/account/password", "changePassword", "Changes the password and ends every other session.", Access::AdminReauth, admin::change_password),
+		route::<admin::Enroll, admin::TotpEnrolled, _, _>(s, M::POST, "/account/enroll", "enrollTotp", "Makes the first TOTP secret of an account that has none, which is what an admin made while two-step sign-in was off must do after it is turned on again. Takes the password. Shown once.", Access::Admin, admin::enroll),
 		route::<Nothing, admin::TotpEnrolled, _, _>(s, M::POST, "/account/totp", "changeTotp", "Makes a new TOTP secret and ends every other session.", Access::AdminReauth, admin::change_totp),
 		route::<Nothing, admin::AdminsOut, _, _>(s, M::GET, "/admins", "listAdmins", "The admin accounts.", Access::Admin, admin::admins),
 		route::<admin::NewAdmin, admin::TotpEnrolled, _, _>(s, M::POST, "/admins", "createAdmin", "Makes another admin.", Access::AdminReauth, admin::create_admin),
