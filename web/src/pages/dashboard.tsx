@@ -2,6 +2,7 @@ import {Button, Glass, Icon, Segmented, StatRow, StatTile, StateBlock, TrafficLi
 import {useEffect, useMemo, useState} from "react";
 import {api, type Live, type NodeUser} from "../api.ts";
 import {ago, Mark, PageHead, useLoad, useP, useSay} from "../kit.tsx";
+import {NoticesPanel} from "./notices.tsx";
 import {PERIODS} from "./traffic.tsx";
 
 type Period = "day" | "week" | "month";
@@ -93,6 +94,7 @@ export function DashboardPage({live, onLive}: {live: Live | null, onLive: () => 
 				</ul>}
 			</Glass>
 		</div>
+		<NoticesPanel/>
 		<Glass className="p-panel">
 			<div className="p-sheet-head">
 				<div><h2 className="vw-h2">{t("dashboard.changes")}</h2><p>{t("dashboard.changesLead")}</p></div>

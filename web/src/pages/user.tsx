@@ -1,9 +1,9 @@
 import {Banner, Button, Checkbox, ConfirmDialog, DataTable, Dialog, Glass, Icon, IconButton, StatRow, StatTile, StateBlock, TextField, useToast} from "@veilway/ui";
 import {useEffect, useState} from "react";
-import {api, type Device, type LinkView, type NodeState, type NodeUser, type XrayLink} from "../api.ts";
+import {api, type Device, type LinkView, type NodeState, type NodeUser, type UserPatch, type XrayLink} from "../api.ts";
 import {Copyable, ErrorNote, Mark, NodeNote, Qr, useCopy, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {useSettings} from "../settings.ts";
-import {handoff, useExpiry, UserForm} from "./users.tsx";
+import {ExitPicker, type Exits, handoff, keptExits, useExits, useExpiry, UserForm} from "./users.tsx";
 import {XrayLinksDialog} from "./xray.tsx";
 
 export function UserPage({id}: {id: number}) {
@@ -14,6 +14,7 @@ export function UserPage({id}: {id: number}) {
 	// fresh is a link made just now, by adding the user or resetting the link; otherwise it is the panel's copy, opened after re-authentication.
 	const [shown, setShown] = useState<{link: LinkView, once: boolean, fresh: boolean} | null>(() => { const made = handoff.current?.id === id ? handoff.current : null; handoff.current = null; return made && {link: made.link, once: settings?.show_links_once ?? false, fresh: true}; });
 	const [exported, setExported] = useState<{name: string, file: string, link?: string | null} | null>(null), [node, setNode] = useState<NodeState | null>(null), [xray, setXray] = useState<XrayLink[] | null>(null);
+	const nodeExits = useExits(), [exits, setExits] = useState<Exits | null>(null), [exitsTried, setExitsTried] = useState(false), [exitsBusy, setExitsBusy] = useState(false), [exitsError, setExitsError] = useState<unknown>(null);
 	useEffect(() => { if (shown) document.getElementById("link-title")?.scrollIntoView({block: "nearest"}); }, [shown]);
 	if (page.error && !page.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={page.reload}>{t("action.retry")}</Button>}>{say(page.error)}</StateBlock>;
 	if (!page.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
@@ -35,6 +36,26 @@ export function UserPage({id}: {id: number}) {
 	};
 	const open = (next: typeof dialog) => { setError(null); setDialog(next); };
 	const showLink = async () => { setLinkError(null); try { setShown({link: await guard(() => api("post", "/users/{id}/subscription/show", {params: {id}})), once: false, fresh: false}); } catch (failure) { setLinkError(failure); } };
+	const held = (exits ?? user.exits) as Exits, kept = keptExits(held, nodeExits.data), exitsChanged = JSON.stringify(kept) !== JSON.stringify(user.exits), exitsProblem = kept.length === 0 ? t("exits.pick") : undefined;
+	const saveExits = async () => {
+		setExitsTried(true);
+		if (exitsProblem) return;
+		setExitsBusy(true);
+		setExitsError(null);
+		try {
+			// The schema lists the nullable fields as required, but the server leaves out what is not sent.
+			const answer = await guard(() => api("patch", "/users/{id}", {params: {id}, body: {exits: kept} as UserPatch}));
+			setNode(answer.node);
+			setExits(null);
+			setExitsTried(false);
+			toast({tone: "success", title: t("exits.saved")});
+			page.reload();
+		} catch (failure) {
+			setExitsError(failure);
+		} finally {
+			setExitsBusy(false);
+		}
+	};
 	const total = usage?.traffic ? (usage.traffic.up_bytes ?? 0) + (usage.traffic.down_bytes ?? 0) : null, amount = usage?.used_bytes === undefined ? null : bytes(usage.used_bytes);
 	return <>
 		<header className="p-head">
@@ -119,6 +140,12 @@ export function UserPage({id}: {id: number}) {
 					<div className="p-form-foot"><p>{t("user.resetNote")}</p><Button variant="danger" onClick={() => { setRemoveOld(false); open("link"); }}>{t("user.resetLink")}</Button></div>
 				</Glass>}
 				{shown && <ErrorNote error={linkError}/>}
+				<Glass className="p-panel">
+					<div className="p-sheet-head"><div><h2 className="vw-h2">{t("exits.title")}</h2><p>{t("exits.lead")}</p></div></div>
+					<ExitPicker value={held} onChange={setExits} exits={nodeExits} problem={exitsTried ? exitsProblem : undefined}/>
+					<ErrorNote error={exitsError}/>
+					{(exitsChanged || exits !== null) && <div className="p-form-foot">{exits !== null && <Button variant="quiet" onClick={() => { setExits(null); setExitsTried(false); }}>{t("action.cancel")}</Button>}<Button variant="primary" disabled={exitsBusy || !exitsChanged} onClick={() => void saveExits()}>{t("exits.save")}</Button></div>}
+				</Glass>
 			</div>
 		</div>
 		{editing && <UserForm user={user} defaultLimit={settings?.default_device_limit ?? 3} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); page.reload(); }}/>}

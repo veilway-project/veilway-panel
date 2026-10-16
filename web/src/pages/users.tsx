@@ -1,5 +1,5 @@
 import {Banner, Button, ConfirmDialog, Dialog, Glass, NumberField, RadioGroup, Segmented, SelectField, StateBlock, Switch, TextField, UsageBar, useToast} from "@veilway/ui";
-import {useEffect, useState} from "react";
+import {useEffect, useId, useState} from "react";
 import {api, type LinkView, type NodeState, type NodeUser, type User} from "../api.ts";
 import {ago, DayField, ErrorNote, fromDay, Mark, NodeNote, PageHead, toDay, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {useSettings} from "../settings.ts";
@@ -8,6 +8,8 @@ const GB = 1024 ** 3;
 const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const PAGE = 50;
 type Period = "none" | "daily" | "weekly" | "monthly";
+export type Exits = "all" | string[];
+type ExitRow = {tag: string, name: string, country: string, up: boolean | null};
 
 // The expiry in a row: days left, or that it has passed.
 export function useExpiry() {
@@ -52,7 +54,7 @@ export function UsersPage({adding}: {adding: boolean}) {
 		}
 	};
 	const toggle = (id: number, on: boolean) => setPicked(old => { const next = new Set(old); if (on) next.add(id); else next.delete(id); return next; });
-	const cols = [t("users.col.user"), t("users.col.groups"), t("users.col.usage"), t("users.col.expiry"), t("users.col.devices"), t("users.col.state")];
+	const cols = [t("users.col.user"), t("users.col.groups"), t("users.col.exits"), t("users.col.usage"), t("users.col.expiry"), t("users.col.devices"), t("users.col.state")];
 	const state = (u: User) => {
 		const node = u.node as NodeUser | null, ages = (node?.devices ?? []).map(d => d.handshake_age_secs).filter((age): age is number => typeof age === "number"), age = ages.length ? Math.min(...ages) : null;
 		if (!u.enabled) return <Mark tone="muted">{t("users.disabled")}</Mark>;
@@ -89,17 +91,18 @@ export function UsersPage({adding}: {adding: boolean}) {
 			: rows.length === 0 ? (query || shown !== "all" || group !== "*" ? <StateBlock kind="empty" title={t("users.noMatch")} action={<Button onClick={() => { setSearch(""); setShown("all"); setGroup("*"); }}>{t("users.clear")}</Button>}>{t("users.noMatchBody")}</StateBlock> : <StateBlock kind="empty" title={t("users.empty")} action={<Button variant="primary" icon="plus" onClick={() => setForm("new")}>{t("users.add")}</Button>}>{t("users.emptyBody")}</StateBlock>)
 			: <div className="vw-table-wrap"><table className="vw-table">
 				<caption className="vw-sr">{t("users.title")}</caption>
-				<thead><tr><th scope="col"><input type="checkbox" className="p-check" aria-label={t("users.selectAll")} checked={visible.every(u => picked.has(u.id))} onChange={event => setPicked(old => { const next = new Set(old); for (const u of visible) if (event.target.checked) next.add(u.id); else next.delete(u.id); return next; })}/></th>{cols.map((c, i) => <th key={c} scope="col" data-align={i === 4 ? "end" : undefined}>{c}</th>)}</tr></thead>
+				<thead><tr><th scope="col"><input type="checkbox" className="p-check" aria-label={t("users.selectAll")} checked={visible.every(u => picked.has(u.id))} onChange={event => setPicked(old => { const next = new Set(old); for (const u of visible) if (event.target.checked) next.add(u.id); else next.delete(u.id); return next; })}/></th>{cols.map((c, i) => <th key={c} scope="col" data-align={i === 5 ? "end" : undefined}>{c}</th>)}</tr></thead>
 				<tbody>{visible.map(u => {
 					const node = u.node as NodeUser | null, gone = !!u.expires_at && u.expires_at * 1000 < Date.now();
 					return <tr key={u.id} className={gone || !u.enabled ? "p-row-muted" : undefined}>
 						<td><input type="checkbox" className="p-check" aria-label={t("users.select", {name: u.name})} checked={picked.has(u.id)} onChange={event => toggle(u.id, event.target.checked)}/></td>
 						<td data-label={cols[0]}><span className="p-user"><a className="vw-code p-link" href={"#/users/" + u.id}>{u.name}</a>{u.note && <span>{u.note}</span>}</span></td>
 						<td data-label={cols[1]}>{u.groups.length ? <span className="p-tags">{u.groups.map(g => <span key={g} className="p-tag vw-code">{g}</span>)}</span> : <span className="vw-muted">{t("common.none")}</span>}</td>
-						<td data-label={cols[2]} className="p-usage-cell">{node?.used_bytes === undefined ? <span className="vw-muted">{t("users.usageUnknown")}</span> : u.quota_bytes ? <UsageBar compact label={u.name} used={node.used_bytes} total={u.quota_bytes}/> : <span className="p-user"><span className="vw-num">{bytes(node.used_bytes).text}</span><span>{t("users.noLimit")}</span></span>}</td>
-						<td data-label={cols[3]}>{u.expires_at ? <span className="p-user"><span className="vw-num">{date(new Date(u.expires_at * 1000))}</span><span>{expiry(u.expires_at)}</span></span> : <span className="vw-muted">{t("users.noExpiry")}</span>}</td>
-						<td data-label={cols[4]} data-align="end"><span className="vw-num">{u.device_limit ? t("users.devicesOf", {used: number(u.devices), limit: number(u.device_limit)}) : number(u.devices)}</span></td>
-						<td data-label={cols[5]}>{state(u)}</td>
+						<td data-label={cols[2]}>{Array.isArray(u.exits) ? <span className={u.exits.length ? "vw-num" : "vw-muted"}>{u.exits.length ? t("exits.count", {count: u.exits.length}) : t("exits.none")}</span> : <span className="vw-muted">{t("exits.all")}</span>}</td>
+						<td data-label={cols[3]} className="p-usage-cell">{node?.used_bytes === undefined ? <span className="vw-muted">{t("users.usageUnknown")}</span> : u.quota_bytes ? <UsageBar compact label={u.name} used={node.used_bytes} total={u.quota_bytes}/> : <span className="p-user"><span className="vw-num">{bytes(node.used_bytes).text}</span><span>{t("users.noLimit")}</span></span>}</td>
+						<td data-label={cols[4]}>{u.expires_at ? <span className="p-user"><span className="vw-num">{date(new Date(u.expires_at * 1000))}</span><span>{expiry(u.expires_at)}</span></span> : <span className="vw-muted">{t("users.noExpiry")}</span>}</td>
+						<td data-label={cols[5]} data-align="end"><span className="vw-num">{u.device_limit ? t("users.devicesOf", {used: number(u.devices), limit: number(u.device_limit)}) : number(u.devices)}</span></td>
+						<td data-label={cols[6]}>{state(u)}</td>
 					</tr>;
 				})}</tbody>
 			</table></div>}
@@ -135,23 +138,63 @@ function BulkChange({count, busy, error, onClose, onApply}: {count: number, busy
 	</Dialog>;
 }
 
+// The node's exits, with whether each is up when the node reports it, for choosing which exits a user may use.
+export function useExits(wanted = true) {
+	return useLoad<ExitRow[]>(async () => {
+		if (!wanted) return [];
+		const [section, live] = await Promise.all([api("get", "/config/{section}", {params: {section: "exits"}}) as Promise<{value?: unknown}>, api("get", "/stats/now").catch(() => null)]);
+		const states = new Map(((live?.reachable && Array.isArray(live.exits) ? live.exits : []) as {tag: string, interface_up: boolean | null, link_up: boolean | null}[]).map(e => [e.tag, e.interface_up !== false && e.link_up !== false]));
+		return ((Array.isArray(section.value) ? section.value : []) as {tag: string, name?: string, country?: string}[]).map(e => ({tag: e.tag, name: e.name ?? "", country: e.country ?? "", up: states.get(e.tag) ?? null}));
+	}, [wanted]);
+}
+
+// What a save sends: tags the node no longer has are dropped, which is how a deleted exit leaves a user.
+export const keptExits = (value: Exits, rows: ExitRow[] | null) => value === "all" || !rows ? value : value.filter(tag => rows.some(e => e.tag === tag));
+
+export function ExitPicker({value, onChange, exits, problem}: {value: Exits, onChange: (value: Exits) => void, exits: ReturnType<typeof useExits>, problem?: string}) {
+	const {t} = useP(), id = useId(), chosen = value === "all" ? [] : value, rows = exits.data ?? [], missing = exits.data ? chosen.filter(tag => !rows.some(e => e.tag === tag)) : [];
+	const pick = (tag: string, on: boolean) => onChange(on ? [...chosen, tag] : chosen.filter(held => held !== tag));
+	return <div className="p-stack">
+		<Segmented label={t("exits.choice")} value={value === "all" ? "all" : "only"} onChange={next => onChange(next === "all" ? "all" : chosen)} options={[{value: "all", label: t("exits.all")}, {value: "only", label: t("exits.only")}]}/>
+		{value !== "all" && (exits.error && !exits.data ? <Banner tone="danger" title={t("exits.loadFailed")} action={<Button size="sm" icon="refresh" onClick={exits.reload}>{t("action.retry")}</Button>}/>
+		: !exits.data ? <p className="vw-muted vw-small">{t("common.loading")}</p>
+		: <>
+			{rows.length === 0 && <p className="vw-muted vw-small">{t("exits.empty")}</p>}
+			{missing.length > 0 && <Banner tone="warning" title={t("exits.missingNote", {count: missing.length})}/>}
+			<ul className="p-row-list p-exit-list" aria-label={t("exits.only")}>
+				{rows.map(e => <li key={e.tag}><label className="p-exit" htmlFor={id + e.tag}>
+					<input type="checkbox" className="p-check" id={id + e.tag} checked={chosen.includes(e.tag)} onChange={event => pick(e.tag, event.target.checked)}/>
+					<span className="p-row-text">{e.name ? <><strong>{e.name}</strong><span className="vw-code">{e.tag}</span></> : <strong className="vw-code">{e.tag}</strong>}</span>
+					<span className="p-flags">{e.country && <span className="p-tag vw-code" title={t("exits.country")}>{e.country}</span>}{e.up !== null && <Mark tone={e.up ? "success" : "danger"}>{t(e.up ? "exits.up" : "exits.down")}</Mark>}</span>
+				</label></li>)}
+				{missing.map(tag => <li key={tag}><label className="p-exit" htmlFor={id + tag}>
+					<input type="checkbox" className="p-check" id={id + tag} checked onChange={() => pick(tag, false)}/>
+					<span className="p-row-text"><strong className="vw-code">{tag}</strong></span>
+					<span className="p-flags"><Mark tone="danger">{t("exits.missing")}</Mark></span>
+				</label></li>)}
+			</ul>
+			{problem && <p className="vw-note p-exit-problem" role="alert">{problem}</p>}
+		</>)}
+	</div>;
+}
+
 export function UserForm({user, defaultLimit, onClose, onSaved}: {user: User | null, defaultLimit: number, onClose: () => void, onSaved: (user: User, link: LinkView | null, linkError: string | null) => void}) {
 	const {t} = useP(), guard = useGuard();
 	const [name, setName] = useState(user?.name ?? ""), [groups, setGroups] = useState(user?.groups.join(", ") ?? ""), [quota, setQuota] = useState<number | "">(user?.quota_bytes ? Math.round(user.quota_bytes / GB * 100) / 100 : "");
 	const [period, setPeriod] = useState<Period>((user?.quota_period as Period | null) ?? "none"), [day, setDay] = useState(toDay(user?.expires_at)), [limit, setLimit] = useState<number | "">(user?.device_limit ?? defaultLimit), [note, setNote] = useState(user?.note ?? ""), [enabled, setEnabled] = useState(user?.enabled ?? true);
-	const [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [tried, setTried] = useState(false);
+	const [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [tried, setTried] = useState(false), [exits, setExits] = useState<Exits>("all"), nodeExits = useExits(!user);
 	const list = groups.split(",").map(g => g.trim().toLowerCase()).filter(Boolean);
-	const problems = {name: NAME.test(name) ? undefined : t("error.userName"), groups: list.every(g => NAME.test(g)) ? undefined : t("error.group")};
+	const problems = {name: NAME.test(name) ? undefined : t("error.userName"), groups: list.every(g => NAME.test(g)) ? undefined : t("error.group"), exits: keptExits(exits, nodeExits.data).length === 0 ? t("exits.pick") : undefined};
 	const save = async () => {
 		setTried(true);
-		if (problems.name || problems.groups) return;
+		if (problems.name || problems.groups || (!user && problems.exits)) return;
 		setBusy(true);
 		setError(null);
 		const body = {name, groups: list, quota_bytes: quota === "" ? null : Math.round(quota * GB), quota_period: quota === "" || period === "none" ? null : period, expires_at: fromDay(day), device_limit: limit === "" ? 0 : limit, note, enabled};
 		try {
 			if (user) onSaved((await guard(() => api("patch", "/users/{id}", {params: {id: user.id}, body}))).user, null, null);
 			else {
-				const answer = await guard(() => api("post", "/users", {body}));
+				const answer = await guard(() => api("post", "/users", {body: {...body, exits: keptExits(exits, nodeExits.data)}}));
 				onSaved(answer.user, answer.link ?? null, answer.link_error ?? null);
 			}
 		} catch (failure) {
@@ -172,6 +215,7 @@ export function UserForm({user, defaultLimit, onClose, onSaved}: {user: User | n
 				<DayField label={t("form.expiry")} hint={t("form.expiryHint")} value={day} onChange={setDay} optional/>
 				<NumberField label={t("form.limit")} hint={t("form.limitHint")} unit={t("form.devices")} min={0} max={65535} value={limit} onChange={setLimit}/>
 			</div>
+			{!user && <div className="vw-field"><span className="vw-label">{t("exits.title")}</span><p className="vw-note">{t("exits.lead")}</p><ExitPicker value={exits} onChange={setExits} exits={nodeExits} problem={tried ? problems.exits : undefined}/></div>}
 			<TextField label={t("form.note")} hint={t("form.noteHint")} value={note} onChange={setNote} optional/>
 			<Switch label={t("form.enabled")} hint={t("form.enabledHint")} checked={enabled} onChange={setEnabled}/>
 			<ErrorNote error={error}/>

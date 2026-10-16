@@ -587,6 +587,28 @@ async fn config_sections_validate_diff_and_apply_through_the_node() {
 }
 
 #[tokio::test]
+async fn notices_dns_log_links_and_replay_are_sections_like_the_others() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	let full = h.token(&session, "full", json!({})).await;
+	let notices = h.call(Method::GET, "/p/api/config/notices", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(notices["value"], Value::Null, "a section the document leaves out is null");
+	assert_eq!(h.call(Method::GET, "/p/api/config/replay", Some(&session), None, "10.0.0.1").await.json()["read_at_start"], json!(["cache"]));
+	for (section, wrong) in [("notices", json!({})), ("links", json!({})), ("dns", json!([])), ("log", json!([])), ("replay", json!(null))] {
+		assert_eq!(h.bearer(Method::PUT, &format!("/p/api/config/{section}"), &full, Some(json!({"revision": "rev1", "value": wrong})), "10.1.1.1").await.status, StatusCode::BAD_REQUEST, "{section}");
+	}
+	let mut revision = 1;
+	for (section, value) in [("notices", json!([{"severity": "warning", "text": "Maintenance on Friday from 02:00 UTC"}])), ("dns", json!({"servers": ["9.9.9.9:53"], "hijack": false})), ("log", json!({"level": "warn", "destinations": false})), ("links", json!([])), ("replay", json!({"cache": 4096}))] {
+		let applied = h.bearer(Method::PUT, &format!("/p/api/config/{section}"), &full, Some(json!({"revision": format!("rev{revision}"), "value": value})), "10.1.1.1").await;
+		assert_eq!(applied.status, StatusCode::OK, "{section}: {}", String::from_utf8_lossy(&applied.body));
+		revision += 1;
+		assert_eq!(fake.applied.lock().unwrap().last().unwrap()[section], value, "{section}");
+	}
+	assert_eq!(h.call(Method::GET, "/p/api/config/notices", Some(&session), None, "10.0.0.1").await.json()["value"][0]["severity"], "warning");
+}
+
+#[tokio::test]
 async fn profiles_are_derived_from_inbounds_with_overrides_kept() {
 	let (_fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
 	let h = Harness::with_socket(Some(socket)).await;
