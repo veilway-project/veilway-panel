@@ -68,7 +68,9 @@ pub(crate) fn fill(app: &App, document: &mut Value) -> Result<(), String> {
 		};
 		if protocol == "shadowsocks" {
 			let sealed: Option<Vec<u8>> = db.query_row("select server_key from xray_inbounds where tag = ?", [&tag], |row| row.get(0)).optional().map_err(|error| error.to_string())?.flatten();
-			if let Some(key) = sealed.and_then(|sealed| keys.open_secret(&[0; 16], &server_label(&tag), &sealed)) {inbound["server_key"] = json!(String::from_utf8(key).map_err(|error| error.to_string())?);}
+			// A key the document already carries is the one being applied, and the panel's copy follows once the node accepts it.
+			let marked = inbound["server_key"].as_str().is_none_or(|sent| sent.starts_with("<redacted"));
+			if let Some(key) = sealed.and_then(|sealed| keys.open_secret(&[0; 16], &server_label(&tag), &sealed)).filter(|_| marked) {inbound["server_key"] = json!(String::from_utf8(key).map_err(|error| error.to_string())?);}
 		}
 		let clients = present.iter().map(|(id, name, record)| {
 			let sealed: Option<Vec<u8>> = db.query_row("select secret from xray_clients where tag = ? and user_id = ?", params![tag, id], |row| row.get(0)).optional().map_err(|error| error.to_string())?;

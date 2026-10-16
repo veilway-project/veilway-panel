@@ -50,6 +50,14 @@ fn source_allowed(allowed: &[String], source: &str) -> bool {
 
 fn refuse(status: StatusCode, code: &'static str, message: &str) -> Response {Failure::new(status, code, message).into_response()}
 
+/// For a change a handler makes beyond what its route allows: an API token never has a re-authentication, and a session needs one in the last five minutes.
+pub fn reauthed(app: &App, ctx: &Ctx) -> Result<(), Failure> {
+	let Some(id) = &ctx.session_id else {return Err(Failure::new(StatusCode::FORBIDDEN, "forbidden", "An API token cannot make this change."))};
+	let reauth: i64 = app.db.lock().query_row("select reauth_at from sessions where id = ?", [id], |row| row.get(0))?;
+	if now() - reauth > REAUTH {return Err(Failure::new(StatusCode::FORBIDDEN, "reauth_required", "Confirm your password and code first."))}
+	Ok(())
+}
+
 pub fn cookie_value(request: &Request, name: &str) -> Option<String> {
 	request.headers().get_all(COOKIE).iter().filter_map(|value| value.to_str().ok()).flat_map(|value| value.split(';')).find_map(|pair| pair.trim().strip_prefix(name)?.strip_prefix('=')).map(str::to_string)
 }

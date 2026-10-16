@@ -579,7 +579,7 @@ async fn config_sections_validate_diff_and_apply_through_the_node() {
 	assert_eq!(stale.status, StatusCode::CONFLICT);
 	let mut bad = node_document("10.66.0.1/24");
 	bad["invalid"] = json!(true);
-	let refused = h.bearer(Method::PUT, "/p/api/config", &full, Some(json!({"revision": "rev2", "document": bad})), "10.1.1.1").await;
+	let refused = h.call(Method::PUT, "/p/api/config", Some(&session), Some(json!({"revision": "rev2", "document": bad})), "10.1.1.1").await;
 	assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
 	assert_eq!(fake.applied.lock().unwrap().len(), 1, "a refused document reaches no apply");
 	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await.json();
@@ -595,17 +595,57 @@ async fn notices_dns_log_links_and_replay_are_sections_like_the_others() {
 	let notices = h.call(Method::GET, "/p/api/config/notices", Some(&session), None, "10.0.0.1").await.json();
 	assert_eq!(notices["value"], Value::Null, "a section the document leaves out is null");
 	assert_eq!(h.call(Method::GET, "/p/api/config/replay", Some(&session), None, "10.0.0.1").await.json()["read_at_start"], json!(["cache"]));
-	for (section, wrong) in [("notices", json!({})), ("links", json!({})), ("dns", json!([])), ("log", json!([])), ("replay", json!(null))] {
+	for (section, wrong) in [("notices", json!({})), ("links", json!({})), ("dns", json!([])), ("log", json!([]))] {
 		assert_eq!(h.bearer(Method::PUT, &format!("/p/api/config/{section}"), &full, Some(json!({"revision": "rev1", "value": wrong})), "10.1.1.1").await.status, StatusCode::BAD_REQUEST, "{section}");
 	}
 	let mut revision = 1;
 	for (section, value) in [("notices", json!([{"severity": "warning", "text": "Maintenance on Friday from 02:00 UTC"}])), ("dns", json!({"servers": ["9.9.9.9:53"], "hijack": false})), ("log", json!({"level": "warn", "destinations": false})), ("links", json!([])), ("replay", json!({"cache": 4096}))] {
-		let applied = h.bearer(Method::PUT, &format!("/p/api/config/{section}"), &full, Some(json!({"revision": format!("rev{revision}"), "value": value})), "10.1.1.1").await;
+		let applied = h.call(Method::PUT, &format!("/p/api/config/{section}"), Some(&session), Some(json!({"revision": format!("rev{revision}"), "value": value})), "10.0.0.1").await;
 		assert_eq!(applied.status, StatusCode::OK, "{section}: {}", String::from_utf8_lossy(&applied.body));
 		revision += 1;
 		assert_eq!(fake.applied.lock().unwrap().last().unwrap()[section], value, "{section}");
 	}
 	assert_eq!(h.call(Method::GET, "/p/api/config/notices", Some(&session), None, "10.0.0.1").await.json()["value"][0]["severity"], "warning");
+}
+
+#[tokio::test]
+async fn guarded_sections_need_a_recent_reauth_and_no_token_and_null_removes_optional_ones() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	let full = h.token(&session, "full", json!({})).await;
+	assert_eq!(h.bearer(Method::PUT, "/p/api/config/log", &full, Some(json!({"revision": "rev1", "value": {"level": "warn"}})), "10.1.1.1").await.status, StatusCode::FORBIDDEN, "a token never changes log");
+	h.app.db.lock().execute("update sessions set reauth_at = 0", []).unwrap();
+	let stale = h.call(Method::PUT, "/p/api/config/log", Some(&session), Some(json!({"revision": "rev1", "value": {"level": "warn"}})), "10.0.0.1").await;
+	assert_eq!((stale.status, stale.json()["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("reauth_required")));
+	h.app.db.lock().execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap();
+	assert_eq!(h.call(Method::PUT, "/p/api/config/log", Some(&session), Some(json!({"revision": "rev1", "value": {"level": "warn", "destinations": false}})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::PUT, "/p/api/config/log", Some(&session), Some(json!({"revision": "rev2", "value": {"level": "warn", "destinations": true}})), "10.0.0.1").await.status, StatusCode::OK);
+	let links = json!([{"tag": "l1", "allow_private": false, "transport_secret": "SECRETVALUE"}]);
+	assert_eq!(h.call(Method::PUT, "/p/api/config/links", Some(&session), Some(json!({"revision": "rev3", "value": links})), "10.0.0.1").await.status, StatusCode::OK);
+	let edited = json!([{"tag": "l1", "allow_private": true, "transport_secret": "SECRETVALUE"}]);
+	assert_eq!(h.call(Method::PUT, "/p/api/config/links", Some(&session), Some(json!({"revision": "rev4", "value": edited})), "10.0.0.1").await.status, StatusCode::OK);
+	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await;
+	let details: Vec<String> = audit.json()["entries"].as_array().unwrap().iter().filter(|entry| entry["action"] == "config.apply").map(|entry| entry["detail"].as_str().unwrap().to_string()).collect();
+	assert!(details.iter().any(|detail| detail.contains("log.destinations false -> true")), "{details:?}");
+	assert!(details.iter().any(|detail| detail.contains("links +l1")), "{details:?}");
+	assert!(details.iter().any(|detail| detail.contains("links[l1].allow_private false -> true")), "{details:?}");
+	assert!(!String::from_utf8_lossy(&audit.body).contains("SECRETVALUE"));
+	let mut document = fake.document.lock().unwrap().clone();
+	document["exits"] = json!([{"tag": "other"}]);
+	assert_eq!(h.bearer(Method::PUT, "/p/api/config", &full, Some(json!({"revision": "rev5", "document": document.clone()})), "10.1.1.1").await.status, StatusCode::FORBIDDEN, "a token changes no exits through the whole config");
+	document = fake.document.lock().unwrap().clone();
+	document["dns"] = json!({"servers": ["1.1.1.1:53"]});
+	h.app.db.lock().execute("update sessions set reauth_at = 0", []).unwrap();
+	assert_eq!(h.call(Method::PUT, "/p/api/config", Some(&session), Some(json!({"revision": "rev5", "document": document.clone()})), "10.0.0.1").await.json()["error"]["code"], "reauth_required");
+	h.app.db.lock().execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap();
+	assert_eq!(h.call(Method::PUT, "/p/api/config/notices", Some(&session), Some(json!({"revision": "rev5", "value": [{"severity": "information", "text": "Hello"}]})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::PUT, "/p/api/config/notices", Some(&session), Some(json!({"revision": "rev6", "value": null})), "10.0.0.1").await.status, StatusCode::OK);
+	assert!(fake.applied.lock().unwrap().last().unwrap().get("notices").is_none(), "null removes an optional section");
+	assert_eq!(h.call(Method::PUT, "/p/api/config/inbounds", Some(&session), Some(json!({"revision": "rev7", "value": null})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "a required section stays");
+	assert_eq!(h.bearer(Method::PUT, "/p/api/config/replay", &full, Some(json!({"revision": "rev7", "value": {"cache": 4096}})), "10.1.1.1").await.status, StatusCode::OK);
+	assert_eq!(h.bearer(Method::PUT, "/p/api/config/replay", &full, Some(json!({"revision": "rev8", "value": null})), "10.1.1.1").await.status, StatusCode::OK);
+	assert!(fake.applied.lock().unwrap().last().unwrap().get("replay").is_none());
 }
 
 #[tokio::test]
@@ -921,6 +961,7 @@ async fn admins_are_listed_added_reset_and_removed_but_never_yourself() {
 	assert_eq!(login.status, StatusCode::OK);
 	let theirs = Session {cookie: login.headers.get(SET_COOKIE).unwrap().to_str().unwrap().split(';').next().unwrap().to_string(), csrf: login.json()["csrf"].as_str().unwrap().to_string()};
 	assert_eq!(h.call(Method::GET, "/p/api/admins", Some(&session), None, "10.0.0.1").await.json()["admins"][1]["totp_used"], true);
+	assert!(h.call(Method::GET, "/p/api/admins", Some(&session), None, "10.0.0.1").await.json()["admins"][1]["last_login"].is_i64());
 	assert_eq!(h.call(Method::DELETE, &format!("/p/api/admins/{owner_id}"), Some(&session), None, "10.0.0.1").await.status, StatusCode::CONFLICT, "not yourself");
 	assert_eq!(h.call(Method::DELETE, &format!("/p/api/admins/{second_id}"), Some(&theirs), None, "10.0.0.2").await.status, StatusCode::CONFLICT, "not yourself, as the other admin either");
 	assert_eq!(h.call(Method::POST, &format!("/p/api/admins/{owner_id}/reset"), Some(&session), Some(json!({"new_password": "a third long password"})), "10.0.0.1").await.status, StatusCode::CONFLICT, "your own goes through the account routes");
@@ -932,23 +973,47 @@ async fn admins_are_listed_added_reset_and_removed_but_never_yourself() {
 		h.app.db.lock().execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap();
 		h.token(&session, "full", json!({})).await
 	};
+	let theirs_token = h.token(&theirs, "full", json!({})).await;
 	assert_eq!(h.bearer(Method::POST, &format!("/p/api/admins/{second_id}/reset"), &token, Some(json!({"new_password": "a third long password"})), "10.0.0.1").await.status, StatusCode::FORBIDDEN, "no API token resets an admin");
 	let reset = h.call(Method::POST, &format!("/p/api/admins/{second_id}/reset"), Some(&session), Some(json!({"new_password": "a third long password"})), "10.0.0.1").await;
 	assert_eq!(reset.status, StatusCode::OK, "{}", String::from_utf8_lossy(&reset.body));
 	let renewed = reset.json()["totp_secret"].as_str().unwrap().to_string();
 	assert!(renewed != secret);
 	assert_eq!(h.call(Method::GET, "/p/api/admins", Some(&theirs), None, "10.0.0.2").await.status, StatusCode::UNAUTHORIZED, "the reset ends their sessions");
+	assert_eq!(h.bearer(Method::GET, "/p/api/users", &theirs_token, None, "10.1.1.1").await.status, StatusCode::UNAUTHORIZED, "the reset revokes their API tokens");
 	assert_eq!(h.call(Method::GET, "/p/api/admins", Some(&session), None, "10.0.0.1").await.json()["admins"][1]["totp_used"], false);
 	assert_eq!(h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "second", "password": "second long password", "totp": code_of(&renewed)})), "10.0.0.3").await.status, StatusCode::UNAUTHORIZED, "the old password is gone");
 	assert_eq!(h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "second", "password": "a third long password", "totp": code_of(&renewed)})), "10.0.0.3").await.status, StatusCode::OK);
 	assert_eq!(h.call(Method::DELETE, &format!("/p/api/admins/{second_id}"), Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
 	assert_eq!(h.call(Method::DELETE, &format!("/p/api/admins/{second_id}"), Some(&session), None, "10.0.0.1").await.status, StatusCode::NOT_FOUND);
 	assert_eq!(h.app.db.lock().query_row("select count(*) from sessions where admin_id = ?", [second_id], |row| row.get::<_, i64>(0)).unwrap(), 0);
+	h.app.db.lock().execute("update audit set at = at - 100 where action = 'login'", []).unwrap();
+	assert_eq!(h.call(Method::POST, "/p/api/admins", Some(&session), Some(json!({"username": "second", "password": "a fourth long password"})), "10.0.0.1").await.status, StatusCode::OK);
+	let again = h.call(Method::GET, "/p/api/admins", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((again["admins"][1]["username"].clone(), again["admins"][1]["last_login"].clone()), (json!("second"), Value::Null), "a name made again does not inherit the old logins");
 	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await;
 	let entries = audit.json()["entries"].as_array().unwrap().clone();
-	assert!(entries.iter().any(|entry| entry["action"] == "admin.reset" && entry["target"] == "admin:second" && entry["detail"].as_str().unwrap().contains("1 sessions ended")));
+	assert!(entries.iter().any(|entry| entry["action"] == "admin.reset" && entry["target"] == "admin:second" && entry["detail"].as_str().unwrap().contains("1 sessions ended, 1 tokens revoked")));
 	assert!(entries.iter().any(|entry| entry["action"] == "admin.remove" && entry["target"] == "admin:second"));
 	assert!(!String::from_utf8_lossy(&audit.body).contains(&renewed) && !String::from_utf8_lossy(&audit.body).contains("a third long password"));
+}
+
+#[tokio::test]
+async fn xray_decoys_are_loopback_or_private_addresses() {
+	let mut document = node_document("10.66.0.1/24");
+	document["public_addresses"] = json!(["vpn.example.org"]);
+	let (fake, socket) = Fake::start(document).await;
+	*fake.status.lock().unwrap() = json!({"version": "0.0.0", "addons": {"xray": {"installed": true, "release": "v26.3.27"}}});
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	for (port, decoy) in [(8441, "http://8.8.8.8:8080"), (8442, "http://example.org:8080"), (8443, "https://127.0.0.1:8080"), (8444, "http://10.1.2.3@8.8.8.8:8080")] {
+		let body = json!({"tag": format!("bad{port}"), "protocol": "vless", "port": port, "cert": "/a", "key": "/b", "decoy": decoy});
+		assert_eq!(h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(body), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "{decoy}");
+	}
+	for (tag, port, decoy) in [("local", 8445, "http://localhost:8080"), ("v6", 8446, "http://[::1]:8080"), ("lan", 8447, "http://10.1.2.3:8080")] {
+		let body = json!({"tag": tag, "protocol": "vless", "port": port, "cert": "/a", "key": "/b", "decoy": decoy});
+		assert_eq!(h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(body), "10.0.0.1").await.status, StatusCode::OK, "{decoy}");
+	}
 }
 
 #[tokio::test]
@@ -959,6 +1024,7 @@ async fn an_xray_inbound_is_edited_and_every_user_keeps_their_credential() {
 	*fake.status.lock().unwrap() = json!({"version": "0.0.0", "addons": {"xray": {"installed": true, "release": "v26.3.27"}}});
 	let h = Harness::with_socket(Some(socket)).await;
 	let session = h.login("10.0.0.1").await;
+	let full = h.token(&session, "full", json!({})).await;
 	h.configure(&session, json!({})).await;
 	let (ann, _) = h.user(&session, "ann", json!({})).await;
 	assert_eq!(h.call(Method::POST, &format!("/p/api/users/{ann}/devices"), Some(&session), Some(json!({"name": "phone"})), "10.0.0.1").await.status, StatusCode::OK);
@@ -989,11 +1055,21 @@ async fn an_xray_inbound_is_edited_and_every_user_keeps_their_credential() {
 	let applied = fake.applied.lock().unwrap().last().unwrap().clone();
 	let renewed = applied["xray"]["inbounds"][1]["server_key"].clone();
 	assert!(renewed != server && renewed.as_str().unwrap().len() == 44 && applied["xray"]["inbounds"][1]["clients"][0]["secret"] == password, "a new server key, the same user key");
+	assert_eq!(h.bearer(Method::PATCH, &path("ss"), &full, Some(json!({"port": 8391, "new_server_key": true})), "10.1.1.1").await.status, StatusCode::FORBIDDEN, "no API token makes a new server key");
+	assert_eq!(h.bearer(Method::PATCH, &path("ss"), &full, Some(json!({"port": 8391})), "10.1.1.1").await.status, StatusCode::OK, "a token edits an inbound without a new key");
+	h.app.db.lock().execute("update sessions set reauth_at = 0", []).unwrap();
+	let stale = h.call(Method::PATCH, &path("ss"), Some(&session), Some(json!({"port": 8391, "new_server_key": true})), "10.0.0.1").await;
+	assert_eq!((stale.status, stale.json()["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("reauth_required")));
+	h.app.db.lock().execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap();
 	*fake.document.lock().unwrap() = {let mut document = applied.clone(); document["invalid"] = json!(true); document};
 	assert_eq!(h.call(Method::PATCH, &path("vless1"), Some(&session), Some(json!({"port": 9444, "cert": "/a", "key": "/b", "host": "other.example.org"})), "10.0.0.1").await.status, StatusCode::UNPROCESSABLE_ENTITY, "the node refuses");
 	assert_eq!(h.call(Method::GET, "/p/api/xray", Some(&session), None, "10.0.0.1").await.json()["inbounds"][0]["own_host"], "edge.example.org", "a refused edit leaves the host as it was");
+	let stored = |tag: &str| h.app.db.lock().query_row("select server_key from xray_inbounds where tag = ?", [tag], |row| row.get::<_, Vec<u8>>(0)).unwrap();
+	let (kept, reached) = (stored("ss"), fake.applied.lock().unwrap().len());
+	assert_eq!(h.call(Method::PATCH, &path("ss"), Some(&session), Some(json!({"port": 8392, "new_server_key": true})), "10.0.0.1").await.status, StatusCode::UNPROCESSABLE_ENTITY, "the node refuses a new key");
+	assert_eq!((stored("ss") == kept, fake.applied.lock().unwrap().len() == reached), (true, true), "a refused new key is in neither the panel nor the node");
 	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await;
-	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "xray.edit" && entry["target"] == "vless1" && entry["detail"] == "listen 192.0.2.5:8444 to [::]:9443"));
+	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "xray.edit" && entry["target"] == "vless1" && entry["detail"] == "listen 192.0.2.5:8444 -> [::]:9443, cert/key changed, host \"\" -> \"edge.example.org\""));
 	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "xray.edit" && entry["target"] == "ss" && entry["detail"].as_str().unwrap().ends_with("new server key")));
 	assert!(!String::from_utf8_lossy(&audit.body).contains(renewed.as_str().unwrap()) && !String::from_utf8_lossy(&audit.body).contains(uuid.as_str().unwrap()));
 }

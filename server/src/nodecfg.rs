@@ -1,10 +1,10 @@
 //! The node's config through its control API: the schema, the document as a whole and by section, dry runs, the one path that applies a change, and the profile templates derived from the inbounds.
-use crate::{app::{App, Settings}, crypto::now, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
+use crate::{app::{App, Settings}, auth::reauthed, crypto::now, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
 use axum::{extract::{Path, State}, http::{header::CONTENT_TYPE, HeaderValue, StatusCode}, response::{IntoResponse, Response}, Extension};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 /// `veilway schema` of the core, kept next to the manifest. The node's own validation stays the authority: this is for an editor.
 const SCHEMA: &str = include_str!("../config.schema.json");
@@ -12,6 +12,10 @@ const SCHEMA: &str = include_str!("../config.schema.json");
 const SECTIONS: [&str; 9] = ["inbounds", "outbounds", "exits", "routing", "notices", "dns", "log", "links", "replay"];
 /// The sections that are an object. The others are lists.
 const OBJECTS: [&str; 4] = ["routing", "dns", "log", "replay"];
+/// Sections that change the node's links, log, resolvers or notices. Only a session that confirmed its password and code again may change them, and no API token may change them through the whole document either.
+const GUARDED: [&str; 4] = ["links", "log", "dns", "notices"];
+/// Sections the document may leave out, which a null removes.
+const OPTIONAL: [&str; 5] = ["dns", "log", "notices", "replay", "links"];
 
 pub async fn schema() -> Response {(StatusCode::OK, [(CONTENT_TYPE, HeaderValue::from_static("application/json"))], SCHEMA).into_response()}
 
@@ -63,20 +67,46 @@ pub async fn validate(State(app): State<Arc<App>>, Body(input): Body<DocumentIn>
 
 pub async fn diff(State(app): State<Arc<App>>, Body(input): Body<DocumentIn>) -> Result<Response, Failure> {dry_run(app, input.document, "/v1/config/diff").await}
 
-/// Validates the document on the node, then puts it in force with If-Match, under the panel's one turn at the node's config. A document the node refuses, or a revision that moved, changes nothing.
+/// Validates the document on the node, then puts it in force with If-Match. The caller holds the panel's one turn at the node's config. A document the node refuses, or a revision that moved, changes nothing. The audit line names what changed, never a secret. The Xray inbounds are left out: their own audit lines name their changes, and the node shows their credentials as markers.
 pub(crate) async fn apply(app: &Arc<App>, ctx: &Ctx, document: Value, revision: &str, target: &str) -> Result<Value, Failure> {
 	let document = with_users(app, document)?;
-	let _turn = app.node_lock.lock().await;
+	let (_, _, before) = running(app).await?;
 	let (status, checked) = call(app, "POST", "/v1/config/validate", None, Some(&document)).await?;
 	if status != 200 || checked.get("valid") != Some(&Value::Bool(true)) {return Err(Failure::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", checked.to_string().chars().take(4000).collect::<String>()))}
 	let (status, applied) = call(app, "PUT", "/v1/config", Some(revision), Some(&document)).await?;
 	match status {
 		200 => {
-			audit(&app.db.lock(), &ctx.actor, &ctx.source, "config.apply", target, &format!("generation {}", applied.get("generation").and_then(Value::as_u64).unwrap_or(0)));
+			let mut changed = vec![format!("generation {}", applied.get("generation").and_then(Value::as_u64).unwrap_or(0))];
+			for key in before.as_object().into_iter().chain(document.as_object()).flat_map(|object| object.keys()).filter(|key| !["users", "xray"].contains(&key.as_str())).collect::<BTreeSet<_>>() {changes(key, &before[key.as_str()], &document[key.as_str()], &mut changed)}
+			audit(&app.db.lock(), &ctx.actor, &ctx.source, "config.apply", target, &changed.join(", "));
 			Ok(applied)
 		}
 		409 | 428 => Err(Failure::conflict("The node's config is not the revision this change was made on. Read it again.")),
 		other => Err(Failure::new(StatusCode::UNPROCESSABLE_ENTITY, "node_refused", format!("The node answered {other}: {}", applied.to_string().chars().take(1000).collect::<String>()))),
+	}
+}
+
+/// Names what changed between two parts of the config: the keys of objects, the entries of lists whose items carry a tag, and bools and numbers before and after. Anything else is only named as changed.
+fn changes(name: &str, before: &Value, after: &Value, out: &mut Vec<String>) {
+	if before == after {return}
+	match (before, after) {
+		(Value::Object(old), Value::Object(new)) => for key in old.keys().chain(new.keys()).collect::<BTreeSet<_>>() {changes(&format!("{name}.{key}"), old.get(key).unwrap_or(&Value::Null), new.get(key).unwrap_or(&Value::Null), out)},
+		(Value::Array(old), Value::Array(new)) if old.iter().chain(new).all(|item| item["tag"].is_string()) => {
+			for tag in old.iter().chain(new).filter_map(|item| item["tag"].as_str()).collect::<BTreeSet<_>>() {
+				match (old.iter().find(|item| item["tag"] == tag), new.iter().find(|item| item["tag"] == tag)) {
+					(Some(was), Some(next)) => changes(&format!("{name}[{tag}]"), was, next, out),
+					(None, Some(_)) => out.push(format!("{name} +{tag}")),
+					(Some(_), None) => out.push(format!("{name} -{tag}")),
+					(None, None) => {}
+				}
+			}
+		}
+		(Value::Null, Value::Array(_)) => changes(name, &json!([]), after, out),
+		(Value::Null, Value::Object(_)) => changes(name, &json!({}), after, out),
+		(Value::Array(_), Value::Null) => changes(name, before, &json!([]), out),
+		(Value::Object(_), Value::Null) => changes(name, before, &json!({}), out),
+		(Value::Bool(_) | Value::Number(_) | Value::Null, Value::Bool(_) | Value::Number(_) | Value::Null) => out.push(format!("{name} {before} -> {after}")),
+		_ => out.push(format!("{name} changed")),
 	}
 }
 
@@ -88,7 +118,14 @@ pub struct ConfigIn {
 	pub document: Value,
 }
 
-pub async fn put_config(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<ConfigIn>) -> Result<Response, Failure> {ok(&apply(&app, &ctx, input.document, &input.revision, "config").await?)}
+pub async fn put_config(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<ConfigIn>) -> Result<Response, Failure> {
+	let _turn = app.node_lock.lock().await;
+	let (_, _, live) = running(&app).await?;
+	let changed = |sections: &[&str]| sections.iter().any(|section| live[*section] != input.document[*section]);
+	if ctx.token_id.is_some() && changed(&["exits", "outbounds", "links", "log", "dns", "notices"]) {return Err(Failure::new(StatusCode::FORBIDDEN, "forbidden", "An API token cannot change exits, outbounds, links, log, dns or notices through the whole config."))}
+	if changed(&GUARDED) {reauthed(&app, &ctx)?}
+	ok(&apply(&app, &ctx, input.document, &input.revision, "config").await?)
+}
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -100,9 +137,12 @@ pub struct SectionIn {
 
 pub async fn put_section(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(section): Path<String>, Body(input): Body<SectionIn>) -> Result<Response, Failure> {
 	if !SECTIONS.contains(&section.as_str()) {return Err(Failure::missing("section"))}
-	if input.value.is_object() != OBJECTS.contains(&section.as_str()) || !(input.value.is_object() || input.value.is_array()) {return Err(Failure::bad(if OBJECTS.contains(&section.as_str()) {"This section is an object."} else {"This section is a list."}))}
+	if input.value.is_null() && !OPTIONAL.contains(&section.as_str()) {return Err(Failure::bad("This section is required, so it cannot be null."))}
+	if !input.value.is_null() && (input.value.is_object() != OBJECTS.contains(&section.as_str()) || !(input.value.is_object() || input.value.is_array())) {return Err(Failure::bad(if OBJECTS.contains(&section.as_str()) {"This section is an object."} else {"This section is a list."}))}
+	if GUARDED.contains(&section.as_str()) {reauthed(&app, &ctx)?}
+	let _turn = app.node_lock.lock().await;
 	let (_, _, mut document) = running(&app).await?;
-	document[&section] = input.value;
+	if input.value.is_null() {document.as_object_mut().map(|document| document.remove(&section));} else {document[&section] = input.value;}
 	ok(&apply(&app, &ctx, document, &input.revision, &section).await?)
 }
 

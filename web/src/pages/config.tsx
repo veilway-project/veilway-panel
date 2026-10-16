@@ -2,7 +2,7 @@ import {Banner, Button, Checkbox, DataTable, Dialog, Field, Glass, Icon, IconBut
 import {useEffect, useState} from "react";
 import {api, ApiError, type Diff, type Report, type Running} from "../api.ts";
 import {check, type Issue, type Schema} from "../check.ts";
-import {ErrorNote, Issues, lines, LinesField, Mark, moved, PageHead, useLoad, useP, useReorder, useSay} from "../kit.tsx";
+import {ErrorNote, Issues, lines, LinesField, Mark, moved, PageHead, useGuard, useLoad, useP, useReorder, useSay} from "../kit.tsx";
 import type {PanelKey} from "../locales/en.ts";
 import {XrayForm, XraySheet} from "./xray.tsx";
 
@@ -144,13 +144,13 @@ function JsonEditor({section, value, schema, onReview}: {section: Section, value
 
 // A dry run on the node first, then the apply on the revision this page read. A revision that moved means another admin or the node's file changed it in between.
 function Review({section, running, value, moves, show, onClose, onDone}: {section: Section, running: Running, value: unknown, moves: string[], show?: {kind: string, count: number, go: (index: number) => void}, onClose: () => void, onDone: () => void}) {
-	const {t, number} = useP(), toast = useToast(), [answer, setAnswer] = useState<{valid: boolean, report: Report, diff: Diff | null} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [stale, setStale] = useState(false), [refused, setRefused] = useState<Report | null>(null);
+	const {t, number} = useP(), guard = useGuard(), toast = useToast(), [answer, setAnswer] = useState<{valid: boolean, report: Report, diff: Diff | null} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [stale, setStale] = useState(false), [refused, setRefused] = useState<Report | null>(null);
 	useEffect(() => { api("post", "/config/diff", {body: {document: {...running.document, [section]: value}}}).then(found => setAnswer(found as typeof answer), setError); }, []);
 	const apply = async () => {
 		setBusy(true);
 		setError(null);
 		try {
-			const done = await api("put", "/config/{section}", {params: {section}, body: {revision: running.revision, value}}) as {generation?: number};
+			const done = await guard(() => api("put", "/config/{section}", {params: {section}, body: {revision: running.revision, value}})) as {generation?: number};
 			toast({tone: "success", title: t("config.applied", {generation: done.generation ?? running.generation + 1})});
 			onDone();
 		} catch (failure) {
