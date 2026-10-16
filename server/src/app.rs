@@ -143,6 +143,8 @@ pub struct App {
 	pub restart: tokio::sync::Notify,
 	/// Node link pairing, all in memory: an offer, its answer and the fingerprint wait here until the operator confirms, and a restart drops them.
 	pub pairing: Mutex<crate::links::Pairing>,
+	/// Nonces of the relay mirror headers that were accepted, so that a header seen once is not taken twice.
+	pub mirrors_seen: crate::mirrors::Seen,
 }
 
 impl App {

@@ -102,6 +102,7 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 						<LinesField label={t("subs.mirrorPins")} hint={t("subs.mirrorPinsHint")} value={m.pins} onChange={value => set({mirrors: mirrors.map((x, j) => j === i ? {...x, pins: value} : x)})} rows={2}/>
 					</fieldset>)}
 					{reorder.live}
+					<p className="vw-muted vw-small">{t("subs.relayHint")} <a className="p-link" href="https://veilway-project.github.io/veilway-docs/manuals/panel/#relay-mirrors" target="_blank" rel="noreferrer noopener">{t("subs.relayManual")}</a></p>
 					{mirrors.length < 4 && <div><Button size="sm" icon="plus" onClick={() => set({mirrors: [...mirrors, {url: "", pins: ""}]})}>{t("subs.addMirror")}</Button></div>}
 				</div>
 			</section>

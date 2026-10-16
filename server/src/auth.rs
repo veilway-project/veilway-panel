@@ -36,7 +36,7 @@ impl Access {
 
 pub struct Guard {pub app: Arc<App>, pub access: HashMap<(Method, String), Access>}
 
-fn source(app: &App, request: &Request) -> String {
+pub fn source(app: &App, request: &Request) -> String {
 	let peer = request.extensions().get::<ConnectInfo<SocketAddr>>().map(|info| info.0.ip().to_string()).unwrap_or_else(|| "unknown".into());
 	if !app.cfg.trusted_proxies.contains(&peer) {return peer}
 	request.headers().get("x-forwarded-for").and_then(|value| value.to_str().ok()).and_then(|value| value.rsplit(',').next()).and_then(|last| last.trim().parse::<std::net::IpAddr>().ok().or_else(|| last.trim().parse::<SocketAddr>().ok().map(|addr| addr.ip()))).map(|ip| ip.to_string()).unwrap_or(peer)

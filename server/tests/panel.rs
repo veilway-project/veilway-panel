@@ -4,7 +4,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::{net::SocketAddr, path::PathBuf, sync::{atomic::Ordering, Arc, Mutex}};
 use tower::ServiceExt;
-use veilway_panel::{app::{bucket, App, Limiter, Signing}, build, config::Config, crypto, openapi, router, upkeep_once, Upkeep};
+use veilway_panel::{app::{bucket, App, Limiter, Signing}, build, config::{Config, TrustedMirror}, crypto, mirrors, openapi, router, upkeep_once, Upkeep};
 use veilway_proto::subscription::{envelope::{self, Kid}, link::Link, payload::{self, Payload, Reason}, BODY_MAX};
 
 const PASSWORD: &str = "correct horse battery";
@@ -1113,4 +1113,55 @@ async fn an_xray_inbound_is_edited_and_every_user_keeps_their_credential() {
 	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "xray.edit" && entry["target"] == "vless1" && entry["detail"] == "listen 192.0.2.5:8444 -> [::]:9443, cert/key changed, host \"\" -> \"edge.example.org\""));
 	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "xray.edit" && entry["target"] == "ss" && entry["detail"].as_str().unwrap().ends_with("new server key")));
 	assert!(!String::from_utf8_lossy(&audit.body).contains(renewed.as_str().unwrap()) && !String::from_utf8_lossy(&audit.body).contains(uuid.as_str().unwrap()));
+}
+
+#[test]
+fn mirror_mac_matches_the_core_vector() {
+	assert_eq!(URL_SAFE_NO_PAD.encode(mirrors::mac(&[7; 32], "m1", "203.0.113.9", 1700000000, "AAAAAAAAAAAAAAAAAAAAAA")), "DOin5nKyW8-dXMUg7GMkcHNldK98QqJjkVvHGukWP4M");
+}
+
+#[test]
+fn config_checks_trusted_mirrors() {
+	let with = |name: &str, secret: &str| Config {direct: true, trusted_mirrors: vec![TrustedMirror {name: name.into(), secret: secret.into()}], ..Config::default()}.check();
+	let secret = URL_SAFE_NO_PAD.encode([7u8; 32]);
+	assert!(with("relay-1", &secret).is_ok());
+	assert!(with("Relay", &secret).is_err());
+	assert!(with("", &secret).is_err());
+	assert!(with("relay", &URL_SAFE_NO_PAD.encode([7u8; 16])).is_err());
+	assert!(with("relay", "not base64!").is_err());
+	let twice = Config {direct: true, trusted_mirrors: vec![TrustedMirror {name: "a".into(), secret: secret.clone()}, TrustedMirror {name: "a".into(), secret}], ..Config::default()};
+	assert!(twice.check().is_err());
+}
+
+#[tokio::test]
+async fn a_mirror_header_names_the_source_and_anything_else_is_unknown() {
+	let secret = [9u8; 32];
+	let h = Harness::with_config(None, |cfg| cfg.trusted_mirrors = vec![TrustedMirror {name: "relay".into(), secret: URL_SAFE_NO_PAD.encode(secret)}]).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (_, link) = h.user(&session, "ann", json!({"device_limit": 2})).await;
+	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
+	let Link::Native(native) = &link else {panic!("not native")};
+	let body = |device: u8| json!({"v": 1, "token": URL_SAFE_NO_PAD.encode(native.token().expose()), "kids": [kids[0].text()], "device_public_key": STANDARD.encode([device; 32]), "device_secret": URL_SAFE_NO_PAD.encode([device; 16]), "op": "fetch"});
+	let header = |name: &str, address: &str, at: i64, nonce: &str, secret: &[u8]| format!("v1;{name};{address};{at};{nonce};{}", URL_SAFE_NO_PAD.encode(mirrors::mac(secret, name, address, at, nonce)));
+	let send = |value: Option<String>, device: u8| {
+		let mut request = Request::builder().method(Method::POST).uri("/s").header(CONTENT_TYPE, "application/json").header(HOST, "panel.example.org");
+		if let Some(value) = value {request = request.header(mirrors::HEADER, value);}
+		h.send(request, Some(body(device)), "198.51.100.7")
+	};
+	let unknown = h.send(Request::builder().method(Method::GET).uri("/nothing-here").header(HOST, "panel.example.org"), None, "198.51.100.7").await.shape();
+	let (now, nonce) = (crypto::now(), |n: u8| URL_SAFE_NO_PAD.encode([n; 16]));
+	let valid = header("relay", "203.0.113.9", now, &nonce(1), &secret);
+	assert!(matches!(opened(&send(Some(valid.clone()), 1).await, &[key]), Payload::Subscription(_)));
+	assert_eq!(h.app.limits.count("sub:203.0.113.9", 60), 1, "the forwarded address is the source");
+	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 0);
+	assert_eq!(send(Some(valid), 1).await.shape(), unknown, "a replayed header");
+	assert_eq!(send(Some(header("relay", "203.0.113.9", now - 120, &nonce(2), &secret)), 1).await.shape(), unknown, "a stale header");
+	assert_eq!(send(Some(header("relay", "203.0.113.9", now + 120, &nonce(3), &secret)), 1).await.shape(), unknown, "a header from the future");
+	assert_eq!(send(Some(header("other", "203.0.113.9", now, &nonce(4), &secret)), 1).await.shape(), unknown, "an unknown mirror");
+	assert_eq!(send(Some(header("relay", "203.0.113.9", now, &nonce(5), &[1; 32])), 1).await.shape(), unknown, "a bad mac");
+	assert_eq!(send(Some(header("relay", "not an address", now, &nonce(6), &secret)), 1).await.shape(), unknown, "a bad address");
+	assert_eq!(send(Some("v1;relay".into()), 1).await.shape(), unknown, "a short header");
+	assert!(matches!(opened(&send(None, 1).await, &[key]), Payload::Subscription(_)), "no header is an ordinary request");
+	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 1);
 }

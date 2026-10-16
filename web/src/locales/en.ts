@@ -374,6 +374,8 @@ export const en = {
 	"subs.mirrorPinsHint": "Only for a mirror without a certificate from an authority. One per line.",
 	"subs.addMirror": "Add a mirror",
 	"subs.noMirrorsBody": "Apps only use the endpoint. Add a mirror on another address so a block on one does not cut users off.",
+	"subs.relayHint": "A relay mirror is a small program on your own server that forwards refreshes to this panel, so apps can still refresh when the endpoint is blocked.",
+	"subs.relayManual": "Read the manual",
 	"subs.profilesField": "Profiles as JSON",
 	"subs.profilesHint": "A list of up to 64 objects.",
 	"hand.view": "Edit profiles as",

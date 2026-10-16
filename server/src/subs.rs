@@ -1,5 +1,5 @@
 //! The subscription side: the link, the signed document, and the public endpoint that answers a valid token and nothing else.
-use crate::{app::{App, Settings, SigningEntry}, crypto::{self, now}};
+use crate::{app::{bucket, App, Settings, SigningEntry}, auth, crypto::{self, now}, mirrors};
 use axum::{body::Body, extract::{Request, State}, http::{header::{CACHE_CONTROL, CONTENT_TYPE}, HeaderValue, Method}, response::Response};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
@@ -127,6 +127,11 @@ fn asked(map: &Map<String, Value>) -> Option<Asked> {
 /// Reads the body and says whether it is a valid request. Anything that is not answers as an unknown path.
 pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response {
 	let post = request.method() == Method::POST;
+	// A valid mirror header names the real source of the request. One that is not valid, or a source over its limit, is an unknown request.
+	let (via, direct) = (mirrors::check(&app, request.headers()), auth::source(&app, &request));
+	let source = via.as_ref().ok().and_then(Option::as_ref).map_or(direct, |(_, address)| address.to_string());
+	if let Ok(Some((name, _))) = &via {tracing::debug!("a subscription request relayed by the mirror {name} from {source}")}
+	let admitted = via.is_ok() && app.limits.hit(&format!("sub:{}", bucket(&source)), 120, 60);
 	// The body is drained to the cap whatever it holds, and the lookup always runs, so an invalid request costs what a valid one does.
 	let body = http_body_util::Limited::new(request.into_body(), 1024).collect().await.map(|body| body.to_bytes()).unwrap_or_default();
 	let map = match serde_json::from_slice::<Value>(&body) {Ok(Value::Object(map)) => Some(map), _ => None};
@@ -136,7 +141,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	let lookup = keys.token_lookup(&token.unwrap_or([0; 16]));
 	let found = app.db.lock().query_row(&format!("select {USER_COLUMNS}, token_lookup from users where token_lookup = ?"), [lookup.as_slice()], |row| Ok((UserRow::read(row)?, row.get::<_, Vec<u8>>(17)?))).optional().unwrap_or(None);
 	let stored = found.as_ref().map_or(vec![0u8; 32], |(_, stored)| stored.clone());
-	let Some((user, _)) = found.filter(|_| post && token.is_some() && crypto::equal(&stored, &lookup)) else {return app.not_found()};
+	let Some((user, _)) = found.filter(|_| post && admitted && token.is_some() && crypto::equal(&stored, &lookup)) else {return app.not_found()};
 	let Some(map) = map else {return app.not_found()};
 	let at = now();
 	let (signing, retired): (Vec<SigningEntry>, Vec<SigningEntry>) = {

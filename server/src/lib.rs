@@ -8,6 +8,7 @@ pub mod crypto;
 pub mod db;
 pub mod http;
 pub mod links;
+pub mod mirrors;
 pub mod nodecfg;
 pub mod node;
 pub mod openapi;
@@ -44,7 +45,7 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 	let setup_needed = db.lock().query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0)).map_err(|error| error.to_string())? == 0;
 	let token = setup_needed.then(|| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<20>()));
 	if let Some(token) = &token {println!("Setup token (one time): {token}\nPOST it with a username and password to {}/api/setup", cfg.prefix);}
-	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: AtomicBool::new(false), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default())}))
+	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: AtomicBool::new(false), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), mirrors_seen: Default::default()}))
 }
 
 /// What the upkeep loop remembers between passes.
