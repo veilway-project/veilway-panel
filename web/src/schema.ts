@@ -1659,11 +1659,6 @@ export interface components {
              */
             show_links_once: boolean;
             /**
-             * @description The provider's own terms and privacy policy, put in every document as two `support` links. An `https` URL, or empty for none.
-             * @default
-             */
-            terms_url: string;
-            /**
              * Format: uint32
              * @description Hours between publishing rounds of the static mirrors, 1 to 12.
              * @default 6
@@ -1674,6 +1669,11 @@ export interface components {
              * @default []
              */
             static_mirrors: string[];
+            /**
+             * @description The provider's own terms and privacy policy, put in every document as two `support` links. An `https` URL, or empty for none.
+             * @default
+             */
+            terms_url: string;
             /**
              * Format: uint32
              * @default 3600

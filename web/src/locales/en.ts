@@ -1441,7 +1441,7 @@ export const en = {
 	"preset.doneLead": "These changes to link {link} are applied:",
 	"preset.checkEntry": "Check it works: the link's card under Nodes shows Up within a minute. Then connect a device, pick the new exit if it is not the default, and open a site that is blocked from inside.",
 	"preset.checkExit": "Check it works: the link's card under Nodes shows Up once the entry's operator finishes their side. Its traffic counter grows when their users browse.",
-	"preset.noPublish": "Apps see the new exit the next time they connect. Profiles do not change, so there is nothing to publish."
+	"preset.noPublish": "Apps see the new exit the next time they connect. Profiles do not change, so there is nothing to publish.",
 	"settings.nav.static": "Static mirrors",
 	"settings.static": "Static mirrors",
 	"settings.staticLead": "Plain file hosting that holds a sealed copy of each device's document. Apps try it last, when the endpoint and the relay mirrors both fail. The host runs nothing of ours and never sees a token.",

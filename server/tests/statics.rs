@@ -30,7 +30,7 @@ impl Harness {
 		let app = build(cfg).unwrap();
 		let mut harness = Self {router: router(app.clone()), app, totp: Vec::new(), dir};
 		let token = harness.app.setup_token.lock().unwrap().clone().unwrap();
-		let answer = harness.call(Method::POST, "/p/api/setup", None, Some(json!({"token": token, "username": "owner", "password": PASSWORD})), "10.0.0.1").await;
+		let answer = harness.call(Method::POST, "/p/api/setup", None, Some(json!({"token": token, "username": "owner", "password": PASSWORD, "accepted_terms": true})), "10.0.0.1").await;
 		assert_eq!(answer.status, StatusCode::OK, "{}", String::from_utf8_lossy(&answer.body));
 		harness.totp = data_encoding::BASE32_NOPAD.decode(answer.json()["totp_secret"].as_str().unwrap().as_bytes()).unwrap();
 		harness
