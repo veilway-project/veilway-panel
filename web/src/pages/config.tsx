@@ -77,7 +77,7 @@ export function InboundsPage() {
 					<div className="vw-well p-note"><Icon name="info"/><p className="vw-small">{t("inbounds.rating")}</p></div>
 				</Glass>}
 				<p className="vw-muted vw-small">{t("config.reviewNote")}</p>
-				{xray.data && <XraySheet xray={xray.data} onAdd={() => setAdding(true)}/>}
+				{xray.data && <XraySheet xray={xray.data} onAdd={() => setAdding(true)} onChanged={xray.reload}/>}
 			</div>
 			{adding && <XrayForm onClose={() => setAdding(false)} onDone={() => { setAdding(false); xray.reload(); }}/>}
 		</div>
