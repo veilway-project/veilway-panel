@@ -1,7 +1,7 @@
 import {Banner, Button, Dialog, StateBlock, useToast} from "@veilway/ui";
 import {useEffect, useState, type ReactNode} from "react";
 import {api, ApiError, type Diff, type Report, type Running} from "../api.ts";
-import {ErrorNote, Issues, useLoad, useP} from "../kit.tsx";
+import {ErrorNote, Issues, useGuard, useLoad, useP} from "../kit.tsx";
 import {loadRunning} from "./config.tsx";
 
 export type NodeSection = "notices" | "dns" | "log" | "links" | "replay";
@@ -11,13 +11,13 @@ export const useRunning = () => useLoad(loadRunning, []);
 
 // The same two steps as the config pages: a dry run on the node, then the apply on the revision read. summary says what the change is in the reader's words, since the node's diff does not name these sections.
 export function SectionReview({section, running, value, summary, onClose, onDone}: {section: NodeSection, running: Running, value: unknown, summary: ReactNode, onClose: () => void, onDone: () => void}) {
-	const {t} = useP(), toast = useToast(), [answer, setAnswer] = useState<{valid: boolean, report: Report, diff: Diff | null} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [stale, setStale] = useState(false), [refused, setRefused] = useState<Report | null>(null);
+	const {t} = useP(), guard = useGuard(), toast = useToast(), [answer, setAnswer] = useState<{valid: boolean, report: Report, diff: Diff | null} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [stale, setStale] = useState(false), [refused, setRefused] = useState<Report | null>(null);
 	useEffect(() => { api("post", "/config/diff", {body: {document: {...running.document, [section]: value}}}).then(found => setAnswer(found as typeof answer), setError); }, []);
 	const apply = async () => {
 		setBusy(true);
 		setError(null);
 		try {
-			const done = await api("put", "/config/{section}", {params: {section}, body: {revision: running.revision, value}}) as {generation?: number};
+			const done = await guard(() => api("put", "/config/{section}", {params: {section}, body: {revision: running.revision, value}})) as {generation?: number};
 			toast({tone: "success", title: t("config.applied", {generation: done.generation ?? running.generation + 1})});
 			onDone();
 		} catch (failure) {

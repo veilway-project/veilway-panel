@@ -201,6 +201,7 @@ pub async fn confirm(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 	let mut entry = json!({"tag": meta.tag, "id": id_text(&offer.id), "direction": offer.direction.word(), "addresses": {"dialler": texts(&offer.dialler)}, "mtu": offer.mtu, "transport_secret": STANDARD.encode(paired.secret.expose())});
 	if !offer.listener.is_empty() {entry["addresses"]["listener"] = json!(texts(&offer.listener))}
 	let reverse = offer.direction == Direction::Reverse;
+	let _turn = app.node_lock.lock().await;
 	let (_, _, mut document) = nodecfg::running(&app).await?;
 	if let Some(inbound) = &meta.inbound {(entry["inbound"], entry["public_key"]) = (json!(inbound), json!(STANDARD.encode(paired.public_key)));}
 	if let Some(private) = &paired.private_key {

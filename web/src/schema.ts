@@ -150,7 +150,7 @@ export interface paths {
         };
         /** The config the node runs without its users, which the panel owns, secrets as the node's marker, and its revision. */
         get: operations["getConfig"];
-        /** Replaces the whole document: validated on the node, then applied with If-Match set to the revision given. The panel's users are put in. The answer is the node's. */
+        /** Replaces the whole document: validated on the node, then applied with If-Match set to the revision given. The panel's users are put in. No API token may change exits, outbounds, links, log, dns or notices here, and links, log, dns and notices need a recent re-authentication. The answer is the node's. */
         put: operations["putConfig"];
         post?: never;
         delete?: never;
@@ -219,7 +219,7 @@ export interface paths {
         };
         /** One of inbounds, outbounds, exits, routing, notices, dns, log, links and replay as the node runs it, with the revision to change it on. A section the document leaves out is null. For replay, read_at_start names what changes only at the node's next start. */
         get: operations["getConfigSection"];
-        /** Replaces one section and applies the result like putConfig. A secret left as the node's marker keeps its value. */
+        /** Replaces one section and applies the result like putConfig. A secret left as the node's marker keeps its value. links, log, dns and notices need a recent re-authentication, and no API token can change them. A null removes an optional section: dns, log, notices, replay and links. */
         put: operations["putConfigSection"];
         post?: never;
         delete?: never;
@@ -1064,7 +1064,7 @@ export interface paths {
         delete: operations["deleteXrayInbound"];
         options?: never;
         head?: never;
-        /** Changes an Xray inbound the panel made: port, listen address, certificate files, decoy, host, and for shadowsocks a new server key. Every user keeps their credential. Share links change when the port, the host or the server key do. Validated like createXrayInbound, applied on the node and audited. */
+        /** Changes an Xray inbound the panel made: port, listen address, certificate files, decoy, host, and for shadowsocks a new server key. Every user keeps their credential. Share links change when the port, the host or the server key do. A new server key needs a recent re-authentication and no API token can ask for one. Validated like createXrayInbound, applied on the node and audited. */
         patch: operations["editXrayInbound"];
         trace?: never;
     };

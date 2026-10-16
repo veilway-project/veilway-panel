@@ -167,7 +167,7 @@ pub async fn login(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	{
 		let db = app.db.lock();
 		db.execute("insert into sessions (id, admin_id, token_hash, csrf, created, last_seen, reauth_at, source, agent) values (?, ?, ?, ?, ?, ?, ?, ?, ?)", params![id, admin.id, crypto::sha256(&raw).as_slice(), csrf, now(), now(), now(), ctx.source, agent.0])?;
-		audit(&db, &format!("admin:{}", admin.username), &ctx.source, "login", "admin", &id);
+		audit(&db, &format!("admin:{}", admin.username), &ctx.source, "login", &format!("admin:{}", admin.id), &id);
 	}
 	let cookie = format!("{COOKIE_NAME}={}; Path={}; HttpOnly; SameSite=Strict; Max-Age={}{}", URL_SAFE_NO_PAD.encode(raw), app.cfg.prefix, crate::auth::ABSOLUTE, if app.cfg.secure_cookies {"; Secure"} else {""});
 	let mut response = json(StatusCode::OK, &LoggedIn {username: admin.username, session_id: id, csrf});
@@ -287,7 +287,7 @@ pub struct AdminsOut {pub admins: Vec<AdminRowOut>}
 
 pub async fn admins(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {
 	let db = app.db.lock();
-	let mut statement = db.prepare("select a.id, a.username, a.created, (select max(at) from audit where action = 'login' and actor = 'admin:' || a.username), a.totp_last_step > 0 from admins a order by a.id")?;
+	let mut statement = db.prepare("select a.id, a.username, a.created, (select max(at) from audit where action = 'login' and at >= a.created and (target = 'admin:' || a.id or (target = 'admin' and actor = 'admin:' || a.username))), a.totp_last_step > 0 from admins a order by a.id")?;
 	let admins = statement.query_map([], |row| Ok(AdminRowOut {id: row.get(0)?, username: row.get(1)?, created: row.get(2)?, last_login: row.get(3)?, totp_used: row.get(4)?, you: row.get::<_, i64>(0)? == ctx.admin_id}))?.collect::<Result<_, _>>()?;
 	ok(&AdminsOut {admins})
 }
@@ -298,7 +298,7 @@ pub async fn remove_admin(State(app): State<Arc<App>>, Extension(ctx): Extension
 	let db = app.db.lock();
 	let name: String = db.query_row("select username from admins where id = ?", [id], |row| row.get(0)).optional()?.ok_or_else(|| Failure::missing("admin"))?;
 	if db.query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0))? <= 1 {return Err(Failure::conflict("The last admin cannot be removed."))}
-	db.execute("delete from admins where id = ?", [id])?;
+	if db.execute("delete from admins where id = ? and username = ?", params![id, name])? == 0 {return Err(Failure::missing("admin"))}
 	audit(&db, &ctx.actor, &ctx.source, "admin.remove", &format!("admin:{name}"), "");
 	ok(&Done {ok: true})
 }
@@ -311,9 +311,10 @@ pub async fn reset_admin(State(app): State<Arc<App>>, Extension(ctx): Extension<
 	let hash = hash_password(input.new_password.clone()).await?;
 	let (sealed, record, shown) = new_totp(&app, &name)?;
 	let db = app.db.lock();
-	if db.execute("update admins set password_hash = ?, totp_secret = ?, totp_record = ?, totp_last_step = 0 where id = ?", params![hash, sealed, record, id])? == 0 {return Err(Failure::missing("admin"))}
+	if db.execute("update admins set password_hash = ?, totp_secret = ?, totp_record = ?, totp_last_step = 0 where id = ? and username = ?", params![hash, sealed, record, id, name])? == 0 {return Err(Failure::missing("admin"))}
 	let ended = db.execute("delete from sessions where admin_id = ?", [id])?;
-	audit(&db, &ctx.actor, &ctx.source, "admin.reset", &format!("admin:{name}"), &format!("password and code replaced, {ended} sessions ended"));
+	let revoked = db.execute("update api_tokens set revoked_at = ? where admin_id = ? and revoked_at is null", params![now(), id])?;
+	audit(&db, &ctx.actor, &ctx.source, "admin.reset", &format!("admin:{name}"), &format!("password and code replaced, {ended} sessions ended, {revoked} tokens revoked"));
 	ok(&shown)
 }
 

@@ -1,11 +1,12 @@
 //! The Xray add-on: its inbounds in the node's config, which the panel makes with a credential per user, and the users' share links. The credentials are sealed in the panel's database, which is what the links are made from, since the node only ever shows its marker.
-use crate::{admin::Done, app::App, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, nodecfg, subs::UserRow, users::{self, name_ok, NodeState}};
+use crate::{admin::Done, app::App, auth::reauthed, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, nodecfg, subs::UserRow, users::{self, name_ok, NodeState}};
 use axum::{extract::{Path, State}, http::StatusCode, response::Response, Extension};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::{params, OptionalExtension};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use ipnet::IpNet;
 use std::{net::IpAddr, sync::Arc};
 
 const PROTOCOLS: [&str; 3] = ["vless", "trojan", "shadowsocks"];
@@ -108,9 +109,17 @@ fn checked(protocol: &str, port: u16, listen: Option<&str>, cert: &Option<String
 	Ok((if listen.is_ipv6() {format!("[{listen}]:{port}")} else {format!("{listen}:{port}")}, tls, host))
 }
 
-/// A decoy is the origin of the operator's own web server, plain http on the node.
+/// The private and documentation ranges of the node's `GEOIP_PRIVATE`, where a decoy may sit.
+const PRIVATE: [&str; 13] = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4", "fc00::/7", "2001:db8::/32"];
+
+/// A decoy is the origin of the operator's own web server, plain http on the node: a loopback or private address, or localhost. The node warns about any other address, and the panel refuses it.
 fn decoy_ok(decoy: Option<String>) -> Result<String, Failure> {
-	decoy.filter(|decoy| decoy.len() <= 300 && decoy.starts_with("http://") && !decoy.contains(char::is_whitespace)).ok_or_else(|| Failure::bad("A vless or trojan inbound needs a decoy: the origin of your own web server (http://127.0.0.1:8080), which anything that is not a user's connection is handed to, so the port answers a stranger as a web server would. The node has no tls transport with one to take it from, so give `decoy`."))
+	let refused = || Failure::bad("A vless or trojan inbound needs a decoy: the origin of your own web server on this node (http://127.0.0.1:8080), which anything that is not a user's connection is handed to, so the port answers a stranger as a web server would. It must be a loopback or private address. The node has no tls transport with one to take it from, so give `decoy`.");
+	let text = decoy.filter(|decoy| decoy.len() <= 300 && decoy.starts_with("http://") && !decoy.contains(char::is_whitespace)).ok_or_else(refused)?;
+	let authority = text["http://".len()..].split('/').next().unwrap_or_default();
+	let host = match authority.strip_prefix('[') {Some(bracketed) => bracketed.split(']').next().unwrap_or_default(), None => authority.split(':').next().unwrap_or_default()};
+	let local = match host.parse::<IpAddr>() {Ok(ip) => ip.is_loopback() || PRIVATE.iter().any(|net| net.parse::<IpNet>().is_ok_and(|net| net.contains(&ip))), Err(_) => host == "localhost"};
+	if local {Ok(text)} else {Err(refused())}
 }
 
 /// Adds an inbound with a credential for every user the node carries, and applies the config on the node. The inbound answers on the server's address, which the native profiles use too, so it makes all of them easier to identify: every profile is capped at Detectable in the signed document.
@@ -120,6 +129,7 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	let (listen, tls, host) = checked(&input.protocol, input.port, input.listen.as_deref(), &input.cert, &input.key, input.host)?;
 	if app.keys.is_none() {return Err(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))}
 	if !addon(&app).await.0 {return Err(Failure::new(StatusCode::CONFLICT, "addon_missing", "The Xray add-on is not installed on the node. Run scripts/veilway.sh addon xray install on the server."))}
+	let _turn = app.node_lock.lock().await;
 	let (revision, _, mut document) = nodecfg::running(&app).await?;
 	let mut inbounds = document["xray"]["inbounds"].as_array().cloned().unwrap_or_default();
 	if inbounds.len() >= 16 {return Err(Failure::conflict("The node takes at most 16 Xray inbounds."))}
@@ -168,10 +178,12 @@ pub struct InboundEdit {
 
 /// Changes where an inbound the panel made listens, its certificate files, its decoy, its host and, for Shadowsocks, its server key. Every user keeps their credential, which `node::fill` puts back in from the panel's database. Share links change when the port, the host or the server key do.
 pub async fn edit(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(tag): Path<String>, Body(input): Body<InboundEdit>) -> Result<Response, Failure> {
-	let (protocol, old_host, old_key): (String, String, Option<Vec<u8>>) = app.db.lock().query_row("select protocol, host, server_key from xray_inbounds where tag = ?", [&tag], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?.ok_or_else(|| Failure::missing("Xray inbound the panel made"))?;
+	let (protocol, old_host): (String, String) = app.db.lock().query_row("select protocol, host from xray_inbounds where tag = ?", [&tag], |row| Ok((row.get(0)?, row.get(1)?))).optional()?.ok_or_else(|| Failure::missing("Xray inbound the panel made"))?;
 	let (listen, tls, host) = checked(&protocol, input.port, input.listen.as_deref(), &input.cert, &input.key, input.host)?;
 	if input.new_server_key && protocol != "shadowsocks" {return Err(Failure::bad("Only a shadowsocks inbound has a server key."))}
 	if input.new_server_key && app.keys.is_none() {return Err(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))}
+	if input.new_server_key {reauthed(&app, &ctx)?}
+	let _turn = app.node_lock.lock().await;
 	let (revision, _, mut document) = nodecfg::running(&app).await?;
 	let mut inbounds = document["xray"]["inbounds"].as_array().cloned().unwrap_or_default();
 	let node_default = node_decoy(&document);
@@ -179,28 +191,35 @@ pub async fn edit(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, P
 	let before = inbound["listen"].as_str().unwrap_or_default().to_string();
 	inbound["listen"] = json!(listen);
 	let object = inbound.as_object_mut().ok_or_else(|| Failure::internal("an Xray inbound is not an object"))?;
+	let (old_decoy, old_tls) = (object.get("decoy").and_then(Value::as_str).unwrap_or_default().to_string(), object.get("tls").cloned());
 	match tls {Some(tls) => {object.insert("tls".into(), tls);} None => {object.remove("tls");}}
 	if protocol != "shadowsocks" {
 		let decoy = decoy_ok(input.decoy.clone().or_else(|| object.get("decoy").and_then(Value::as_str).map(str::to_string)).or(node_default))?;
 		object.insert("decoy".into(), json!(decoy));
 	}
+	let new_key = input.new_server_key.then(key32);
+	if let Some(key) = &new_key {object.insert("server_key".into(), json!(key));}
+	let mut changed = vec![format!("listen {before} -> {listen}")];
+	if object.get("tls").cloned() != old_tls {changed.push("cert/key changed".into())}
+	let decoy = object.get("decoy").and_then(Value::as_str).unwrap_or_default().to_string();
+	if decoy != old_decoy {changed.push(format!("decoy {old_decoy:?} -> {decoy:?}"))}
+	if host != old_host {changed.push(format!("host {old_host:?} -> {host:?}"))}
+	if new_key.is_some() {changed.push("new server key".into())}
 	document["xray"]["inbounds"] = Value::Array(inbounds);
-	let new_key = input.new_server_key.then(|| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&tag), key32().as_bytes()))).flatten();
+	let sealed = new_key.as_ref().and_then(|key| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&tag), key.as_bytes())));
+	nodecfg::apply(&app, &ctx, document, &revision, &format!("xray:{tag}")).await?;
 	{
 		let db = app.db.lock();
 		db.execute("update xray_inbounds set host = ? where tag = ?", params![host, tag])?;
-		if let Some(sealed) = &new_key {db.execute("update xray_inbounds set server_key = ? where tag = ?", params![sealed, tag])?;}
+		if let Some(sealed) = &sealed {db.execute("update xray_inbounds set server_key = ? where tag = ?", params![sealed, tag])?;}
 	}
-	if let Err(error) = nodecfg::apply(&app, &ctx, document, &revision, &format!("xray:{tag}")).await {
-		app.db.lock().execute("update xray_inbounds set host = ?, server_key = ? where tag = ?", params![old_host, old_key, tag])?;
-		return Err(error)
-	}
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "xray.edit", &tag, &format!("listen {before} to {listen}{}", if new_key.is_some() {", new server key"} else {""}));
+	audit(&app.db.lock(), &ctx.actor, &ctx.source, "xray.edit", &tag, &changed.join(", "));
 	ok(&Done {ok: true})
 }
 
 /// Removes the inbound from the node's config and the panel's credentials for it.
 pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(tag): Path<String>) -> Result<Response, Failure> {
+	let _turn = app.node_lock.lock().await;
 	let (revision, _, mut document) = nodecfg::running(&app).await?;
 	let mut inbounds = document["xray"]["inbounds"].as_array().cloned().unwrap_or_default();
 	let before = inbounds.len();
