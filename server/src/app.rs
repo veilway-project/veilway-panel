@@ -109,11 +109,14 @@ pub struct Settings {
 	pub node_host: String,
 	/// What the endpoint answers to a request it will not take, instead of the config file's. Null keeps the file's.
 	pub not_found: Option<NotFound>,
+	/// Forwarders in front of the node. Each one adds its address to the candidates of the transports it carries when profiles are derived.
+	#[serde(deserialize_with = "crate::nodecfg::checked_relays")]
+	pub relays: Vec<crate::nodecfg::Relay>,
 }
 
 impl Default for Settings {
 	fn default() -> Self {
-		Self {provider_name: "Veilway".into(), endpoint_url: String::new(), endpoint_pins: Vec::new(), pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None}
+		Self {provider_name: "Veilway".into(), endpoint_url: String::new(), endpoint_pins: Vec::new(), pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new()}
 	}
 }
 

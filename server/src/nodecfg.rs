@@ -2,9 +2,10 @@
 use crate::{app::{App, Settings}, auth::reauthed, crypto::now, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
 use axum::{extract::{Path, State}, http::{header::CONTENT_TYPE, HeaderValue, StatusCode}, response::{IntoResponse, Response}, Extension};
 use schemars::JsonSchema;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::{BTreeMap, BTreeSet}, net::{IpAddr, SocketAddr}, sync::Arc};
+use veilway_proto::subscription::payload::{dialable, CANDIDATES_MAX};
 
 /// `veilway schema` of the core, kept next to the manifest. The node's own validation stays the authority: this is for an editor.
 const SCHEMA: &str = include_str!("../config.schema.json");
@@ -16,6 +17,48 @@ const OBJECTS: [&str; 4] = ["routing", "dns", "log", "replay"];
 const GUARDED: [&str; 4] = ["links", "log", "dns", "notices"];
 /// Sections the document may leave out, which a null removes.
 const OPTIONAL: [&str; 5] = ["dns", "log", "notices", "replay", "links"];
+/// The transports a relay can carry, by their type in a profile.
+const RELAYED: [&str; 5] = ["udp", "udp-obfs", "tls", "ws", "fronted"];
+/// Every transport keeps at least one candidate of its own, so this many relays always fit in the payload's 16.
+pub const RELAYS_MAX: usize = CANDIDATES_MAX - 1;
+
+/// A forwarder on another address that passes bytes to the node unchanged: nginx `stream`, a DNAT rule, HAProxy, or a content delivery network. TLS, the proofs and WireGuard run end to end through it, so it sees nothing and cannot pass for the node.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Relay {
+	/// 1 to 32 characters, unique among the relays.
+	pub name: String,
+	/// An IP address: apps dial candidates by address, never by name.
+	pub address: String,
+	/// The tags of the `veilway` inbounds it carries. Empty for all of them.
+	#[serde(default)]
+	pub inbounds: Vec<String>,
+	/// The transport types it carries: udp, udp-obfs, tls, ws, fronted. Empty for all of them.
+	#[serde(default)]
+	pub transports: Vec<String>,
+	/// The relay's port per transport type, where it is not the node's own port.
+	#[serde(default)]
+	pub ports: BTreeMap<String, u16>,
+	/// Put its candidates before the node's own address instead of after it.
+	#[serde(default)]
+	pub prefer: bool,
+	pub enabled: bool,
+}
+
+/// Reads `relays` and refuses what could not become a candidate, so a saved list is always one the profiles can carry.
+pub fn checked_relays<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Relay>, D::Error> {
+	let relays = Vec::<Relay>::deserialize(deserializer)?;
+	let fail = |text: String| Err(serde::de::Error::custom(text));
+	if relays.len() > RELAYS_MAX {return fail(format!("relays: at most {RELAYS_MAX}, so every transport keeps a candidate of its own within the {CANDIDATES_MAX} a profile may list."))}
+	for (index, relay) in relays.iter().enumerate() {
+		let name = relay.name.trim();
+		if name.is_empty() || name != relay.name || name.chars().count() > 32 || relays[..index].iter().any(|other| other.name == relay.name) {return fail(format!("relay {}: the name is 1 to 32 characters, without spaces around it, and no other relay has it.", index + 1))}
+		if !relay.address.parse::<IpAddr>().is_ok_and(dialable) {return fail(format!("relay {name}: the address is an IP address that apps may dial, not a host name and not a loopback, link-local or multicast address."))}
+		if relay.transports.len() > RELAYED.len() || relay.transports.iter().enumerate().any(|(i, kind)| !RELAYED.contains(&kind.as_str()) || relay.transports[..i].contains(kind)) || relay.ports.iter().any(|(kind, port)| !RELAYED.contains(&kind.as_str()) || *port == 0) {return fail(format!("relay {name}: transports and ports name udp, udp-obfs, tls, ws or fronted once each, and a port is 1 to 65535."))}
+		if relay.inbounds.len() > 16 || relay.inbounds.iter().enumerate().any(|(i, tag)| tag.is_empty() || tag.len() > 64 || relay.inbounds[..i].contains(tag)) {return fail(format!("relay {name}: inbounds is at most 16 different tags of 1 to 64 characters."))}
+	}
+	Ok(relays)
+}
 
 pub async fn schema() -> Response {(StatusCode::OK, [(CONTENT_TYPE, HeaderValue::from_static("application/json"))], SCHEMA).into_response()}
 
@@ -172,6 +215,21 @@ fn derive(settings: &Settings, document: &Value) -> Vec<Value> {
 		// The Xray inbounds answer on this server's address like the profiles do, so no profile may claim more than Detectable. An override can lower it further and not raise it.
 		if document["xray"]["inbounds"].as_array().is_some_and(|list| !list.is_empty()) {profile["rating_cap"] = json!("detectable");}
 		if let Some(edits) = settings.profile_overrides.get(&tag).and_then(Value::as_object) {for (key, value) in edits {profile[key] = value.clone();}}
+		// Relays come after the overrides, so a transport an override wrote gets them too. A relay copies the transport's own first candidate and changes only the address dialed: the app checks the same name, pins and keys.
+		for transport in profile["transports"].as_array_mut().into_iter().flatten() {
+			let (kind, list) = (transport["type"].as_str().unwrap_or_default().to_string(), if transport["endpoints"].is_array() {"endpoints"} else {"candidates"});
+			let Some(own) = transport[list].as_array().filter(|own| !own.is_empty()).cloned() else {continue};
+			let address_of = |entry: &Value| entry.as_str().or_else(|| entry["address"].as_str()).map(str::to_string);
+			let first_port = address_of(&own[0]).and_then(|address| address.rsplit_once(':')?.1.parse::<u16>().ok());
+			let mut carried: Vec<(bool, Value)> = settings.relays.iter().filter(|relay| relay.enabled && (relay.inbounds.is_empty() || relay.inbounds.contains(&tag)) && (relay.transports.is_empty() || relay.transports.contains(&kind))).filter_map(|relay| {
+				let address = SocketAddr::new(relay.address.parse().ok()?, relay.ports.get(&kind).copied().or(first_port)?).to_string();
+				Some((relay.prefer, if list == "endpoints" {json!(address)} else {let mut candidate = own[0].clone(); candidate["address"] = json!(address); candidate}))
+			}).collect();
+			carried.sort_by_key(|(prefer, _)| !prefer);
+			let mut seen: BTreeSet<String> = own.iter().filter_map(address_of).collect();
+			let picked: Vec<(bool, Value)> = carried.into_iter().filter(|(_, entry)| address_of(entry).is_some_and(|address| seen.insert(address))).take(CANDIDATES_MAX.saturating_sub(own.len())).collect();
+			transport[list] = picked.iter().filter(|(prefer, _)| *prefer).map(|(_, entry)| entry.clone()).chain(own).chain(picked.iter().filter(|(prefer, _)| !prefer).map(|(_, entry)| entry.clone())).collect();
+		}
 		let mut missing = Vec::new();
 		if profile.get("inbound_public_key").is_none() {missing.push("inbound_public_key")}
 		if host.is_empty() {missing.push("node_host")}
@@ -183,6 +241,19 @@ fn derive(settings: &Settings, document: &Value) -> Vec<Value> {
 pub async fn derived_profiles(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let (revision, _, document) = running(&app).await?;
 	ok(&json!({"revision": revision, "templates": derive(&app.settings(), &document)}))
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewIn {
+	#[serde(deserialize_with = "checked_relays")]
+	pub relays: Vec<Relay>,
+}
+
+/// The templates as they would be with these relays instead of the saved ones. Nothing is saved.
+pub async fn preview_profiles(State(app): State<Arc<App>>, Body(input): Body<PreviewIn>) -> Result<Response, Failure> {
+	let (revision, _, document) = running(&app).await?;
+	ok(&json!({"revision": revision, "templates": derive(&Settings {relays: input.relays, ..app.settings()}, &document)}))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -213,4 +284,55 @@ pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Exten
 	app.save_settings(&settings);
 	audit(&app.db.lock(), &ctx.actor, &ctx.source, "settings.update", "settings", &format!("profiles changed at {}", now()));
 	ok(&json!({"profiles": settings.profiles}))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn document() -> Value {json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "udp", "listen": "0.0.0.0:51820"}, {"type": "tls", "listen": "0.0.0.0:443", "decoy": "127.0.0.1:8443", "path": "/a-long-enough-path"}]}, {"tag": "Other", "type": "veilway", "address": ["10.67.0.1/24"], "transports": [{"type": "udp-obfs", "listen": "0.0.0.0:51821"}]}]})}
+
+	fn relay(extra: Value) -> Relay {
+		let mut relay = json!({"name": "edge", "address": "198.51.100.7", "enabled": true});
+		relay.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+		serde_json::from_value(relay).unwrap()
+	}
+
+	fn derived(relays: Vec<Relay>) -> Vec<Value> {
+		let mut settings = Settings {node_host: "192.0.2.10".into(), relays, ..Settings::default()};
+		settings.profile_overrides.insert("Main".into(), json!({"transport_public_key": "key"}));
+		derive(&settings, &document()).into_iter().map(|template| template["profile"]["transports"].clone()).collect()
+	}
+
+	#[test]
+	fn relays_add_candidates_to_the_transports_they_carry() {
+		assert_eq!(derived(vec![])[0][0]["endpoints"], json!(["192.0.2.10:51820"]));
+		let all = derived(vec![relay(json!({}))]);
+		assert_eq!((all[0][0]["endpoints"].clone(), all[1][0]["endpoints"].clone()), (json!(["192.0.2.10:51820", "198.51.100.7:51820"]), json!(["192.0.2.10:51821", "198.51.100.7:51821"])));
+		assert_eq!(all[0][1]["candidates"], json!([{"address": "192.0.2.10:443", "sni": "192.0.2.10", "host": "192.0.2.10"}, {"address": "198.51.100.7:443", "sni": "192.0.2.10", "host": "192.0.2.10"}]), "the name the app checks stays the node's");
+		let matched = derived(vec![relay(json!({"inbounds": ["Main"], "transports": ["tls"], "ports": {"tls": 8443}}))]);
+		assert_eq!((matched[0][0]["endpoints"].as_array().unwrap().len(), matched[0][1]["candidates"][1]["address"].clone(), matched[1][0]["endpoints"].as_array().unwrap().len()), (1, json!("198.51.100.7:8443"), 1));
+		let off = derived(vec![relay(json!({"enabled": false})), relay(json!({"name": "none", "inbounds": ["Missing"]}))]);
+		assert_eq!((off[0][0]["endpoints"].as_array().unwrap().len(), off[1][0]["endpoints"].as_array().unwrap().len()), (1, 1));
+	}
+
+	#[test]
+	fn preferred_relays_go_first_and_the_list_stays_within_the_cap() {
+		let ordered = derived(vec![relay(json!({"name": "late"})), relay(json!({"name": "early", "address": "2001:db8::7", "prefer": true})), relay(json!({"name": "twin"}))]);
+		assert_eq!(ordered[0][0]["endpoints"], json!(["[2001:db8::7]:51820", "192.0.2.10:51820", "198.51.100.7:51820"]), "a relay on an address already listed adds nothing");
+		let many: Vec<Relay> = (0..RELAYS_MAX).map(|i| relay(json!({"name": format!("r{i}"), "address": format!("198.51.100.{}", i + 1), "prefer": i == 3}))).collect();
+		let mut settings = Settings {node_host: "192.0.2.10".into(), relays: many, ..Settings::default()};
+		settings.profile_overrides.insert("Main".into(), json!({"transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820", "192.0.2.11:51820"]}]}));
+		let endpoints = derive(&settings, &document())[0]["profile"]["transports"][0]["endpoints"].as_array().unwrap().clone();
+		assert_eq!((endpoints.len(), endpoints[0].clone(), endpoints[1].clone(), endpoints[2].clone()), (CANDIDATES_MAX, json!("198.51.100.4:51820"), json!("192.0.2.10:51820"), json!("192.0.2.11:51820")), "the node's own are kept and the preferred relay leads");
+	}
+
+	#[test]
+	fn relays_are_validated_when_settings_are_read() {
+		let read = |relays: Value| serde_json::from_value::<Settings>(json!({"relays": relays})).map(|settings| settings.relays.len()).map_err(|error| error.to_string());
+		assert_eq!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["tls"], "ports": {"tls": 443}}])), Ok(1));
+		for bad in [json!({"name": "a", "address": "relay.example.org", "enabled": true}), json!({"name": "a", "address": "127.0.0.1", "enabled": true}), json!({"name": " a", "address": "198.51.100.7", "enabled": true}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["quic"]}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "ports": {"udp": 0}}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["udp", "udp"]}), json!({"name": "a", "address": "198.51.100.7"})] {assert!(read(json!([bad])).is_err(), "{bad}")}
+		assert!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true}, {"name": "a", "address": "198.51.100.8", "enabled": true}])).is_err(), "names are unique");
+		assert!(read(json!((0..=RELAYS_MAX).map(|i| json!({"name": format!("r{i}"), "address": "198.51.100.7", "enabled": true})).collect::<Vec<_>>())).unwrap_err().contains("at most 15"));
+	}
 }

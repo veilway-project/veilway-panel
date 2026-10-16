@@ -1141,6 +1141,21 @@
         ],
         "type": "object"
       },
+      "PreviewIn": {
+        "additionalProperties": false,
+        "properties": {
+          "relays": {
+            "items": {
+              "$ref": "#/components/schemas/Relay"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "relays"
+        ],
+        "type": "object"
+      },
       "Reauth": {
         "additionalProperties": false,
         "properties": {
@@ -1155,6 +1170,61 @@
         },
         "required": [
           "password"
+        ],
+        "type": "object"
+      },
+      "Relay": {
+        "additionalProperties": false,
+        "description": "A forwarder on another address that passes bytes to the node unchanged: nginx `stream`, a DNAT rule, HAProxy, or a content delivery network. TLS, the proofs and WireGuard run end to end through it, so it sees nothing and cannot pass for the node.",
+        "properties": {
+          "address": {
+            "description": "An IP address: apps dial candidates by address, never by name.",
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "inbounds": {
+            "default": [],
+            "description": "The tags of the `veilway` inbounds it carries. Empty for all of them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "1 to 32 characters, unique among the relays.",
+            "type": "string"
+          },
+          "ports": {
+            "additionalProperties": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "default": {},
+            "description": "The relay's port per transport type, where it is not the node's own port.",
+            "type": "object"
+          },
+          "prefer": {
+            "default": false,
+            "description": "Put its candidates before the node's own address instead of after it.",
+            "type": "boolean"
+          },
+          "transports": {
+            "default": [],
+            "description": "The transport types it carries: udp, udp-obfs, tls, ws, fronted. Empty for all of them.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "address",
+          "enabled"
         ],
         "type": "object"
       },
@@ -1410,6 +1480,14 @@
             "default": [],
             "description": "Other endpoints of the same subscription, put in every document as `refresh_urls`. A string, or an object with `url` and `pins`.",
             "items": true,
+            "type": "array"
+          },
+          "relays": {
+            "default": [],
+            "description": "Forwarders in front of the node. Each one adds its address to the candidates of the transports it carries when profiles are derived.",
+            "items": {
+              "$ref": "#/components/schemas/Relay"
+            },
             "type": "array"
           },
           "show_links_once": {
@@ -4289,6 +4367,74 @@
         },
         "summary": "Sets the members that replace the derived ones for an inbound. An empty object clears them.",
         "x-access": "full"
+      }
+    },
+    "/profiles/preview": {
+      "post": {
+        "operationId": "previewProfiles",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": true
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The templates of derivedProfiles as they would be with the relays given instead of the saved ones. Nothing is saved.",
+        "x-access": "read"
       }
     },
     "/profiles/publish": {
