@@ -1,5 +1,6 @@
 //! Admin accounts: setup, login, TOTP, sessions, API tokens, the audit log, settings, signing keys and the node.
 use crate::{app::{bucket, App, Settings, SigningEntry}, auth::{Agent, COOKIE_NAME, TOKEN_PREFIX}, crypto::{self, now, Keys}, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
+use veilway_proto::subscription::{Url, URL_MAX};
 use argon2::{password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
 use axum::{extract::{Path, Query, State}, http::{header::SET_COOKIE, HeaderName, HeaderValue, StatusCode}, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
@@ -90,12 +91,16 @@ pub fn complete_secrets(db: &Connection, keys: &Keys) {
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Setup {pub token: String, pub username: String, pub password: String}
+pub struct Setup {pub token: String, pub username: String, pub password: String, #[serde(default)] pub accepted_terms: bool}
+
+/// The version of the Veilway terms the operator accepts at setup, kept with the acceptance.
+const TERMS_VERSION: &str = "2026-10-16";
 
 pub async fn setup(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Setup>) -> Result<Response, Failure> {
 	if !app.limits.hit(&format!("setup:{}", bucket(&ctx.source)), 5, 900) {return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries."))}
 	let expected = app.setup_token.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 	if !expected.is_some_and(|expected| crypto::equal(expected.as_bytes(), input.token.as_bytes())) {return Err(Failure::new(StatusCode::FORBIDDEN, "bad_setup_token", "The setup token is wrong, or setup is done."))}
+	if !input.accepted_terms {return Err(Failure::bad("Accept the Veilway terms to set up the panel."))}
 	username_ok(&input.username)?;
 	password_ok(&input.password)?;
 	let hash = hash_password(input.password.clone()).await?;
@@ -104,7 +109,8 @@ pub async fn setup(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 		let db = app.db.lock();
 		if db.query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0))? > 0 {return Err(Failure::conflict("Setup is done."))}
 		db.execute("insert into admins (username, password_hash, totp_secret, totp_record, created) values (?, ?, ?, ?, ?)", params![input.username, hash, sealed, record, now()])?;
-		audit(&db, &format!("admin:{}", input.username), &ctx.source, "setup", "admin", "first admin created");
+		db.execute("insert or replace into settings (key, value) values ('terms_accepted', ?)", [serde_json::json!({"version": TERMS_VERSION, "accepted_at": now()}).to_string()])?;
+		audit(&db, &format!("admin:{}", input.username), &ctx.source, "setup", "admin", &format!("first admin created, terms {TERMS_VERSION} accepted"));
 	}
 	*app.setup_token.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 	ok(&shown)
@@ -423,6 +429,7 @@ pub async fn revoke_token(State(app): State<Arc<App>>, Extension(ctx): Extension
 pub async fn get_settings(State(app): State<Arc<App>>) -> Result<Response, Failure> {ok(&app.settings())}
 
 pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Settings>) -> Result<Response, Failure> {
+	if [&input.terms_url, &input.privacy_url].iter().any(|url| !url.is_empty() && Url::parse(url, URL_MAX, true, true).is_none()) {return Err(Failure::bad("terms_url and privacy_url are https URLs of at most 512 characters, or empty."))}
 	if input.pool_v4.parse::<Ipv4Net>().map_or(true, |pool| pool.prefix_len() < 16 || pool.prefix_len() > 30) {return Err(Failure::bad("pool_v4 is an IPv4 network from /16 to /30."))}
 	if !input.endpoint_url.is_empty() && !(input.endpoint_url.starts_with("https://") && input.endpoint_url.len() <= 256 && !input.endpoint_url.contains('#')) {return Err(Failure::bad("endpoint_url is an https URL of at most 256 characters, without a fragment."))}
 	if input.endpoint_pins.len() > 2 || input.endpoint_pins.iter().any(|pin| STANDARD.decode(pin).map_or(true, |bytes| bytes.len() != 32)) {return Err(Failure::bad("endpoint_pins is at most two SHA-256 pins in standard base64."))}

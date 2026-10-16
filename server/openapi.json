@@ -1368,6 +1368,10 @@
             "description": "The address pool devices get their tunnel address from, an IPv4 network.",
             "type": "string"
           },
+          "privacy_url": {
+            "default": "",
+            "type": "string"
+          },
           "profile_overrides": {
             "additionalProperties": true,
             "default": {},
@@ -1395,6 +1399,11 @@
             "description": "Store no copy of a token: a link is shown at creation and reset, and never again.",
             "type": "boolean"
           },
+          "terms_url": {
+            "default": "",
+            "description": "The provider's own terms and privacy policy, put in every document as two `support` links. An `https` URL, or empty for none.",
+            "type": "string"
+          },
           "update_interval": {
             "default": 3600,
             "format": "uint32",
@@ -1407,6 +1416,10 @@
       "Setup": {
         "additionalProperties": false,
         "properties": {
+          "accepted_terms": {
+            "default": false,
+            "type": "boolean"
+          },
           "password": {
             "type": "string"
           },

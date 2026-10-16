@@ -88,6 +88,9 @@ impl Signing {
 #[serde(deny_unknown_fields, default)]
 pub struct Settings {
 	pub provider_name: String,
+	/// The provider's own terms and privacy policy, put in every document as two `support` links. An `https` URL, or empty for none.
+	pub terms_url: String,
+	pub privacy_url: String,
 	/// The public `https` URL of the subscription endpoint, with the path the web server forwards to the panel's `sub_path`. No fragment.
 	pub endpoint_url: String,
 	/// SHA-256 of the SubjectPublicKeyInfo of the endpoint's certificate, standard base64, when it has no certificate from an authority. The first is put in links. Empty for a chain-validated endpoint.
@@ -113,7 +116,7 @@ pub struct Settings {
 
 impl Default for Settings {
 	fn default() -> Self {
-		Self {provider_name: "Veilway".into(), endpoint_url: String::new(), endpoint_pins: Vec::new(), pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None}
+		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), endpoint_url: String::new(), endpoint_pins: Vec::new(), pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None}
 	}
 }
 
