@@ -1164,6 +1164,7 @@ async fn a_mirror_header_names_the_source_and_anything_else_is_unknown() {
 	assert_eq!(send(Some("v1;relay".into()), 1).await.shape(), unknown, "a short header");
 	assert!(matches!(opened(&send(None, 1).await, &[key]), Payload::Subscription(_)), "no header is an ordinary request");
 	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 1);
+}
 
 async fn rebuilt(h: &Harness, two_step: &str) -> Harness {
 	let mut cfg = h.app.cfg.clone();
