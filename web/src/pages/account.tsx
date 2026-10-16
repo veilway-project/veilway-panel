@@ -1,6 +1,7 @@
 import {Button, DataTable, Glass, List, ListRow, Segmented, StateBlock, Tabs, TextField, useToast} from "@veilway/ui";
 import {useState} from "react";
 import {api, type AuditRow, type Totp} from "../api.ts";
+import {BackupTab} from "./backup.tsx";
 import {ErrorNote, PageHead, TotpShown, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 
 export type Prefs = {locale: "en" | "fa", scheme: "system" | "dark" | "light"};
@@ -13,6 +14,7 @@ export function AccountPage({username, prefs, onPrefs, onLogout}: {username: str
 			{id: "sessions", label: t("account.tab.sessions"), content: <Sessions/>},
 			{id: "security", label: t("account.tab.security"), content: <Security/>},
 			{id: "audit", label: t("account.tab.audit"), content: <Audit/>},
+			{id: "backup", label: t("account.tab.backup"), content: <BackupTab/>},
 			{id: "display", label: t("account.tab.display"), content: <Glass className="p-panel p-form">
 				<div className="p-field-row"><span className="vw-label">{t("display.scheme")}</span><Segmented label={t("display.scheme")} value={prefs.scheme} onChange={scheme => onPrefs({...prefs, scheme: scheme as Prefs["scheme"]})} options={[{value: "system", label: t("display.system")}, {value: "dark", label: t("display.dark")}, {value: "light", label: t("display.light")}]}/></div>
 				<div className="p-field-row"><span className="vw-label">{t("display.language")}</span><Segmented label={t("display.language")} value={prefs.locale} onChange={locale => onPrefs({...prefs, locale: locale as Prefs["locale"]})} options={[{value: "en", label: "English"}, {value: "fa", label: "فارسی"}]}/></div>

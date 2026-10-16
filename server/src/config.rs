@@ -41,11 +41,15 @@ pub struct Config {
 	pub secure_cookies: bool,
 	/// Set when no proxy is in front of the panel. Without one, trusted_proxies stays empty and every request counts from the socket.
 	pub direct: bool,
+	/// Asks GitHub every six hours whether a newer panel exists. Nothing else about this panel is sent.
+	pub update_check: bool,
+	/// Where an update request is written. The folder is made by `veilway.sh`, belongs to root and is writable by the panel's group only.
+	pub update_request: PathBuf,
 }
 
 impl Default for Config {
 	fn default() -> Self {
-		Self {listen: "127.0.0.1:8480".parse().unwrap(), prefix: "/panel".into(), sub_path: "/sub".into(), database: "panel.db".into(), keys: "panel.keys".into(), signing: "signing.keys".into(), node_socket: "/run/veilway/control.sock".into(), allowed_hosts: Vec::new(), trusted_proxies: Vec::new(), not_found: NotFound::default(), secure_cookies: true, direct: false}
+		Self {listen: "127.0.0.1:8480".parse().unwrap(), prefix: "/panel".into(), sub_path: "/sub".into(), database: "panel.db".into(), keys: "panel.keys".into(), signing: "signing.keys".into(), node_socket: "/run/veilway/control.sock".into(), allowed_hosts: Vec::new(), trusted_proxies: Vec::new(), not_found: NotFound::default(), secure_cookies: true, direct: false, update_check: true, update_request: "/var/lib/veilway-panel-update/request".into()}
 	}
 }
 

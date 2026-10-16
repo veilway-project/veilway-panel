@@ -37,4 +37,5 @@ USER 65532:65532
 WORKDIR /var/lib/veilway-panel
 VOLUME ["/etc/veilway-panel", "/var/lib/veilway-panel"]
 LABEL org.opencontainers.image.licenses="Apache-2.0"
+# Run with a restart policy (unless-stopped). A restore from a backup ends the process with exit code 75 on purpose, and the policy starts it again on the restored files.
 ENTRYPOINT ["veilway-panel", "run", "--config", "/etc/veilway-panel/panel.json"]

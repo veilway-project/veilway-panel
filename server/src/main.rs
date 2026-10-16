@@ -1,6 +1,6 @@
-use std::{env, net::SocketAddr, process::ExitCode};
+use std::{env, net::SocketAddr, process::ExitCode, time::Duration};
 use tracing_subscriber::EnvFilter;
-use veilway_panel::{build, config::Config, openapi, router, spawn_upkeep};
+use veilway_panel::{build, config::Config, openapi, router, spawn_upkeep, updater};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -13,11 +13,18 @@ async fn main() -> ExitCode {
 			let result = async {
 				let app = build(Config::load(path)?)?;
 				spawn_upkeep(app.clone());
+				updater::spawn_checks(app.clone());
 				let listener = tokio::net::TcpListener::bind(app.cfg.listen).await.map_err(|error| format!("{}: {error}", app.cfg.listen))?;
 				tracing::info!("listening on {} under {}", app.cfg.listen, app.cfg.prefix);
-				axum::serve(listener, router(app).into_make_service_with_connect_info::<SocketAddr>()).await.map_err(|error| error.to_string())
+				let stop = app.clone();
+				axum::serve(listener, router(app).into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(async move {
+					stop.restart.notified().await;
+					tracing::info!("a backup was restored: stopping so the service manager starts the panel on the restored files");
+					tokio::spawn(async {tokio::time::sleep(Duration::from_secs(5)).await; std::process::exit(75)});
+				}).await.map_err(|error| error.to_string())
 			}.await;
-			match result {Ok(()) => ExitCode::SUCCESS, Err(error) => {eprintln!("veilway-panel: {error}"); ExitCode::FAILURE}}
+			// The server only stops by itself after a restore, and a failure code is what an on-failure service restart answers to.
+			match result {Ok(()) => ExitCode::from(75), Err(error) => {eprintln!("veilway-panel: {error}"); ExitCode::FAILURE}}
 		}
 		_ => {eprintln!("usage: veilway-panel run [--config panel.json] | openapi"); ExitCode::from(2)}
 	}

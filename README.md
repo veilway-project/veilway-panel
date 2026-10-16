@@ -72,6 +72,8 @@ After a change to a route or a type, regenerate `server/openapi.json` with the s
 
 The install script is the recommended way; Docker is an option. Images for linux/amd64 and linux/arm64 are published to `ghcr.io/veilway-project/veilway-panel` on each `v*` tag. The image runs as a non-root user, and its config and data live in volumes. The panel listens on `127.0.0.1` only, so it needs a web server with TLS in front of it, and it needs the node's control socket.
 
+Run the container with a restart policy, `--restart unless-stopped` or `restart: unless-stopped` in compose. After a restore from a backup the panel stops by itself with exit code 75 so that the restart policy starts it on the restored files. Without a policy it stays stopped. The update button does not work in a container: pull the new image instead.
+
 [deploy/compose](https://github.com/veilway-project/veilway/tree/main/deploy/compose) in the core repo runs the node and the panel together, with the steps for the config, the socket volume and the web server.
 
 ## The API

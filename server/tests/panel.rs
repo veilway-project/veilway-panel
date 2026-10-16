@@ -763,3 +763,121 @@ async fn xray_inbounds_keep_a_credential_per_user_and_make_share_links() {
 	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "xray.rotate"));
 	assert!(!String::from_utf8_lossy(&audit.body).contains(&server));
 }
+
+#[tokio::test]
+async fn a_backup_is_downloaded_and_restored_with_the_panel_restarting_on_the_old_state() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	h.user(&session, "alice", json!({})).await;
+	let full = h.token(&session, "full", json!({})).await;
+	for (path, body) in [("/p/api/backup/download", json!({"passphrase": "a long enough passphrase"})), ("/p/api/backup/restore", json!({"file": "", "passphrase": "a long enough passphrase"}))] {
+		assert_eq!(h.bearer(Method::POST, path, &full, Some(body), "10.1.1.1").await.status, StatusCode::FORBIDDEN, "{path}");
+	}
+	assert_eq!(h.call(Method::POST, "/p/api/backup/download", Some(&session), Some(json!({"passphrase": "short"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	let answer = h.call(Method::POST, "/p/api/backup/download", Some(&session), Some(json!({"passphrase": "a long enough passphrase"})), "10.0.0.1").await;
+	assert_eq!(answer.status, StatusCode::OK, "{}", String::from_utf8_lossy(&answer.body));
+	let file = answer.json()["file"].as_str().unwrap().to_string();
+	assert!(answer.json()["filename"].as_str().unwrap().ends_with(".vwbackup"));
+	assert!(!STANDARD.decode(&file).unwrap().windows(5).any(|window| window == b"alice"));
+	h.user(&session, "late", json!({})).await;
+	let restore = |file: String, passphrase: &'static str| json!({"file": file, "passphrase": passphrase});
+	let wrong = h.call(Method::POST, "/p/api/backup/restore", Some(&session), Some(restore(file.clone(), "another long passphrase")), "10.0.0.1").await;
+	assert_eq!(wrong.status, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&wrong.body));
+	let garbage = h.call(Method::POST, "/p/api/backup/restore", Some(&session), Some(restore(STANDARD.encode([1u8; 300]), "a long enough passphrase")), "10.0.0.1").await;
+	assert_eq!(garbage.status, StatusCode::BAD_REQUEST);
+	let newer = h.dir.join("newer.db");
+	h.app.db.lock().execute("vacuum into ?", [newer.to_string_lossy().to_string()]).unwrap();
+	rusqlite::Connection::open(&newer).unwrap().pragma_update(None, "user_version", 99).unwrap();
+	let content = veilway_panel::backup::pack([&std::fs::read(&newer).unwrap(), &std::fs::read(&h.app.cfg.keys).unwrap(), &std::fs::read(&h.app.cfg.signing).unwrap()]);
+	let refused = h.call(Method::POST, "/p/api/backup/restore", Some(&session), Some(restore(STANDARD.encode(veilway_panel::backup::seal("a long enough passphrase", &content).unwrap()), "a long enough passphrase")), "10.0.0.1").await;
+	assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+	assert!(refused.json()["error"]["message"].as_str().unwrap().contains("newer"));
+	assert!(h.app.db.lock().query_row("select count(*) from users where name = 'late'", [], |row| row.get::<_, i64>(0)).unwrap() == 1);
+	let done = h.call(Method::POST, "/p/api/backup/restore", Some(&session), Some(restore(file, "a long enough passphrase")), "10.0.0.1").await;
+	assert_eq!(done.status, StatusCode::OK, "{}", String::from_utf8_lossy(&done.body));
+	tokio::time::timeout(std::time::Duration::from_secs(2), h.app.restart.notified()).await.expect("the server is told to restart");
+	assert!(h.app.restoring.load(Ordering::SeqCst));
+	assert_eq!(h.call(Method::POST, "/p/api/users", Some(&session), Some(json!({"name": "after"})), "10.0.0.1").await.status, StatusCode::SERVICE_UNAVAILABLE);
+	assert_eq!(h.call(Method::GET, "/p/api/status", None, None, "10.0.0.1").await.status, StatusCode::OK);
+	let saved = h.dir.join(done.json()["saved_as"].as_str().unwrap());
+	assert!(saved.join("panel.db").exists() && saved.join("panel.keys").exists() && saved.join("signing.keys").exists());
+	let reopened = build(h.app.cfg.clone()).unwrap();
+	let names: Vec<String> = reopened.db.lock().prepare("select name from users").unwrap().query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+	assert_eq!(names, ["alice"]);
+	assert_eq!(reopened.db.lock().query_row("select count(*) from sessions", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+	assert!(reopened.db.lock().query_row("select count(*) from audit where action = 'backup.restore'", [], |row| row.get::<_, i64>(0)).unwrap() >= 1);
+	assert!(reopened.keys.is_some());
+	assert_eq!(reopened.db.lock().query_row("select count(*) from api_tokens where revoked_at is null", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+	assert_ne!(reopened.start_id, h.app.start_id);
+	assert!(!veilway_panel::backup::marker(&h.app.cfg).exists());
+	assert_eq!(reopened.settings().provider_name, "Test Net");
+}
+
+#[tokio::test]
+async fn an_update_is_requested_with_a_file_that_holds_only_the_word_panel() {
+	let h = Harness::with_config(None, |cfg| {
+		let folder = std::env::temp_dir().join(format!("vwupdate-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
+		std::fs::create_dir_all(&folder).unwrap();
+		cfg.update_request = folder.join("request");
+	}).await;
+	let session = h.login("10.0.0.1").await;
+	let full = h.token(&session, "full", json!({})).await;
+	let folder = h.app.cfg.update_request.parent().unwrap().to_path_buf();
+	let info = h.call(Method::GET, "/p/api/update", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((info["latest"].is_null(), info["can_update"].clone(), info["updating"].clone()), (true, json!(true), json!(false)));
+	assert_eq!(h.call(Method::POST, "/p/api/update/request", Some(&session), None, "10.0.0.1").await.status, StatusCode::CONFLICT);
+	assert!(!h.app.cfg.update_request.exists());
+	h.app.update.lock().unwrap().found = Some(veilway_panel::updater::Found {version: "9.9.9".into(), notes_url: "https://github.com/veilway-project/veilway-panel/releases/tag/v9.9.9".into()});
+	assert_eq!(h.bearer(Method::POST, "/p/api/update/request", &full, None, "10.1.1.1").await.status, StatusCode::FORBIDDEN);
+	h.app.db.lock().execute("update sessions set reauth_at = 0", []).unwrap();
+	assert_eq!(h.call(Method::POST, "/p/api/update/request", Some(&session), None, "10.0.0.1").await.json()["error"]["code"], "reauth_required");
+	h.app.db.lock().execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap();
+	std::fs::write(h.app.cfg.update_request.with_extension("tmp"), b"stale").unwrap();
+	let made = h.call(Method::POST, "/p/api/update/request", Some(&session), None, "10.0.0.1").await;
+	assert_eq!(made.status, StatusCode::OK, "{}", String::from_utf8_lossy(&made.body));
+	assert_eq!(std::fs::read(&h.app.cfg.update_request).unwrap(), b"panel");
+	assert!(!h.app.cfg.update_request.with_extension("tmp").exists());
+	assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&h.app.cfg.update_request).unwrap().permissions()) & 0o777, 0o600);
+	assert_eq!(h.call(Method::GET, "/p/api/update", Some(&session), None, "10.0.0.1").await.json()["updating"], true);
+	assert_eq!(h.call(Method::POST, "/p/api/update/request", Some(&session), None, "10.0.0.1").await.status, StatusCode::CONFLICT);
+	let audit: i64 = h.app.db.lock().query_row("select count(*) from audit where action = 'update.request' and detail = 'from ' || ? || ' to 9.9.9'", [veilway_panel::updater::CURRENT], |row| row.get(0)).unwrap();
+	assert_eq!(audit, 1);
+	std::fs::remove_dir_all(folder).unwrap();
+	h.app.update.lock().unwrap().requested_at = None;
+	assert_eq!(h.call(Method::POST, "/p/api/update/request", Some(&session), None, "10.0.0.1").await.status, StatusCode::CONFLICT);
+	assert_eq!(h.call(Method::GET, "/p/api/update", Some(&session), None, "10.0.0.1").await.json()["can_update"], false);
+}
+
+#[tokio::test]
+async fn a_restore_cut_short_is_finished_at_the_next_start() {
+	let h = Harness::new().await;
+	let cfg = h.app.cfg.clone();
+	let staged = |path: &std::path::Path| veilway_panel::backup::with_suffix(path, ".restore");
+	std::fs::copy(&cfg.keys, staged(&cfg.keys)).unwrap();
+	std::fs::write(&cfg.keys, [0u8; 5]).unwrap();
+	std::fs::copy(&cfg.signing, staged(&cfg.signing)).unwrap();
+	std::fs::write(veilway_panel::backup::marker(&cfg), b"").unwrap();
+	h.app.db.lock().execute("vacuum into ?", [staged(&cfg.database).to_string_lossy().to_string()]).unwrap();
+	let reopened = build(cfg.clone()).unwrap();
+	assert!(reopened.keys.is_some());
+	assert_eq!(std::fs::read(&cfg.keys).unwrap().len(), 96);
+	assert!(!veilway_panel::backup::marker(&cfg).exists() && !staged(&cfg.database).exists() && !staged(&cfg.keys).exists());
+}
+
+#[tokio::test]
+#[ignore = "measures memory: cargo test --test panel restore_memory -- --ignored --nocapture"]
+async fn restore_memory_at_the_cap() {
+	let peak = || std::fs::read_to_string("/proc/self/status").unwrap().lines().find(|line| line.starts_with("VmHWM")).unwrap().to_string();
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.app.db.lock().execute("insert into settings (key, value) values ('filler', randomblob(30000000))", []).unwrap();
+	println!("before download: {}", peak());
+	let made = h.call(Method::POST, "/p/api/backup/download", Some(&session), Some(json!({"passphrase": "a long enough passphrase"})), "10.0.0.1").await;
+	assert_eq!(made.status, StatusCode::OK, "{}", String::from_utf8_lossy(&made.body));
+	let file = made.json()["file"].as_str().unwrap().to_string();
+	println!("backup file {} bytes, after download: {}", STANDARD.decode(&file).unwrap().len(), peak());
+	let done = h.call(Method::POST, "/p/api/backup/restore", Some(&session), Some(json!({"file": file, "passphrase": "a long enough passphrase"})), "10.0.0.1").await;
+	assert_eq!(done.status, StatusCode::OK, "{}", String::from_utf8_lossy(&done.body));
+	println!("after restore: {}", peak());
+}

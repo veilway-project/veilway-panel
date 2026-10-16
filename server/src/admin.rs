@@ -51,10 +51,11 @@ fn username_ok(name: &str) -> Result<(), Failure> {
 fn wrong() -> Failure {Failure::new(StatusCode::UNAUTHORIZED, "invalid_credentials", "Wrong username, password or code.")}
 
 #[derive(Serialize, JsonSchema)]
-pub struct Status {pub setup_needed: bool}
+pub struct Status {pub setup_needed: bool, /// Different on every start of the server.
+	pub start_id: String}
 
 pub async fn status(State(app): State<Arc<App>>) -> Result<Response, Failure> {
-	ok(&Status {setup_needed: app.db.lock().query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0))? == 0})
+	ok(&Status {setup_needed: app.db.lock().query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0))? == 0, start_id: app.start_id.clone()})
 }
 
 #[derive(Serialize, JsonSchema)]

@@ -3,7 +3,7 @@ import {useEffect, useMemo, useState} from "react";
 import {api, session, type Settings} from "./api.ts";
 import {en} from "./locales/en.ts";
 import {fa} from "./locales/fa.ts";
-import {GuardProvider, PageHead, useLoad, useP, useSay} from "./kit.tsx";
+import {ErrorNote, GuardProvider, PageHead, useGuard, useLoad, useP, useSay} from "./kit.tsx";
 import {AccountPage, type Prefs} from "./pages/account.tsx";
 import {Login, Setup} from "./pages/auth.tsx";
 import {NodePage} from "./pages/config.tsx";
@@ -76,7 +76,7 @@ function Root({prefs, onPrefs}: {prefs: Prefs, onPrefs: (prefs: Prefs) => void})
 	const current = !wide && ["subscriptions", "tokens", "account", "more"].includes(page) ? "more" : page;
 	const logout = () => void api("post", "/logout").finally(() => { session.set(""); setAuth({kind: "login"}); });
 	return <SettingsContext.Provider value={{settings, set: setSettings}}><Backdrop fixed className="p-app">
-		<Shell nav={<Nav value={current} onChange={id => { location.hash = "#/" + id; }} items={items} header={<Brand/>}/>} banner={<>{httpBanner}<NodeBanner/></>}>
+		<Shell nav={<Nav value={current} onChange={id => { location.hash = "#/" + id; }} items={items} header={<Brand/>}/>} banner={<>{httpBanner}<UpdateBanner/><NodeBanner/></>}>
 			<div className="p-page" key={hash}>
 				{page === "users" && (userId !== null && Number.isFinite(userId) ? <UserPage id={userId}/> : <UsersPage/>)}
 				{page === "subscriptions" && <SubscriptionsPage/>}
@@ -88,6 +88,30 @@ function Root({prefs, onPrefs}: {prefs: Prefs, onPrefs: (prefs: Prefs) => void})
 			</div>
 		</Shell>
 	</Backdrop></SettingsContext.Provider>;
+}
+
+// A newer release, with the one action that asks the host to install it. The host answers the request itself, so after it the panel goes away and comes back as the new version.
+function UpdateBanner() {
+	const {t} = useP(), guard = useGuard(), info = useLoad(() => api("get", "/update"), []), [asked, setAsked] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null);
+	const updating = asked || !!info.data?.updating, from = info.data?.current;
+	const start = useLoad(() => api("get", "/status"), []), startId = start.data?.start_id;
+	useEffect(() => {
+		if (!updating || !from || !startId) return;
+		const started = Date.now(), timer = setInterval(() => {
+			if (Date.now() - started > 15 * 60_000) { clearInterval(timer); setAsked(false); setError(new Error(t("banner.update.slow"))); return; }
+			// Done when the server restarted (a new start id) or reports another version.
+			void api("get", "/status").then(next => { if (next.start_id !== startId) location.reload(); }, () => {});
+			void api("get", "/update").then(next => { if (next.current !== from) location.reload(); }, () => {});
+		}, 3000);
+		return () => clearInterval(timer);
+	}, [updating, from, startId, t]);
+	if (!info.data?.latest) return null;
+	const ask = () => { setBusy(true); setError(null); void guard(() => api("post", "/update/request")).then(() => setAsked(true), setError).finally(() => setBusy(false)); };
+	if (updating) return <Banner tone="info" title={t("banner.update.running", {version: info.data.latest})}>{t("banner.update.runningBody")}</Banner>;
+	return <Banner tone="info" title={t("banner.update.title", {version: info.data.latest})} action={<>
+		{info.data.notes_url && <Button size="sm" onClick={() => { window.open(info.data!.notes_url!, "_blank", "noopener,noreferrer"); }}>{t("banner.update.notes")}</Button>}
+		{info.data.can_update && <Button size="sm" variant="primary" disabled={busy} onClick={ask}>{t("banner.update.button")}</Button>}
+	</>}>{error ? <ErrorNote error={error}/> : !info.data.can_update ? t("banner.update.manual") : null}</Banner>;
 }
 
 // The node's health in one line at the top of every page, with the one action that can fix a missed push.

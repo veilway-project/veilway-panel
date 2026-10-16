@@ -1,5 +1,5 @@
 //! The route table. One list builds both the router and `openapi.json`, so the document cannot say anything else than what is served.
-use crate::{admin, app::{App, Settings}, auth::Access, http::ErrorBody, links, nodecfg, stats, users, xray};
+use crate::{admin, backup, updater, app::{App, Settings}, auth::Access, http::ErrorBody, links, nodecfg, stats, users, xray};
 use axum::{extract::State, handler::Handler, http::{header::CONTENT_TYPE, HeaderValue, Method, StatusCode}, response::{IntoResponse, Response}, routing::{on, MethodFilter, MethodRouter}};
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use std::{any::TypeId, sync::Arc};
@@ -58,6 +58,10 @@ pub fn routes(schemas: &mut SchemaGenerator) -> Vec<Route> {
 		route::<Nothing, admin::KeysOut, _, _>(s, M::GET, "/signing-keys", "listSigningKeys", "The subscription signing keys, current and retired. No private part is ever shown.", Access::Admin, admin::signing_keys),
 		route::<Nothing, admin::KeysOut, _, _>(s, M::POST, "/signing-keys/rotate", "rotateSigningKey", "Adds a second current key. Both are listed in every document until the rotation is finished.", Access::AdminReauth, admin::rotate_signing),
 		route::<Nothing, admin::KeysOut, _, _>(s, M::POST, "/signing-keys/finish", "finishSigningRotation", "Retires the older key. It is kept 365 days to sign refusals.", Access::AdminReauth, admin::finish_signing),
+		route::<backup::DownloadIn, backup::Downloaded, _, _>(s, M::POST, "/backup/download", "downloadBackup", "An encrypted backup of the database, the sealed-secret keys and the signing keys, as base64 in `file`. The passphrase encrypts it and cannot be recovered. Needs a recent re-authentication and is audited. No API token can do this.", Access::AdminReauth, backup::download),
+		route::<backup::RestoreIn, backup::Restored, _, _>(s, M::POST, "/backup/restore", "restoreBackup", "Replaces the database and keys with the ones in a backup, after saving the current ones in the data directory. Every session ends and the server restarts. Needs a recent re-authentication and is audited. No API token can do this.", Access::AdminReauth, backup::restore),
+		route::<Nothing, updater::UpdateInfo, _, _>(s, M::GET, "/update", "updateInfo", "This panel's version and the newest release, as the last check found it.", Access::Read, updater::info),
+		route::<Nothing, updater::Requested, _, _>(s, M::POST, "/update/request", "requestUpdate", "Asks the host to update the panel to the newest release, which the host script downloads and checks itself. Needs a recent re-authentication and is audited. No API token can do this.", Access::AdminReauth, updater::request),
 		route::<Nothing, admin::NodeInfo, _, _>(s, M::GET, "/node", "node", "Whether the node answers on its control socket and when the panel last pushed its users.", Access::Read, admin::node_info),
 		route::<Nothing, users::NodeState, _, _>(s, M::POST, "/node/sync", "syncNode", "Pushes the panel's users into the node's config.", Access::Users, admin::node_sync),
 		route::<Nothing, users::UsersOut, _, _>(s, M::GET, "/users", "listUsers", "Users with the node's usage. Query: q, group, enabled.", Access::Read, users::list),

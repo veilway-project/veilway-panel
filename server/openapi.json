@@ -374,6 +374,34 @@
         ],
         "type": "object"
       },
+      "DownloadIn": {
+        "properties": {
+          "passphrase": {
+            "description": "At least 12 characters. It cannot be recovered: a backup without it is useless.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "passphrase"
+        ],
+        "type": "object"
+      },
+      "Downloaded": {
+        "properties": {
+          "file": {
+            "description": "The encrypted file, standard base64.",
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename",
+          "file"
+        ],
+        "type": "object"
+      },
       "ErrorBody": {
         "properties": {
           "error": {
@@ -1034,6 +1062,21 @@
         ],
         "type": "object"
       },
+      "Requested": {
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "version"
+        ],
+        "type": "object"
+      },
       "ResetLink": {
         "additionalProperties": false,
         "properties": {
@@ -1053,6 +1096,38 @@
             "type": "boolean"
           }
         },
+        "type": "object"
+      },
+      "RestoreIn": {
+        "properties": {
+          "file": {
+            "description": "The backup file, standard base64.",
+            "type": "string"
+          },
+          "passphrase": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "passphrase"
+        ],
+        "type": "object"
+      },
+      "Restored": {
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "saved_as": {
+            "description": "The folder in the data directory that holds the database and keys this restore replaced.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "saved_as"
+        ],
         "type": "object"
       },
       "Rotated": {
@@ -1269,10 +1344,15 @@
         "properties": {
           "setup_needed": {
             "type": "boolean"
+          },
+          "start_id": {
+            "description": "Different on every start of the server.",
+            "type": "string"
           }
         },
         "required": [
-          "setup_needed"
+          "setup_needed",
+          "start_id"
         ],
         "type": "object"
       },
@@ -1423,6 +1503,47 @@
         "required": [
           "totp_secret",
           "otpauth"
+        ],
+        "type": "object"
+      },
+      "UpdateInfo": {
+        "properties": {
+          "can_update": {
+            "description": "Whether the folder for update requests exists, which a host installed or updated by `veilway.sh` has.",
+            "type": "boolean"
+          },
+          "checked_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "current": {
+            "type": "string"
+          },
+          "latest": {
+            "description": "The newest release, when it is newer than this panel.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "notes_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updating": {
+            "description": "A request was made and this panel has not come back as another version yet.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "current",
+          "can_update",
+          "updating"
         ],
         "type": "object"
       },
@@ -2237,6 +2358,146 @@
         },
         "summary": "The audit log, newest first. Query: limit, before.",
         "x-access": "full"
+      }
+    },
+    "/backup/download": {
+      "post": {
+        "operationId": "downloadBackup",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DownloadIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Downloaded"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "An encrypted backup of the database, the sealed-secret keys and the signing keys, as base64 in `file`. The passphrase encrypts it and cannot be recovered. Needs a recent re-authentication and is audited. No API token can do this.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/backup/restore": {
+      "post": {
+        "operationId": "restoreBackup",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Restored"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Replaces the database and keys with the ones in a backup, after saving the current ones in the data directory. Every session ends and the server restarts. Needs a recent re-authentication and is audited. No API token can do this.",
+        "x-access": "session-reauth"
       }
     },
     "/config": {
@@ -4866,6 +5127,126 @@
         },
         "summary": "Revokes an API token.",
         "x-access": "session"
+      }
+    },
+    "/update": {
+      "get": {
+        "operationId": "updateInfo",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateInfo"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "This panel's version and the newest release, as the last check found it.",
+        "x-access": "read"
+      }
+    },
+    "/update/request": {
+      "post": {
+        "operationId": "requestUpdate",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Requested"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Asks the host to update the panel to the newest release, which the host script downloads and checks itself. Needs a recent re-authentication and is audited. No API token can do this.",
+        "x-access": "session-reauth"
       }
     },
     "/users": {

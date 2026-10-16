@@ -17,6 +17,9 @@ create table if not exists xray_inbounds (tag text primary key, protocol text no
 create table if not exists xray_clients (tag text not null references xray_inbounds(tag) on delete cascade, user_id integer not null references users(id) on delete cascade, secret blob not null, primary key (tag, user_id)) without rowid;
 ";
 
+/// Kept in the file's `user_version`. A file with a higher number was made by a newer panel and is refused, at start-up and in a restore. A file with none is the first layout.
+pub const SCHEMA_VERSION: i64 = 1;
+
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
 
@@ -24,7 +27,9 @@ impl Db {
 	pub fn open(path: &Path) -> rusqlite::Result<Self> {
 		let connection = Connection::open(path)?;
 		connection.execute_batch("pragma journal_mode=wal; pragma foreign_keys=on; pragma busy_timeout=5000;")?;
+		if connection.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))? > SCHEMA_VERSION {return Err(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_SCHEMA), Some("the database was made by a newer panel".into())))}
 		connection.execute_batch(SCHEMA)?;
+		connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 		// Added after the first release of the table; an error means the column is there.
 		let _ = connection.execute("alter table xray_inbounds add column server_key blob", []);
 		Ok(Self(Arc::new(Mutex::new(connection))))

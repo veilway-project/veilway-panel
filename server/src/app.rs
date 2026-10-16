@@ -134,6 +134,13 @@ pub struct App {
 	pub not_found_page: Mutex<Option<NotFound>>,
 	/// What the last poll of the node's stats saw.
 	pub live: Mutex<Option<crate::stats::Live>>,
+	pub update: Mutex<crate::updater::Known>,
+	/// Set when a restore has begun: non-GET requests are refused and the upkeep stops writing, until the process exits.
+	pub restoring: AtomicBool,
+	/// Different on every start, so a page can tell that the server restarted.
+	pub start_id: String,
+	/// Notified after a restore has replaced the files: the server then stops and the service manager starts it on the new ones.
+	pub restart: tokio::sync::Notify,
 	/// Node link pairing, all in memory: an offer, its answer and the fingerprint wait here until the operator confirms, and a restart drops them.
 	pub pairing: Mutex<crate::links::Pairing>,
 }

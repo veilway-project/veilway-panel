@@ -90,6 +90,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/backup/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** An encrypted backup of the database, the sealed-secret keys and the signing keys, as base64 in `file`. The passphrase encrypts it and cannot be recovered. Needs a recent re-authentication and is audited. No API token can do this. */
+        post: operations["downloadBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/backup/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Replaces the database and keys with the ones in a backup, after saving the current ones in the data directory. Every session ends and the server restarts. Needs a recent re-authentication and is audited. No API token can do this. */
+        post: operations["restoreBackup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/config": {
         parameters: {
             query?: never;
@@ -723,6 +757,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/update": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** This panel's version and the newest release, as the last check found it. */
+        get: operations["updateInfo"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/update/request": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Asks the host to update the panel to the newest release, which the host script downloads and checks itself. Needs a recent re-authentication and is audited. No API token can do this. */
+        post: operations["requestUpdate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users": {
         parameters: {
             query?: never;
@@ -1093,6 +1161,15 @@ export interface components {
         Done: {
             ok: boolean;
         };
+        DownloadIn: {
+            /** @description At least 12 characters. It cannot be recovered: a backup without it is useless. */
+            passphrase: string;
+        };
+        Downloaded: {
+            /** @description The encrypted file, standard base64. */
+            file: string;
+            filename: string;
+        };
         ErrorBody: {
             error: components["schemas"]["ErrorDetail"];
         };
@@ -1292,6 +1369,10 @@ export interface components {
             password: string;
             totp: string;
         };
+        Requested: {
+            ok: boolean;
+            version: string;
+        };
         ResetLink: {
             /**
              * @description Remove the devices that were enrolled with the old link. They are listed in the answer either way.
@@ -1302,6 +1383,16 @@ export interface components {
         ResetUsage: {
             /** @default false */
             totals: boolean;
+        };
+        RestoreIn: {
+            /** @description The backup file, standard base64. */
+            file: string;
+            passphrase: string;
+        };
+        Restored: {
+            ok: boolean;
+            /** @description The folder in the data directory that holds the database and keys this restore replaced. */
+            saved_as: string;
         };
         Rotated: {
             node: components["schemas"]["NodeState"];
@@ -1406,6 +1497,8 @@ export interface components {
         };
         Status: {
             setup_needed: boolean;
+            /** @description Different on every start of the server. */
+            start_id: string;
         };
         SubscriptionInfo: {
             /** @description Whether the panel holds a sealed copy, so the link can be shown again. False with "show links once". */
@@ -1450,6 +1543,18 @@ export interface components {
             otpauth: string;
             /** @description Base32, for an authenticator app. Shown once. */
             totp_secret: string;
+        };
+        UpdateInfo: {
+            /** @description Whether the folder for update requests exists, which a host installed or updated by `veilway.sh` has. */
+            can_update: boolean;
+            /** Format: int64 */
+            checked_at?: number | null;
+            current: string;
+            /** @description The newest release, when it is newer than this panel. */
+            latest?: string | null;
+            notes_url?: string | null;
+            /** @description A request was made and this panel has not come back as another version yet. */
+            updating: boolean;
         };
         UsageEntry: {
             /** Format: int64 */
@@ -1887,6 +1992,126 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AuditOut"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    downloadBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DownloadIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Downloaded"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    restoreBackup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RestoreIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Restored"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */
@@ -4257,6 +4482,118 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Done"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    updateInfo: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateInfo"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    requestUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Requested"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */

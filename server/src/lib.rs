@@ -2,6 +2,7 @@
 pub mod admin;
 pub mod app;
 pub mod auth;
+pub mod backup;
 pub mod config;
 pub mod crypto;
 pub mod db;
@@ -13,18 +14,24 @@ pub mod openapi;
 pub mod routes;
 pub mod stats;
 pub mod subs;
+pub mod updater;
 pub mod users;
 pub mod web;
 pub mod xray;
 
 use app::{App, Limiter, Settings, Signing};
-use axum::{extract::Request, http::{header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS}, HeaderName, HeaderValue, Method}, middleware::{self, Next}, response::Response, routing::{any, get}, Router};
+use axum::{extract::{Request, State}, http::{StatusCode, header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS}, HeaderName, HeaderValue, Method}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{any, get}, Router};
 use auth::{Access, Guard};
 use config::Config;
+use http::Failure;
 use std::{collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, time::Duration};
 
 /// Opens the database and the key files. The first start with no accounts makes the keys and prints a setup token.
 pub fn build(cfg: Config) -> Result<Arc<App>, String> {
+	if backup::marker(&cfg).exists() {
+		backup::complete(&cfg).map_err(|error| format!("a restore was cut short and could not be finished: {error}"))?;
+		tracing::info!("finished a restore that was cut short");
+	}
 	let db = db::Db::open(&cfg.database).map_err(|error| format!("{}: {error}", cfg.database.display()))?;
 	let accounts: i64 = db.lock().query_row("select (select count(*) from users) + (select count(*) from admins)", [], |row| row.get(0)).map_err(|error| error.to_string())?;
 	let keys = match (cfg.keys.exists(), accounts) {
@@ -37,7 +44,7 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 	let setup_needed = db.lock().query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0)).map_err(|error| error.to_string())? == 0;
 	let token = setup_needed.then(|| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<20>()));
 	if let Some(token) = &token {println!("Setup token (one time): {token}\nPOST it with a username and password to {}/api/setup", cfg.prefix);}
-	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: AtomicBool::new(false), not_found_page: Mutex::new(not_found), live: Mutex::new(None), pairing: Mutex::new(links::Pairing::default())}))
+	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: AtomicBool::new(false), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default())}))
 }
 
 /// What the upkeep loop remembers between passes.
@@ -56,6 +63,7 @@ pub fn spawn_upkeep(app: Arc<App>) {
 }
 
 pub async fn upkeep_once(app: &Arc<App>, state: &mut Upkeep) {
+	if app.restoring.load(Ordering::Relaxed) {return}
 	let at = crypto::now();
 	if at - state.cleaned_at >= 3600 {
 		state.cleaned_at = at;
@@ -75,6 +83,12 @@ pub async fn upkeep_once(app: &Arc<App>, state: &mut Upkeep) {
 		state.wait = if node::sync(app).await.is_ok() {0} else {(state.wait * 2).clamp(5, 600)};
 		state.retry_at = at + state.wait;
 	}
+}
+
+/// While a restore swaps the files nothing may change, so anything but a read is refused.
+async fn restoring(State(app): State<Arc<App>>, request: Request, next: Next) -> Response {
+	if app.restoring.load(Ordering::Relaxed) && !matches!(*request.method(), Method::GET | Method::HEAD) {return Failure::new(StatusCode::SERVICE_UNAVAILABLE, "restoring", "The panel is restoring a backup and restarting. Try again in a moment.").into_response()}
+	next.run(request).await
 }
 
 async fn headers(request: Request, next: Next) -> Response {
@@ -102,5 +116,5 @@ pub fn router(app: Arc<App>) -> Router {
 	for page in &pages {for method in [Method::GET, Method::HEAD] {access.insert((method, page.clone()), Access::Public);}}
 	let guard = Arc::new(Guard {app: app.clone(), access});
 	let admin = api.route(&pages[0], get(web::slash)).route(&pages[1], get(web::index)).route(&pages[2], get(web::asset)).route_layer(middleware::from_fn_with_state(guard, auth::guard)).method_not_allowed_fallback(routes::not_found).layer(middleware::from_fn(headers));
-	Router::new().merge(admin).route(&app.cfg.sub_path, any(subs::endpoint)).route("/robots.txt", get(web::robots)).fallback(routes::not_found).with_state(app)
+	Router::new().merge(admin).route(&app.cfg.sub_path, any(subs::endpoint)).route("/robots.txt", get(web::robots)).fallback(routes::not_found).layer(middleware::from_fn_with_state(app.clone(), restoring)).with_state(app)
 }
