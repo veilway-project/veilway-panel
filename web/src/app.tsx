@@ -120,7 +120,7 @@ function Frame({hash, username, httpBanner, prefs, onPrefs, onLogout}: {hash: st
 			<a className="p-avatar" data-size="sm" href="#/account" aria-label={t("nav.account")}>{initials}</a>
 		</header>
 		<div className="p-frame">
-			{open && <button type="button" className="p-scrim" aria-label={t("side.close")} tabIndex={-1} onClick={() => setOpen(false)}/>}
+			<button type="button" className="p-scrim" data-open={open ? "" : undefined} aria-label={t("side.close")} tabIndex={-1} onClick={() => setOpen(false)}/>
 			<aside ref={side} className="vw-glass p-side" data-layer={open ? "popover" : "chrome"} data-collapsed={collapsed && !open ? "" : undefined} data-open={open ? "" : undefined} role={open ? "dialog" : undefined} aria-modal={open || undefined} aria-label={t(open ? "side.menu" : "side.label")}>
 				<div className="p-side-top">
 					<Brand/>

@@ -1,7 +1,7 @@
 import {Button, ConfirmDialog, Field, Glass, IconButton, List, ListRow, NumberField, StateBlock, Switch, TextField, useToast} from "@veilway/ui";
 import {useContext, useEffect, useState} from "react";
 import {api, type NotFound, type Settings} from "../api.ts";
-import {ErrorNote, lines, LinesField, Mark, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {ErrorNote, lines, LinesField, Mark, PageHead, useGuard, useLoad, useP, useReorder, useSay} from "../kit.tsx";
 import {SettingsContext} from "../settings.ts";
 
 type Mirror = {url: string, pins: string};
@@ -38,6 +38,8 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 	const {draft, pins, profiles, custom, answer, mirrors} = form, changed = JSON.stringify(form) !== JSON.stringify(base);
 	const patch = (change: Partial<Settings>) => setForm({...form, draft: {...draft, ...change}});
 	const set = (change: Partial<typeof form>) => setForm({...form, ...change});
+	// The mirrors reach clients in this order, so the order is part of the form and saves with it.
+	const reorder = useReorder(mirrors.length, index => t("subs.mirror", {number: index + 1}), (from, to) => { const next = mirrors.filter((_, i) => i !== from); next.splice(to, 0, mirrors[from]!); set({mirrors: next}); });
 	const save = async () => {
 		setError(null);
 		let parsed: unknown;
@@ -93,11 +95,12 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 			<section className="p-section" id="set-mirrors">
 				{head("mirrors")}
 				<div className="p-form">
-					{mirrors.length === 0 ? <p className="vw-muted vw-small">{t("subs.noMirrorsBody")}</p> : mirrors.map((m, i) => <fieldset key={i} className="p-mirror">
-						<legend className="p-row"><strong>{t("subs.mirror", {number: i + 1})}</strong><IconButton icon="close" label={t("subs.removeMirror", {number: i + 1})} onClick={() => set({mirrors: mirrors.filter((_, j) => j !== i)})}/></legend>
+					{mirrors.length === 0 ? <p className="vw-muted vw-small">{t("subs.noMirrorsBody")}</p> : mirrors.map((m, i) => <fieldset key={i} className="p-mirror" data-order-row>
+						<legend className="p-row"><span className="p-order">{reorder.handle(i)}<strong>{t("subs.mirror", {number: i + 1})}</strong></span><span className="p-cluster">{reorder.steps(i)}<IconButton icon="close" label={t("subs.removeMirror", {number: i + 1})} onClick={() => set({mirrors: mirrors.filter((_, j) => j !== i)})}/></span></legend>
 						<TextField label={t("subs.mirrorUrl")} type="url" placeholder="https://" value={m.url} onChange={url => set({mirrors: mirrors.map((x, j) => j === i ? {...x, url} : x)})} technical/>
 						<LinesField label={t("subs.mirrorPins")} hint={t("subs.mirrorPinsHint")} value={m.pins} onChange={value => set({mirrors: mirrors.map((x, j) => j === i ? {...x, pins: value} : x)})} rows={2}/>
 					</fieldset>)}
+					{reorder.live}
 					{mirrors.length < 4 && <div><Button size="sm" icon="plus" onClick={() => set({mirrors: [...mirrors, {url: "", pins: ""}]})}>{t("subs.addMirror")}</Button></div>}
 				</div>
 			</section>
