@@ -53,10 +53,11 @@ pub async fn remember(app: &App, user: &UserRow, device: &DeviceRow, token: &[u8
 	if let Err(error) = app.db.call(move |db| db.execute("update devices set mirror_name = ?, mirror_key = ?, mirror_gen = ? where id = ?", rusqlite::params![sealed_name, sealed_key, token_gen, id]).map_err(|error| error.to_string())).await.map_err(|error| error.to_string()).and_then(|result| result) {tracing::error!("the static mirror keys of a device could not be stored: {error}")}
 }
 
-/// Whether the system reports its clock as synchronized. None where it cannot tell: another system, or a container that may not ask.
+/// Whether the system reports its clock as synchronized. None where it cannot tell: another system, or a container, whose clock the host keeps while the kernel's flag inside often reads unsynchronized.
 pub fn clock_synchronized() -> Option<bool> {
 	#[cfg(target_os = "linux")]
 	{
+		if ["/.dockerenv", "/run/.containerenv", "/run/systemd/container"].iter().any(|path| std::path::Path::new(path).exists()) {return None}
 		// SAFETY: a zeroed timex with modes 0 is the read-only form of the call.
 		let mut timex: libc::timex = unsafe {std::mem::zeroed()};
 		match unsafe {libc::adjtimex(&mut timex)} {-1 => None, state => Some(state != libc::TIME_ERROR)}
