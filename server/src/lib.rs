@@ -43,6 +43,15 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 	let signing = Signing::load(&cfg.signing)?;
 	let not_found = db.lock().query_row("select value from settings where key = 'settings'", [], |row| row.get::<_, String>(0)).ok().and_then(|text| serde_json::from_str::<Settings>(&text).ok()).and_then(|settings| settings.not_found);
 	let setup_needed = db.lock().query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0)).map_err(|error| error.to_string())? == 0;
+	let two_step = if cfg.two_step_on() {"on"} else {"off"};
+	if !cfg.two_step_on() {tracing::warn!("with two-step sign-in off, a stored password cannot be checked for length: an admin whose password is shorter than 12 characters is found at their next sign-in and must change it before anything else works")}
+	if !cfg.two_step_on() {tracing::warn!("two-step sign-in is OFF (two_step is \"off\" in the panel's config file): anyone with an admin password can sign in. Use this for demos only")}
+	{
+		let db = db.lock();
+		let last = db.query_row("select value from settings where key = 'two_step'", [], |row| row.get::<_, String>(0)).unwrap_or_else(|_| "on".into());
+		if last != two_step {db::audit(&db, "panel", "config", "panel.two_step", "panel", two_step)}
+		let _ = db.execute("insert into settings (key, value) values ('two_step', ?) on conflict (key) do update set value = excluded.value", [two_step]);
+	}
 	let token = setup_needed.then(|| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<20>()));
 	if let Some(token) = &token {println!("Setup token (one time): {token}\nPOST it with a username and password to {}/api/setup", cfg.prefix);}
 	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: AtomicBool::new(false), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), mirrors_seen: Default::default()}))

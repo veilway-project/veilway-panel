@@ -265,6 +265,7 @@
 .p-gate-top { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s-3); }
 .p-gate-top .p-brand { flex: none; }
 .p-gate-card { padding: var(--s-6) var(--s-5); }
+.p-danger-note { margin: 0; padding-inline-start: var(--s-3); border-inline-start: 3px solid var(--c-danger); color: var(--c-danger); }
 .p-lead { flex: 1 1 24rem; max-inline-size: 70ch; }
 .p-table-head { align-items: center; padding: var(--s-2) var(--s-1) 0; }
 .p-transports { display: grid; gap: var(--s-1); margin: 0; padding: 0; list-style: none; }

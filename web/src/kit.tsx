@@ -1,7 +1,7 @@
 import {Banner, Button, Dialog, Field, Icon, IconButton, TextField, useI18n, useToast, type Tone} from "@veilway/ui";
 import qrcode from "qrcode-generator";
 import {createContext, useCallback, useContext, useEffect, useId, useRef, useState, type ReactNode} from "react";
-import {api, ApiError, type NodeState, type Totp} from "./api.ts";
+import {api, ApiError, flags, type NodeState, type Totp} from "./api.ts";
 import {en, type PanelKey} from "./locales/en.ts";
 
 export const useP = () => useI18n<PanelKey>();
@@ -58,7 +58,7 @@ export function GuardProvider({children}: {children: ReactNode}) {
 		if (!ask) return;
 		setBusy(true);
 		try {
-			await api("post", "/session/reauth", {body: {password, totp: totp.trim()}});
+			await api("post", "/session/reauth", {body: {password, totp: flags.twoStep ? totp.trim() : ""}});
 			setAsk(null);
 			ask.resolve();
 		} catch (failure) {
@@ -72,7 +72,7 @@ export function GuardProvider({children}: {children: ReactNode}) {
 		<Dialog open={ask !== null} onOpenChange={open => { if (!open && ask) { ask.reject(new ApiError(403, "reauth_required", "")); setAsk(null); } }} title={t("reauth.title")} description={t("reauth.body")}>
 			<form className="p-stack" onSubmit={event => { event.preventDefault(); void confirm(); }}>
 				<TextField label={t("login.password")} type="password" autoComplete="current-password" value={password} onChange={setPassword} required/>
-				<TextField label={t("login.code")} hint={t("login.codeHint")} inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={totp} onChange={setTotp} technical required/>
+				{flags.twoStep && <TextField label={t("login.code")} hint={t("login.codeHint")} inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={totp} onChange={setTotp} technical required/>}
 				<ErrorNote error={error}/>
 				<div className="vw-dialog-foot"><Button type="submit" variant="primary" disabled={busy}>{t("reauth.submit")}</Button></div>
 			</form>

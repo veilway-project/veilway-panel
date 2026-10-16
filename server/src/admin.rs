@@ -13,6 +13,8 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 
 const LOGIN_PER_SOURCE: (usize, i64) = (10, 900);
+/// While the code is off the password is the only factor, so a source gets fewer tries.
+const LOGIN_PER_SOURCE_OFF: (usize, i64) = (5, 900);
 /// Wrong tries count against an account for an hour. From the fifth on, the wait before the next answer doubles, up to 15 minutes.
 const FAILS_WINDOW: i64 = 3600;
 const DELAY_AFTER: usize = 5;
@@ -51,20 +53,25 @@ fn username_ok(name: &str) -> Result<(), Failure> {
 fn wrong() -> Failure {Failure::new(StatusCode::UNAUTHORIZED, "invalid_credentials", "Wrong username, password or code.")}
 
 #[derive(Serialize, JsonSchema)]
-pub struct Status {pub setup_needed: bool, /// Different on every start of the server.
+pub struct Status {pub setup_needed: bool,
+	/// False when the panel's config file turns the authenticator code off. Read-only: no route changes it.
+	pub two_step: bool,
+	/// Different on every start of the server.
 	pub start_id: String}
 
 pub async fn status(State(app): State<Arc<App>>) -> Result<Response, Failure> {
-	ok(&Status {setup_needed: app.db.lock().query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0))? == 0, start_id: app.start_id.clone()})
+	ok(&Status {two_step: app.cfg.two_step_on(), setup_needed: app.db.lock().query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0))? == 0, start_id: app.start_id.clone()})
 }
 
 #[derive(Serialize, JsonSchema)]
 pub struct TotpEnrolled {
-	/// Base32, for an authenticator app. Shown once.
+	/// Base32, for an authenticator app. Shown once. Empty when two-step sign-in is off.
 	pub totp_secret: String, pub otpauth: String,
 }
 
+/// A new secret, or none (empty blobs and empty strings) while two-step sign-in is off, which forces an enrollment at the first sign-in after it is turned on again.
 fn new_totp(app: &App, name: &str) -> Result<(Vec<u8>, Vec<u8>, TotpEnrolled), Failure> {
+	if !app.cfg.two_step_on() {return Ok((Vec::new(), Vec::new(), TotpEnrolled {totp_secret: String::new(), otpauth: String::new()}))}
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
 	let (secret, record) = (crypto::random::<20>(), crypto::random::<16>());
 	let text = BASE32_NOPAD.encode(&secret);
@@ -115,11 +122,15 @@ fn actor_of(app: &App, name: &str) -> String {
 	if known {format!("admin:{name}")} else {"unknown".into()}
 }
 
-/// Password and a TOTP code that was not used before. A wrong try counts against the account, and while the account is waiting a wrong try gets a "wait" answer. A right one passes whatever the wait.
+/// Password and a TOTP code that was not used before. A wrong try counts against the account, and while the account is waiting a wrong try gets a "wait" answer. With the code on, a right one passes whatever the wait, so an attacker who guesses wrong cannot lock the admin out.
+/// With two-step sign-in off the password is the only factor, so the wait holds for a right password too and the password is not even checked during it: otherwise the wait would only slow down guessing and never stop it. The tradeoff is that an attacker can keep the admin waiting by guessing wrong, up to 15 minutes at a time. That is acceptable only in this mode, which is for demos where nothing is at stake, and never with the code on.
 async fn verify(app: &App, admin: Option<AdminRow>, name: &str, password: &str, code: &str) -> Result<AdminRow, Failure> {
 	let waiting = wait_left(app, name) > 0;
+	if waiting && !app.cfg.two_step_on() {return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries. Wait a while."))}
 	let good = check_password(admin.as_ref().map_or_else(|| dummy().to_string(), |admin| admin.hash.clone()), password.to_string()).await;
-	let step = admin.as_ref().and_then(|admin| {
+	// An admin with no secret (made while the code was off) passes on the password alone, and the guard then allows nothing but the enrollment until they have one.
+	let need_code = app.cfg.two_step_on() && admin.as_ref().is_some_and(|admin| !admin.secret.is_empty());
+	let step = admin.as_ref().filter(|_| need_code).and_then(|admin| {
 		let record: [u8; 16] = admin.record.clone().try_into().ok()?;
 		let secret = app.keys.as_ref()?.open_secret(&record, "totp", &admin.secret)?;
 		crypto::totp_check(&secret, code, now()).filter(|step| *step > admin.last_step)
@@ -127,6 +138,7 @@ async fn verify(app: &App, admin: Option<AdminRow>, name: &str, password: &str, 
 	// The step is claimed in the same statement that checks it, so two requests with one code cannot both pass.
 	let claimed = match (good, step, &admin) {
 		(true, Some(step), Some(admin)) => app.db.lock().execute("update admins set totp_last_step = ? where id = ? and totp_last_step < ?", params![step, admin.id, step]).unwrap_or(0) == 1,
+		(true, None, Some(_)) => !need_code,
 		_ => false,
 	};
 	match admin {
@@ -143,13 +155,21 @@ async fn verify(app: &App, admin: Option<AdminRow>, name: &str, password: &str, 
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Login {pub username: String, pub password: String, pub totp: String}
+pub struct Login {pub username: String, pub password: String,
+	/// Not read while two-step sign-in is off.
+	#[serde(default)]
+	pub totp: String}
 
 #[derive(Serialize, JsonSchema)]
-pub struct LoggedIn {pub username: String, pub session_id: String, pub csrf: String}
+pub struct LoggedIn {pub username: String, pub session_id: String, pub csrf: String,
+	/// True when two-step sign-in is on and this admin has no authenticator yet, see the session answer.
+	pub enroll_required: bool,
+	/// True when two-step sign-in is off and this admin's password is shorter than 12 characters: only the password change works until it is done.
+	pub password_change_required: bool}
 
 pub async fn login(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Extension(agent): Extension<Agent>, Body(input): Body<Login>) -> Result<Response, Failure> {
-	if !app.limits.hit(&format!("login:{}", bucket(&ctx.source)), LOGIN_PER_SOURCE.0, LOGIN_PER_SOURCE.1) {
+	let per_source = if app.cfg.two_step_on() {LOGIN_PER_SOURCE} else {LOGIN_PER_SOURCE_OFF};
+	if !app.limits.hit(&format!("login:{}", bucket(&ctx.source)), per_source.0, per_source.1) {
 		let actor = actor_of(&app, &input.username);
 		audit(&app.db.lock(), &actor, &ctx.source, "login.limited", "admin", "");
 		return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries. Wait a while."));
@@ -163,6 +183,9 @@ pub async fn login(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 			return Err(error);
 		}
 	};
+	// A stored password cannot be measured, so one shorter than the rule (from before it) is found here, while the code is off, and must be changed before anything else works.
+	let short = !app.cfg.two_step_on() && input.password.chars().count() < 12;
+	if short {let _ = app.db.lock().execute("insert into settings (key, value) values (?, '1') on conflict (key) do nothing", [format!("short_password:{}", admin.id)]);}
 	let (raw, id, csrf) = (crypto::random::<32>(), hex(&crypto::random::<8>()), URL_SAFE_NO_PAD.encode(crypto::random::<32>()));
 	{
 		let db = app.db.lock();
@@ -170,7 +193,7 @@ pub async fn login(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 		audit(&db, &format!("admin:{}", admin.username), &ctx.source, "login", &format!("admin:{}", admin.id), &id);
 	}
 	let cookie = format!("{COOKIE_NAME}={}; Path={}; HttpOnly; SameSite=Strict; Max-Age={}{}", URL_SAFE_NO_PAD.encode(raw), app.cfg.prefix, crate::auth::ABSOLUTE, if app.cfg.secure_cookies {"; Secure"} else {""});
-	let mut response = json(StatusCode::OK, &LoggedIn {username: admin.username, session_id: id, csrf});
+	let mut response = json(StatusCode::OK, &LoggedIn {enroll_required: app.cfg.two_step_on() && admin.secret.is_empty(), password_change_required: short, username: admin.username, session_id: id, csrf});
 	response.headers_mut().insert(SET_COOKIE, HeaderValue::from_str(&cookie).map_err(Failure::internal)?);
 	Ok(response)
 }
@@ -192,17 +215,24 @@ pub async fn logout(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>)
 }
 
 #[derive(Serialize, JsonSchema)]
-pub struct SessionInfo {pub username: String, pub session_id: String, pub csrf: String, pub reauth_until: i64}
+pub struct SessionInfo {pub username: String, pub session_id: String, pub csrf: String, pub reauth_until: i64,
+	/// True when two-step sign-in is on and this admin has no authenticator yet: only the enrollment works until they make one.
+	pub enroll_required: bool,
+	/// True when two-step sign-in is off and this admin's password is shorter than 12 characters: only the password change works until it is done.
+	pub password_change_required: bool}
 
 pub async fn session(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {
 	let id = ctx.session_id.ok_or_else(|| Failure::bad("This call is for a login session."))?;
 	let (csrf, reauth): (String, i64) = app.db.lock().query_row("select csrf, reauth_at from sessions where id = ?", [&id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-	ok(&SessionInfo {username: ctx.actor.trim_start_matches("admin:").to_string(), session_id: id, csrf, reauth_until: reauth + crate::auth::REAUTH})
+	ok(&SessionInfo {username: ctx.actor.trim_start_matches("admin:").to_string(), session_id: id, csrf, reauth_until: reauth + crate::auth::REAUTH, enroll_required: app.cfg.two_step_on() && crate::auth::unenrolled(&app, ctx.admin_id), password_change_required: !app.cfg.two_step_on() && crate::auth::short_password(&app, ctx.admin_id)})
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Reauth {pub password: String, pub totp: String}
+pub struct Reauth {pub password: String,
+	/// Not read while two-step sign-in is off.
+	#[serde(default)]
+	pub totp: String}
 
 pub async fn reauth(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Reauth>) -> Result<Response, Failure> {
 	let name = ctx.actor.trim_start_matches("admin:").to_string();
@@ -244,6 +274,7 @@ pub async fn change_password(State(app): State<Arc<App>>, Extension(ctx): Extens
 	let hash = hash_password(input.new_password.clone()).await?;
 	let db = app.db.lock();
 	db.execute("update admins set password_hash = ? where id = ?", params![hash, ctx.admin_id])?;
+	db.execute("delete from settings where key = ?", [format!("short_password:{}", ctx.admin_id)])?;
 	db.execute("delete from sessions where admin_id = ? and id != ?", params![ctx.admin_id, ctx.session_id.clone().unwrap_or_default()])?;
 	audit(&db, &ctx.actor, &ctx.source, "account.password", "admin", "");
 	ok(&Done {ok: true})
@@ -255,6 +286,24 @@ pub async fn change_totp(State(app): State<Arc<App>>, Extension(ctx): Extension<
 	db.execute("update admins set totp_secret = ?, totp_record = ?, totp_last_step = 0 where id = ?", params![sealed, record, ctx.admin_id])?;
 	db.execute("delete from sessions where admin_id = ? and id != ?", params![ctx.admin_id, ctx.session_id.clone().unwrap_or_default()])?;
 	audit(&db, &ctx.actor, &ctx.source, "account.totp", "admin", "");
+	ok(&shown)
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Enroll {pub password: String}
+
+/// The forced step after two-step sign-in was turned back on: an admin with no secret makes one, with the password as the proof. Never replaces an existing secret.
+pub async fn enroll(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Enroll>) -> Result<Response, Failure> {
+	let name = ctx.actor.trim_start_matches("admin:").to_string();
+	let admin = admin_by(&app, "id", ctx.admin_id.into()).ok_or_else(|| Failure::missing("admin"))?;
+	if !admin.secret.is_empty() {return Err(Failure::conflict("This account already has an authenticator."))}
+	if !check_password(admin.hash.clone(), input.password.clone()).await {return Err(wrong())}
+	let (sealed, record, shown) = new_totp(&app, &name)?;
+	let db = app.db.lock();
+	if db.execute("update admins set totp_secret = ?, totp_record = ?, totp_last_step = 0 where id = ? and length(totp_secret) = 0", params![sealed, record, ctx.admin_id])? == 0 {return Err(Failure::conflict("This account already has an authenticator."))}
+	db.execute("delete from sessions where admin_id = ? and id != ?", params![ctx.admin_id, ctx.session_id.clone().unwrap_or_default()])?;
+	audit(&db, &ctx.actor, &ctx.source, "account.enroll", "admin", "");
 	ok(&shown)
 }
 
@@ -299,6 +348,7 @@ pub async fn remove_admin(State(app): State<Arc<App>>, Extension(ctx): Extension
 	let name: String = db.query_row("select username from admins where id = ?", [id], |row| row.get(0)).optional()?.ok_or_else(|| Failure::missing("admin"))?;
 	if db.query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0))? <= 1 {return Err(Failure::conflict("The last admin cannot be removed."))}
 	if db.execute("delete from admins where id = ? and username = ?", params![id, name])? == 0 {return Err(Failure::missing("admin"))}
+	db.execute("delete from settings where key = ?", [format!("short_password:{id}")])?;
 	audit(&db, &ctx.actor, &ctx.source, "admin.remove", &format!("admin:{name}"), "");
 	ok(&Done {ok: true})
 }
@@ -312,6 +362,7 @@ pub async fn reset_admin(State(app): State<Arc<App>>, Extension(ctx): Extension<
 	let (sealed, record, shown) = new_totp(&app, &name)?;
 	let db = app.db.lock();
 	if db.execute("update admins set password_hash = ?, totp_secret = ?, totp_record = ?, totp_last_step = 0 where id = ? and username = ?", params![hash, sealed, record, id, name])? == 0 {return Err(Failure::missing("admin"))}
+	db.execute("delete from settings where key = ?", [format!("short_password:{id}")])?;
 	let ended = db.execute("delete from sessions where admin_id = ?", [id])?;
 	let revoked = db.execute("update api_tokens set revoked_at = ? where admin_id = ? and revoked_at is null", params![now(), id])?;
 	audit(&db, &ctx.actor, &ctx.source, "admin.reset", &format!("admin:{name}"), &format!("password and code replaced, {ended} sessions ended, {revoked} tokens revoked"));

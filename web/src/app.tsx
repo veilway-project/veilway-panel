@@ -1,11 +1,11 @@
 import {Backdrop, Banner, Button, DEFAULT_SETTINGS, Glass, Icon, IconButton, PRODUCT, Segmented, StateBlock, ToastProvider, UiProvider, useToast, type IconName} from "@veilway/ui";
 import {useEffect, useMemo, useRef, useState, type ReactNode} from "react";
-import {api, session, type NodeLink, type Settings} from "./api.ts";
+import {api, flags, session, type NodeLink, type Settings} from "./api.ts";
 import {en, type PanelKey} from "./locales/en.ts";
 import {fa} from "./locales/fa.ts";
 import {ago, ErrorNote, GuardProvider, useGuard, useLoad, useP, useSay} from "./kit.tsx";
 import {AccountPage, type Prefs} from "./pages/account.tsx";
-import {Login, Setup} from "./pages/auth.tsx";
+import {ChangePassword, Enroll, Login, Setup} from "./pages/auth.tsx";
 import {InboundsPage, loadRunning, RoutingPage} from "./pages/config.tsx";
 import {DashboardPage} from "./pages/dashboard.tsx";
 import {DnsPage} from "./pages/dns.tsx";
@@ -46,14 +46,14 @@ function Brand() {
 	</div>;
 }
 
-type Auth = {kind: "loading"} | {kind: "failed", error: unknown} | {kind: "setup"} | {kind: "login"} | {kind: "in", username: string};
+type Auth = {kind: "loading"} | {kind: "failed", error: unknown} | {kind: "setup"} | {kind: "login"} | {kind: "enroll"} | {kind: "password"} | {kind: "in", username: string};
 
 function Root({prefs, onPrefs}: {prefs: Prefs, onPrefs: (prefs: Prefs) => void}) {
 	const {t} = useP(), say = useSay(), toast = useToast(), [auth, setAuth] = useState<Auth>({kind: "loading"}), [hash, setHash] = useState(location.hash);
-	const [settings, setSettings] = useState<Settings | null>(null);
+	const [settings, setSettings] = useState<Settings | null>(null), [twoStep, setTwoStep] = useState(true);
 	const start = () => {
 		setAuth({kind: "loading"});
-		api("get", "/status").then(status => status.setup_needed ? setAuth({kind: "setup"}) : api("get", "/session").then(info => { session.set(info.csrf); setAuth({kind: "in", username: info.username}); }, () => setAuth({kind: "login"})), error => setAuth({kind: "failed", error}));
+		api("get", "/status").then(status => { setTwoStep(flags.twoStep = status.two_step); return status.setup_needed ? setAuth({kind: "setup"}) : api("get", "/session").then(info => { session.set(info.csrf); setAuth(info.enroll_required ? {kind: "enroll"} : info.password_change_required ? {kind: "password"} : {kind: "in", username: info.username}); }, () => setAuth({kind: "login"})); }, error => setAuth({kind: "failed", error}));
 	};
 	useEffect(() => {
 		start();
@@ -67,6 +67,8 @@ function Root({prefs, onPrefs}: {prefs: Prefs, onPrefs: (prefs: Prefs) => void})
 	// Logins and keys cross the network in the clear on plain HTTP anywhere but this machine.
 	const http = location.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
 	const httpBanner = http ? <Banner tone="warning" title={t("banner.http.title")}>{t("banner.http.body")}</Banner> : null;
+	const enter = () => api("get", "/session").then(info => setAuth({kind: "in", username: info.username}), () => setAuth({kind: "login"}));
+	const logout = () => void api("post", "/logout").finally(() => { session.set(""); setAuth({kind: "login"}); });
 	if (auth.kind !== "in") return <Backdrop fixed className="p-gate">
 		<main className="p-gate-main">
 			{httpBanner}
@@ -75,16 +77,17 @@ function Root({prefs, onPrefs}: {prefs: Prefs, onPrefs: (prefs: Prefs) => void})
 				{auth.kind === "loading" && <StateBlock kind="loading" title={t("common.loading")}/>}
 				{auth.kind === "failed" && <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={start}>{t("action.retry")}</Button>}>{say(auth.error)}</StateBlock>}
 				{auth.kind === "setup" && <Setup onDone={() => setAuth({kind: "login"})}/>}
-				{auth.kind === "login" && <Login onDone={username => setAuth({kind: "in", username})}/>}
+				{auth.kind === "login" && <Login onDone={(username, step) => setAuth(step ? {kind: step} : {kind: "in", username})}/>}
+				{auth.kind === "enroll" && <Enroll onDone={() => void enter()} onLogout={logout}/>}
+				{auth.kind === "password" && <ChangePassword onDone={() => void enter()} onLogout={logout}/>}
 			</Glass>
 		</main>
 	</Backdrop>;
-	const logout = () => void api("post", "/logout").finally(() => { session.set(""); setAuth({kind: "login"}); });
-	return <SettingsContext.Provider value={{settings, set: setSettings}}><Frame hash={hash} username={auth.username} httpBanner={httpBanner} prefs={prefs} onPrefs={onPrefs} onLogout={logout}/></SettingsContext.Provider>;
+	return <SettingsContext.Provider value={{settings, set: setSettings}}><Frame hash={hash} username={auth.username} httpBanner={httpBanner} twoStep={twoStep} prefs={prefs} onPrefs={onPrefs} onLogout={logout}/></SettingsContext.Provider>;
 }
 
 // The signed-in frame: sidebar, banners and the page the address names.
-function Frame({hash, username, httpBanner, prefs, onPrefs, onLogout}: {hash: string, username: string, httpBanner: ReactNode, prefs: Prefs, onPrefs: (prefs: Prefs) => void, onLogout: () => void}) {
+function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: {hash: string, username: string, httpBanner: ReactNode, twoStep: boolean, prefs: Prefs, onPrefs: (prefs: Prefs) => void, onLogout: () => void}) {
 	const {t, number} = useP(), path = hash.replace(/^#\/?/, ""), parts = path.split("/"), page = PAGES.includes(parts[0]!) ? parts[0]! : "dashboard", sub = parts[1] ?? "";
 	const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem(SIDEBAR) === "collapsed"; } catch { return false; } }), [open, setOpen] = useState(false), menu = useRef<HTMLButtonElement>(null), side = useRef<HTMLElement>(null);
 	const node = useLoad(() => api("get", "/node"), []), live = useLoad(() => api("get", "/stats/now"), []), links = useLoad(() => api("get", "/links") as Promise<{links: NodeLink[] | null}>, []);
@@ -152,6 +155,7 @@ function Frame({hash, username, httpBanner, prefs, onPrefs, onLogout}: {hash: st
 			</aside>
 			<main className="p-main" inert={open}>
 				{httpBanner}
+				{!twoStep && <Banner tone="danger" title={t("twostep.banner.title")}>{t("twostep.banner.body")}</Banner>}
 				<UpdateBanner/>
 				<NodeBanner node={node.data} onPushed={node.reload}/>
 				<div className="p-page" key={page === "users" ? page + "/" + sub : page}>

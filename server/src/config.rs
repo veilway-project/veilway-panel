@@ -56,15 +56,18 @@ pub struct Config {
 	pub update_check: bool,
 	/// Where an update request is written. The folder is made by `veilway.sh`, belongs to root and is writable by the panel's group only.
 	pub update_request: PathBuf,
+	/// "off" turns the authenticator code off everywhere: sign-in, setup, adding an admin and re-authentication ask for the password only. Any other value, and the default, keeps it on. This is for tutorials and demos and is dangerous: anyone with a password gets in. It is read from this file only and no panel page or API route can change it, because whoever can write this file already owns the panel.
+	pub two_step: String,
 }
 
 impl Default for Config {
 	fn default() -> Self {
-		Self {listen: "127.0.0.1:8480".parse().unwrap(), prefix: "/panel".into(), sub_path: "/sub".into(), database: "panel.db".into(), keys: "panel.keys".into(), signing: "signing.keys".into(), node_socket: "/run/veilway/control.sock".into(), allowed_hosts: Vec::new(), trusted_proxies: Vec::new(), not_found: NotFound::default(), trusted_mirrors: Vec::new(), secure_cookies: true, direct: false, update_check: true, update_request: "/var/lib/veilway-panel-update/request".into()}
+		Self {listen: "127.0.0.1:8480".parse().unwrap(), prefix: "/panel".into(), sub_path: "/sub".into(), database: "panel.db".into(), keys: "panel.keys".into(), signing: "signing.keys".into(), node_socket: "/run/veilway/control.sock".into(), allowed_hosts: Vec::new(), trusted_proxies: Vec::new(), not_found: NotFound::default(), trusted_mirrors: Vec::new(), secure_cookies: true, direct: false, update_check: true, update_request: "/var/lib/veilway-panel-update/request".into(), two_step: "on".into()}
 	}
 }
 
 impl Config {
+	pub fn two_step_on(&self) -> bool {self.two_step != "off"}
 	pub fn load(path: &str) -> Result<Self, String> {
 		let config: Config = serde_json::from_slice(&fs::read(path).map_err(|error| format!("{path}: {error}"))?).map_err(|error| format!("{path}: {error}"))?;
 		config.check().map_err(|error| format!("{path}: {error}"))?;

@@ -40,6 +40,9 @@ export type Answer<P extends keyof paths, M extends Method> = Operation<P, M> ex
 type Input<P extends keyof paths, M extends Method> = Operation<P, M> extends {requestBody?: {content: {"application/json": infer B}}} ? B : never;
 export type Call<P extends keyof paths, M extends Method> = {params?: Record<string, string | number>, query?: Record<string, string | number | undefined>, body?: Input<P, M>};
 
+/** Set from the status answer before anyone signs in. False only when the panel's config file turns two-step sign-in off. */
+export const flags = {twoStep: true};
+
 /** Every answer that is not a success. code is the server's error code, or "network" when no answer came. */
 export class ApiError extends Error {
 	constructor(readonly status: number, readonly code: string, message: string) {
