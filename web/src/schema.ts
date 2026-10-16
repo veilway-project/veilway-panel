@@ -1106,10 +1106,10 @@ export interface components {
             target: string;
         };
         Bulk: {
-            /** @description enable, disable, delete, reset_usage, add_group, remove_group, set_quota, set_expiry or set_device_limit. */
+            /** @description enable, disable, delete, reset_usage, add_group, remove_group, set_quota, set_expiry, set_device_limit or set_exits. */
             action: string;
             ids: number[];
-            /** @description The group name, the quota (an object with quota_bytes and quota_period), the expiry in Unix seconds or null, or the device limit. */
+            /** @description The group name, the quota (an object with quota_bytes and quota_period), the expiry in Unix seconds or null, the device limit, or the exits ("all" or a list of exit tags). A default exit the new exits leave out is cleared. */
             value?: unknown;
         };
         BulkFailure: {
@@ -1619,6 +1619,8 @@ export interface components {
             /** Format: uint16 */
             device_limit?: number | null;
             enabled?: boolean | null;
+            /** @description One of the user's exits, or null for the node's default. */
+            exit?: string | null;
             exits?: unknown;
             /**
              * Format: int64
@@ -1644,6 +1646,8 @@ export interface components {
             /** Format: int64 */
             devices: number;
             enabled: boolean;
+            /** @description The exit the user's devices leave through when they choose none. Null is the node's default. */
+            exit?: string | null;
             /** @description "all" or a list of exit tags. */
             exits: unknown;
             /** Format: int64 */
@@ -1666,6 +1670,11 @@ export interface components {
             /** Format: uint16 */
             device_limit?: number | null;
             enabled?: boolean | null;
+            /**
+             * @description One of the user's exits, or null for the node's default. A default the new exits leave out is cleared.
+             * @default null
+             */
+            exit: string | null;
             exits?: unknown;
             /**
              * Format: int64
