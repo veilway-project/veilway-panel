@@ -688,6 +688,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/static": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The static mirror folders: where each is, how many files and of what size (real and decoy together), when it was last written, the commands that copy it to a host, and why the last round failed if it did. */
+        get: operations["getStatic"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/static/{label}/zip": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** The current round of one static mirror folder as a zip file, as base64 in `file`. Needs a recent re-authentication and is audited. No API token can do this. */
+        post: operations["downloadStatic"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/stats/history": {
         parameters: {
             query?: never;
@@ -1227,6 +1261,30 @@ export interface components {
             /** @description A whole signed document in a link, when it is small enough for one. Null otherwise. */
             link?: string | null;
         };
+        FolderOut: {
+            base_url: string;
+            /**
+             * Format: uint
+             * @description Files in the folder, real and decoy together. Null before the first round.
+             */
+            files?: number | null;
+            label: string;
+            /** @description The folder to copy to the host: a link that is switched to each new round in one step. */
+            path: string;
+            /** @description False when the host is not on the panel's list of shared host names: a censor that learns it can block it without blocking anything else. */
+            shared_host: boolean;
+            /**
+             * Format: uint
+             * @description The size of every file of the folder, in bytes. Null before the first round.
+             */
+            size?: number | null;
+            sync: components["schemas"]["SyncOut"][];
+            /**
+             * Format: int64
+             * @description When this folder was last written.
+             */
+            written_at?: number | null;
+        };
         HistoryOut: {
             kind: string;
             name: string;
@@ -1360,6 +1418,8 @@ export interface components {
             scope: string;
         };
         NodeInfo: {
+            /** @description Whether the system reports its clock as synchronized, null when it cannot tell. A panel whose clock is off by more than a day writes static mirror names that no client asks for. */
+            clock_synchronized?: boolean | null;
             keys_missing: boolean;
             last_sync?: string | null;
             reachable: boolean;
@@ -1605,6 +1665,17 @@ export interface components {
             terms_url: string;
             /**
              * Format: uint32
+             * @description Hours between publishing rounds of the static mirrors, 1 to 12.
+             * @default 6
+             */
+            static_interval: number;
+            /**
+             * @description Base URLs of static mirrors, put in every document as `static_mirrors`: plain file hosting that holds each device's sealed document. `https`, a path ending in `/`, no pins and no IP literal, at most 4, and none shares host and port with the endpoint or a relay mirror.
+             * @default []
+             */
+            static_mirrors: string[];
+            /**
+             * Format: uint32
              * @default 3600
              */
             update_interval: number;
@@ -1615,6 +1686,17 @@ export interface components {
             password: string;
             token: string;
             username: string;
+        };
+        StaticOut: {
+            /** @description Why the last round published nothing, if it failed. */
+            error?: string | null;
+            folders: components["schemas"]["FolderOut"][];
+            /** Format: uint32 */
+            interval_hours: number;
+            /** Format: int64 */
+            last_round?: number | null;
+            /** Format: int64 */
+            next_round?: number | null;
         };
         Status: {
             setup_needed: boolean;
@@ -1634,6 +1716,10 @@ export interface components {
             token_created: number;
             /** Format: int64 */
             token_generation: number;
+        };
+        SyncOut: {
+            command: string;
+            tool: string;
         };
         TokenCreated: {
             /** Format: int64 */
@@ -1812,6 +1898,11 @@ export interface components {
             inbounds: components["schemas"]["XrayInboundOut"][];
             installed: boolean;
             release?: string | null;
+        };
+        Zipped: {
+            /** @description The zip file, standard base64. */
+            file: string;
+            filename: string;
         };
     };
     responses: never;
@@ -4342,6 +4433,120 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["KeysOut"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getStatic: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StaticOut"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    downloadStatic: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                label: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Zipped"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */

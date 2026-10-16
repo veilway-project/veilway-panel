@@ -435,6 +435,7 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 	if input.endpoint_pins.len() > 2 || input.endpoint_pins.iter().any(|pin| STANDARD.decode(pin).map_or(true, |bytes| bytes.len() != 32)) {return Err(Failure::bad("endpoint_pins is at most two SHA-256 pins in standard base64."))}
 	if !(900..=604_800).contains(&input.update_interval) || !(1..=90).contains(&input.document_days) || input.provider_name.is_empty() || input.provider_name.chars().count() > 64 {return Err(Failure::bad("update_interval is 900 to 604800, document_days is 1 to 90 and provider_name is 1 to 64 characters."))}
 	if input.profiles.len() > 64 || input.profiles.iter().any(|profile| !profile.is_object() || profile.get("device").is_some()) || input.refresh_mirrors.len() > 4 {return Err(Failure::bad("profiles are at most 64 objects without a device, and refresh_mirrors at most 4."))}
+	crate::statics::check(&input).map_err(Failure::bad)?;
 	if let Some(page) = &input.not_found {
 		if !(200..=599).contains(&page.status) || page.headers.len() > 16 || page.body.len() > 65_536 || page.headers.iter().any(|(name, value)| HeaderName::try_from(name.as_str()).is_err() || HeaderValue::from_str(value).is_err()) {return Err(Failure::bad("not_found is a status from 200 to 599, at most 16 valid headers and a body of at most 64 KB."))}
 	}
@@ -487,11 +488,13 @@ pub async fn finish_signing(State(app): State<Arc<App>>, Extension(ctx): Extensi
 }
 
 #[derive(Serialize, JsonSchema)]
-pub struct NodeInfo {pub reachable: bool, pub status: Option<Value>, pub last_sync: Option<String>, pub keys_missing: bool}
+pub struct NodeInfo {pub reachable: bool, pub status: Option<Value>, pub last_sync: Option<String>, pub keys_missing: bool,
+	/// Whether the system reports its clock as synchronized, null when it cannot tell. A panel whose clock is off by more than a day writes static mirror names that no client asks for.
+	pub clock_synchronized: Option<bool>}
 
 pub async fn node_info(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let status = match node::request(&app.cfg.node_socket, "GET", "/v1/status", None, None).await {Ok((200, body)) => serde_json::from_slice(&body).ok(), _ => None};
-	ok(&NodeInfo {reachable: status.is_some(), status, last_sync: app.last_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(), keys_missing: app.keys.is_none()})
+	ok(&NodeInfo {reachable: status.is_some(), status, last_sync: app.last_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(), keys_missing: app.keys.is_none(), clock_synchronized: crate::statics::clock_synchronized()})
 }
 
 pub async fn node_sync(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {

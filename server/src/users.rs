@@ -339,7 +339,7 @@ pub async fn export_device(State(app): State<Arc<App>>, Extension(ctx): Extensio
 		let signing: Vec<_> = held.current().into_iter().cloned().collect();
 		(signing.clone(), signing.last().cloned().ok_or_else(|| Failure::internal("no signing key"))?)
 	};
-	let document = subs::document(&app, &user, &row, &signing, &signer, node::usage(&app).await.get(&user.name)).map_err(Failure::bad)?;
+	let document = subs::document(&app, &user, &row, &signing, &signer, subs::Form::Whole, node::usage(&app).await.get(&user.name)).map_err(Failure::bad)?;
 	let carried = Carried::file(format!("v1.{}.{}", URL_SAFE_NO_PAD.encode(signer.public()), document).as_bytes()).map_err(|error| Failure::bad(error.to_string()))?;
 	audit(&app.db.lock(), &ctx.actor, &ctx.source, "device.export", &format!("user:{id}"), &format!("device:{device}"));
 	ok(&Exported {link: carried.veilway(), file: carried.file_content()})

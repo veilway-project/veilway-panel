@@ -8,6 +8,9 @@ pub fn random<const N: usize>() -> [u8; N] {
 	bytes
 }
 
+/// Fills a buffer of any length, in the shape the protocol crate asks of a random source.
+pub fn fill(bytes: &mut [u8]) -> Result<(), veilway_proto::NoRandom> {SystemRandom::new().fill(bytes).map_err(|_| veilway_proto::NoRandom)}
+
 pub fn sha256(bytes: &[u8]) -> [u8; 32] {digest::digest(&digest::SHA256, bytes).as_ref().try_into().expect("32 bytes")}
 
 pub fn equal(a: &[u8], b: &[u8]) -> bool {a.len() == b.len() && subtle::ConstantTimeEq::ct_eq(a, b).into()}
@@ -67,8 +70,8 @@ impl Keys {
 	}
 	pub fn seal_copy(&self, record: &[u8; 16], token: &[u8; 16]) -> Vec<u8> {Self::seal(&self.copy, &[COPY_LABEL, record].concat(), token)}
 	pub fn open_copy(&self, record: &[u8; 16], sealed: &[u8]) -> Option<[u8; 16]> {Self::open(&self.copy, &[COPY_LABEL, record].concat(), sealed)?.try_into().ok()}
-	pub fn seal_secret(&self, record: &[u8; 16], name: &str, plain: &[u8]) -> Vec<u8> {Self::seal(&self.secret, &[SECRET_LABEL, record, name.as_bytes()].concat(), plain)}
-	pub fn open_secret(&self, record: &[u8; 16], name: &str, sealed: &[u8]) -> Option<Vec<u8>> {Self::open(&self.secret, &[SECRET_LABEL, record, name.as_bytes()].concat(), sealed)}
+	pub fn seal_secret(&self, record: &[u8; 16], name: impl AsRef<[u8]>, plain: &[u8]) -> Vec<u8> {Self::seal(&self.secret, &[SECRET_LABEL, record, name.as_ref()].concat(), plain)}
+	pub fn open_secret(&self, record: &[u8; 16], name: impl AsRef<[u8]>, sealed: &[u8]) -> Option<Vec<u8>> {Self::open(&self.secret, &[SECRET_LABEL, record, name.as_ref()].concat(), sealed)}
 }
 
 /// RFC 6238 with SHA-1, 30 seconds and 6 digits, the form every authenticator app takes.

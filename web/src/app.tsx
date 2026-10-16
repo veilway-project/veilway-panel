@@ -157,6 +157,7 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 				{!twoStep && <Banner tone="danger" title={t("twostep.banner.title")}>{t("twostep.banner.body")}</Banner>}
 				<UpdateBanner/>
 				<NodeBanner node={node.data} onPushed={node.reload}/>
+				{node.data?.clock_synchronized === false && <Banner tone="warning" title={t("banner.clock.title")}>{t("banner.clock.body")}</Banner>}
 				<div className="p-page" key={page === "users" ? page + "/" + sub : page}>
 					{page === "dashboard" && <DashboardPage live={live.data} onLive={live.reload}/>}
 					{page === "traffic" && <TrafficPage/>}
