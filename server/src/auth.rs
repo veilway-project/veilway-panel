@@ -50,11 +50,6 @@ fn source_allowed(allowed: &[String], source: &str) -> bool {
 
 fn refuse(status: StatusCode, code: &'static str, message: &str) -> Response {Failure::new(status, code, message).into_response()}
 
-/// Whether the admin has no authenticator secret, which only an account made while two-step sign-in was off lacks.
-pub fn unenrolled(app: &App, admin_id: i64) -> bool {
-	app.db.lock().query_row("select length(totp_secret) = 0 from admins where id = ?", [admin_id], |row| row.get(0)).unwrap_or(false)
-}
-
 /// Whether a sign-in with two-step off found this admin's password shorter than the rule.
 pub fn short_password(app: &App, admin_id: i64) -> bool {
 	app.db.lock().query_row("select 1 from settings where key = ?", [format!("short_password:{admin_id}")], |_| Ok(())).is_ok()
@@ -133,8 +128,6 @@ pub async fn guard(State(guard): State<Arc<Guard>>, mut request: Request, next: 
 		return refuse(StatusCode::UNAUTHORIZED, "unauthorized", "The session has expired.");
 	}
 	if changes && !request.headers().get("x-csrf-token").and_then(|value| value.to_str().ok()).is_some_and(|sent| crypto::equal(sent.as_bytes(), csrf.as_bytes())) {return refuse(StatusCode::FORBIDDEN, "csrf", "The CSRF token is missing or wrong.")}
-	// With two-step sign-in on again, an account with no secret may only enroll, read its session and log out.
-	if app.cfg.two_step_on() && ![format!("{}/api/account/enroll", app.cfg.prefix), format!("{}/api/session", app.cfg.prefix), format!("{}/api/logout", app.cfg.prefix)].contains(&path) && unenrolled(app, admin_id) {return refuse(StatusCode::FORBIDDEN, "enrollment_required", "Set up the authenticator for this account first.")}
 	if !app.cfg.two_step_on() && ![format!("{}/api/account/password", app.cfg.prefix), format!("{}/api/session/reauth", app.cfg.prefix), format!("{}/api/session", app.cfg.prefix), format!("{}/api/logout", app.cfg.prefix)].contains(&path) && short_password(app, admin_id) {return refuse(StatusCode::FORBIDDEN, "password_change_required", "Change your password first. It is shorter than 12 characters.")}
 	if access == Access::AdminReauth && at - reauth_at > REAUTH {return refuse(StatusCode::FORBIDDEN, "reauth_required", "Confirm your password and code again first.")}
 	let _ = app.db.lock().execute("update sessions set last_seen = ? where id = ?", params![at, id]);

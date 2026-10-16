@@ -127,13 +127,15 @@ fn asked(map: &Map<String, Value>) -> Option<Asked> {
 /// Reads the body and says whether it is a valid request. Anything that is not answers as an unknown path.
 pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response {
 	let post = request.method() == Method::POST;
-	// A valid mirror header names the real source of the request. One that is not valid, or a source over its limit, is an unknown request.
-	let (via, direct) = (mirrors::check(&app, request.headers()), auth::source(&app, &request));
-	let source = via.as_ref().ok().and_then(Option::as_ref).map_or(direct, |(_, address)| address.to_string());
-	if let Ok(Some((name, _))) = &via {tracing::debug!("a subscription request relayed by the mirror {name} from {source}")}
-	let admitted = via.is_ok() && app.limits.hit(&format!("sub:{}", bucket(&source)), 120, 60);
+	let (direct, headers) = (auth::source(&app, &request), request.headers().clone());
 	// The body is drained to the cap whatever it holds, and the lookup always runs, so an invalid request costs what a valid one does.
 	let body = http_body_util::Limited::new(request.into_body(), 1024).collect().await.map(|body| body.to_bytes()).unwrap_or_default();
+	// A valid mirror header names the real source of the request. One that is not valid, or a source over its limit, is an unknown request, and only an admitted request takes its nonce.
+	let via = mirrors::check(&app, &headers, &body);
+	let verified = via.as_ref().ok().and_then(Option::as_ref);
+	let source = verified.map_or(direct, |verified| verified.address.to_string());
+	if let Some(verified) = verified {tracing::debug!("a subscription request relayed by the mirror {} from {source}", verified.name)}
+	let admitted = via.is_ok() && app.limits.hit(&format!("sub:{}", bucket(&source)), 120, 60) && verified.is_none_or(|verified| mirrors::accept(&app, verified));
 	let map = match serde_json::from_slice::<Value>(&body) {Ok(Value::Object(map)) => Some(map), _ => None};
 	let token: Option<[u8; 16]> = map.as_ref().and_then(|map| map.get("token")).and_then(Value::as_str).filter(|text| text.len() == 22).and_then(|text| URL_SAFE_NO_PAD.decode(text).ok()).and_then(|bytes| bytes.try_into().ok());
 	let Some(keys) = app.keys.as_ref() else {return app.not_found()};

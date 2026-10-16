@@ -1117,7 +1117,9 @@ async fn an_xray_inbound_is_edited_and_every_user_keeps_their_credential() {
 
 #[test]
 fn mirror_mac_matches_the_core_vector() {
-	assert_eq!(URL_SAFE_NO_PAD.encode(mirrors::mac(&[7; 32], "m1", "203.0.113.9", 1700000000, "AAAAAAAAAAAAAAAAAAAAAA")), "DOin5nKyW8-dXMUg7GMkcHNldK98QqJjkVvHGukWP4M");
+	let body = br#"{"v":1}"#;
+	assert_eq!(URL_SAFE_NO_PAD.encode(crypto::sha256(body)), "r7-dDzVgsP13legcQqCnnua2_GfgZPd4Jq7mQsrSjZE");
+	assert_eq!(URL_SAFE_NO_PAD.encode(mirrors::mac(&[7; 32], "m1", "203.0.113.9", 1700000000, "AAAAAAAAAAAAAAAAAAAAAA", body)), "l10IpkAlYVFrfLhjwdSNy8le5YSTUlyhf3eBBl-C3rs");
 }
 
 #[test]
@@ -1143,7 +1145,7 @@ async fn a_mirror_header_names_the_source_and_anything_else_is_unknown() {
 	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
 	let Link::Native(native) = &link else {panic!("not native")};
 	let body = |device: u8| json!({"v": 1, "token": URL_SAFE_NO_PAD.encode(native.token().expose()), "kids": [kids[0].text()], "device_public_key": STANDARD.encode([device; 32]), "device_secret": URL_SAFE_NO_PAD.encode([device; 16]), "op": "fetch"});
-	let header = |name: &str, address: &str, at: i64, nonce: &str, secret: &[u8]| format!("v1;{name};{address};{at};{nonce};{}", URL_SAFE_NO_PAD.encode(mirrors::mac(secret, name, address, at, nonce)));
+	let header = |name: &str, address: &str, at: i64, nonce: &str, secret: &[u8]| format!("v1;{name};{address};{at};{nonce};{}", URL_SAFE_NO_PAD.encode(mirrors::mac(secret, name, address, at, nonce, body(1).to_string().as_bytes())));
 	let send = |value: Option<String>, device: u8| {
 		let mut request = Request::builder().method(Method::POST).uri("/s").header(CONTENT_TYPE, "application/json").header(HOST, "panel.example.org");
 		if let Some(value) = value {request = request.header(mirrors::HEADER, value);}
@@ -1152,7 +1154,9 @@ async fn a_mirror_header_names_the_source_and_anything_else_is_unknown() {
 	let unknown = h.send(Request::builder().method(Method::GET).uri("/nothing-here").header(HOST, "panel.example.org"), None, "198.51.100.7").await.shape();
 	let (now, nonce) = (crypto::now(), |n: u8| URL_SAFE_NO_PAD.encode([n; 16]));
 	let valid = header("relay", "203.0.113.9", now, &nonce(1), &secret);
-	assert!(matches!(opened(&send(Some(valid.clone()), 1).await, &[key]), Payload::Subscription(_)));
+	let answer = send(Some(valid.clone()), 1).await;
+	assert_eq!(answer.headers.get(CONTENT_TYPE).unwrap(), "application/jose", "a document and a refusal are both signed answers");
+	assert!(matches!(opened(&answer, &[key]), Payload::Subscription(_)));
 	assert_eq!(h.app.limits.count("sub:203.0.113.9", 60), 1, "the forwarded address is the source");
 	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 0);
 	assert_eq!(send(Some(valid), 1).await.shape(), unknown, "a replayed header");
@@ -1162,8 +1166,46 @@ async fn a_mirror_header_names_the_source_and_anything_else_is_unknown() {
 	assert_eq!(send(Some(header("relay", "203.0.113.9", now, &nonce(5), &[1; 32])), 1).await.shape(), unknown, "a bad mac");
 	assert_eq!(send(Some(header("relay", "not an address", now, &nonce(6), &secret)), 1).await.shape(), unknown, "a bad address");
 	assert_eq!(send(Some("v1;relay".into()), 1).await.shape(), unknown, "a short header");
+	assert_eq!(send(Some(header("relay", "203.0.113.9", now, &nonce(7), &secret)), 2).await.shape(), unknown, "a body the mirror did not sign");
+	for _ in 0..120 {h.app.limits.hit("sub:203.0.113.9", 120, 60);}
+	assert_eq!(send(Some(header("relay", "203.0.113.9", now, &nonce(8), &secret)), 1).await.shape(), unknown, "a source over its limit");
+	h.app.limits.clear("sub:203.0.113.9");
+	assert!(matches!(opened(&send(Some(header("relay", "203.0.113.9", now, &nonce(8), &secret)), 1).await, &[key]), Payload::Subscription(_)), "a refused header takes no nonce");
 	assert!(matches!(opened(&send(None, 1).await, &[key]), Payload::Subscription(_)), "no header is an ordinary request");
 	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 1);
+}
+
+#[tokio::test]
+async fn a_refused_header_of_a_known_mirror_is_logged_once_a_minute_with_its_reason() {
+	let secret = [9u8; 32];
+	let h = Harness::with_config(None, |cfg| cfg.trusted_mirrors = vec![TrustedMirror {name: "relay".into(), secret: URL_SAFE_NO_PAD.encode(secret)}]).await;
+	let now = crypto::now();
+	let header = |key: &[u8], name: &str, at: i64, nonce: u8| {
+		let nonce = URL_SAFE_NO_PAD.encode([nonce; 16]);
+		format!("v1;{name};203.0.113.9;{at};{nonce};{}", URL_SAFE_NO_PAD.encode(mirrors::mac(key, name, "203.0.113.9", at, &nonce, b"{}")))
+	};
+	let send = |value: String| h.send(Request::builder().method(Method::POST).uri("/s").header(CONTENT_TYPE, "application/json").header(HOST, "panel.example.org").header(mirrors::HEADER, value), Some(json!({})), "198.51.100.7");
+	assert!(h.app.mirrors_seen.last_refusal("relay").is_none());
+	send(header(&secret, "relay", now - 120, 1)).await;
+	assert!(h.app.mirrors_seen.last_refusal("relay").unwrap().starts_with("stale, 12"), "{:?}", h.app.mirrors_seen.last_refusal("relay"));
+	send(header(&secret, "relay", now + 120, 2)).await;
+	send(header(&[1; 32], "relay", now, 3)).await;
+	assert!(h.app.mirrors_seen.last_refusal("relay").unwrap().starts_with("stale, 12"), "a second refusal within a minute is not logged");
+	send(header(&[1; 32], "other", now, 4)).await;
+	assert!(h.app.mirrors_seen.last_refusal("other").is_none(), "an unknown mirror is not logged");
+}
+
+#[tokio::test]
+async fn each_mirror_keeps_its_own_nonces_and_drops_the_oldest_past_its_cap() {
+	let h = Harness::new().await;
+	let verified = |name: &str, n: u32| mirrors::Verified {name: name.into(), address: "203.0.113.9".parse().unwrap(), nonce: format!("{n:022}")};
+	assert!(mirrors::accept(&h.app, &verified("b", 0)));
+	for n in 1..=20_000 {assert!(mirrors::accept(&h.app, &verified("a", n)), "{n}")}
+	assert!(!mirrors::accept(&h.app, &verified("b", 0)), "another mirror's traffic does not evict it");
+	assert!(!mirrors::accept(&h.app, &verified("a", 20_000)), "a nonce held is refused");
+	assert!(mirrors::accept(&h.app, &verified("a", 20_001)), "past the cap");
+	assert!(mirrors::accept(&h.app, &verified("a", 1)), "the oldest was dropped to make room");
+	assert!(!mirrors::accept(&h.app, &verified("a", 20_001)), "the newest is still held");
 }
 
 async fn rebuilt(h: &Harness, two_step: &str) -> Harness {
@@ -1186,7 +1228,8 @@ async fn two_step_off_asks_for_the_password_only_and_only_when_the_file_says_so(
 		assert!(!other.totp.is_empty(), "{value}");
 	}
 	let off = Harness::with_config(None, |cfg| cfg.two_step = "off".into()).await;
-	assert!(off.totp.is_empty() || off.app.db.lock().query_row("select length(totp_secret) from admins", [], |row| row.get::<_, i64>(0)).unwrap() == 0);
+	assert!(!off.totp.is_empty());
+	assert_eq!(off.app.db.lock().query_row("select count(*) from admins where length(totp_secret) = 0", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
 	assert_eq!(off.call(Method::GET, "/p/api/status", None, None, "10.0.0.1").await.json()["two_step"], false);
 	let answer = sign_in(&off, json!({"username": "owner", "password": PASSWORD})).await;
 	assert_eq!(answer.status, StatusCode::OK, "{}", String::from_utf8_lossy(&answer.body));
@@ -1197,7 +1240,7 @@ async fn two_step_off_asks_for_the_password_only_and_only_when_the_file_says_so(
 	assert_eq!(off.call(Method::POST, "/p/api/session/reauth", Some(&session), Some(json!({"password": "wrong password here"})), "10.0.0.2").await.status, StatusCode::UNAUTHORIZED);
 	let made = off.call(Method::POST, "/p/api/admins", Some(&session), Some(json!({"username": "second", "password": PASSWORD})), "10.0.0.2").await;
 	assert_eq!(made.status, StatusCode::OK);
-	assert_eq!(made.json()["totp_secret"], "");
+	assert!(!made.json()["totp_secret"].as_str().unwrap().is_empty(), "the code is off, but the account still gets a secret");
 	assert_eq!(sign_in(&off, json!({"username": "second", "password": PASSWORD})).await.status, StatusCode::OK);
 }
 
@@ -1222,39 +1265,57 @@ async fn the_switch_is_not_reachable_through_any_route() {
 }
 
 #[tokio::test]
-async fn turning_it_back_on_forces_an_enrollment_and_the_changes_are_audited() {
-	let off = Harness::with_config(None, |cfg| cfg.two_step = "off".into()).await;
-	let secret_before: Vec<u8> = {
-		let db = off.app.db.lock();
-		db.execute("insert into admins (username, password_hash, totp_secret, totp_record, created) values ('kept', 'x', x'0102', x'03', 1)", []).unwrap();
-		db.query_row("select totp_secret from admins where username = 'kept'", [], |row| row.get(0)).unwrap()
-	};
-	let on = rebuilt(&off, "on").await;
-	assert_eq!(on.app.db.lock().query_row("select totp_secret from admins where username = 'kept'", [], |row| row.get::<_, Vec<u8>>(0)).unwrap(), secret_before, "existing secrets are kept");
-	let answer = on.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD})), "10.0.0.2").await;
+async fn turning_it_back_on_ends_sessions_and_revokes_the_tokens_made_while_off() {
+	let first = Harness::new().await;
+	let session = first.login("10.0.0.1").await;
+	let before = first.token(&session, "full", json!({})).await;
+	tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+	let off = rebuilt(&first, "off").await;
+	let answer = off.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD})), "10.0.0.2").await;
 	assert_eq!(answer.status, StatusCode::OK, "{}", String::from_utf8_lossy(&answer.body));
-	let session = Session {cookie: answer.headers.get(SET_COOKIE).unwrap().to_str().unwrap().split(';').next().unwrap().to_string(), csrf: answer.json()["csrf"].as_str().unwrap().to_string()};
-	assert_eq!(on.call(Method::GET, "/p/api/session", Some(&session), None, "10.0.0.2").await.json()["enroll_required"], true);
-	for (method, path) in [(Method::GET, "/p/api/users"), (Method::GET, "/p/api/settings"), (Method::GET, "/p/api/audit"), (Method::POST, "/p/api/session/reauth")] {
-		let denied = on.call(method, path, Some(&session), Some(json!({"password": PASSWORD})), "10.0.0.2").await;
-		assert_eq!((denied.status, denied.json()["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("enrollment_required")), "{path}");
-	}
-	assert_eq!(on.call(Method::POST, "/p/api/account/enroll", Some(&session), Some(json!({"password": "wrong password here"})), "10.0.0.2").await.status, StatusCode::UNAUTHORIZED);
-	let enrolled = on.call(Method::POST, "/p/api/account/enroll", Some(&session), Some(json!({"password": PASSWORD})), "10.0.0.2").await;
-	assert_eq!(enrolled.status, StatusCode::OK, "{}", String::from_utf8_lossy(&enrolled.body));
-	let secret = data_encoding::BASE32_NOPAD.decode(enrolled.json()["totp_secret"].as_str().unwrap().as_bytes()).unwrap();
-	assert_eq!(on.call(Method::POST, "/p/api/account/enroll", Some(&session), Some(json!({"password": PASSWORD})), "10.0.0.2").await.status, StatusCode::CONFLICT);
-	assert_eq!(on.call(Method::GET, "/p/api/session", Some(&session), None, "10.0.0.2").await.json()["enroll_required"], false);
-	assert_eq!(on.call(Method::GET, "/p/api/users", Some(&session), None, "10.0.0.2").await.status, StatusCode::OK);
-	let code = format!("{:06}", crypto::totp_at(&secret, crypto::now() as u64 / 30));
-	assert_eq!(on.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD})), "10.0.0.3").await.status, StatusCode::UNAUTHORIZED);
-	assert_eq!(on.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD, "totp": code})), "10.0.0.3").await.status, StatusCode::OK);
-	let entries = on.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.2").await.json();
+	let off_session = Session {cookie: answer.headers.get(SET_COOKIE).unwrap().to_str().unwrap().split(';').next().unwrap().to_string(), csrf: answer.json()["csrf"].as_str().unwrap().to_string()};
+	let made_off = off.token(&off_session, "full", json!({})).await;
+	let on = rebuilt(&off, "on").await;
+	assert_eq!(on.call(Method::GET, "/p/api/users", Some(&session), None, "10.0.0.1").await.status, StatusCode::UNAUTHORIZED, "a session from before the switch");
+	assert_eq!(on.call(Method::GET, "/p/api/users", Some(&off_session), None, "10.0.0.2").await.status, StatusCode::UNAUTHORIZED, "a session from while it was off");
+	assert_eq!(on.bearer(Method::GET, "/p/api/users", &before, None, "10.0.0.1").await.status, StatusCode::OK, "a token made while on keeps working");
+	assert_eq!(on.bearer(Method::GET, "/p/api/users", &made_off, None, "10.0.0.1").await.status, StatusCode::UNAUTHORIZED, "a token made while off is revoked");
+	let fresh = on.login("10.0.0.3").await;
+	let entries = on.call(Method::GET, "/p/api/audit?limit=1000", Some(&fresh), None, "10.0.0.3").await.json();
 	let seen: Vec<(String, String)> = entries["entries"].as_array().unwrap().iter().filter(|entry| entry["action"] == "panel.two_step").map(|entry| (entry["detail"].as_str().unwrap().to_string(), entry["actor"].as_str().unwrap().to_string())).collect();
-	assert_eq!(seen, vec![("on".to_string(), "panel".to_string()), ("off".to_string(), "panel".to_string())], "newest first: off at the first start, on at the second");
+	assert_eq!(seen, vec![("on, 2 sessions ended, 1 tokens revoked".to_string(), "panel".to_string()), ("off".to_string(), "panel".to_string())], "newest first");
+	assert_eq!(on.app.db.lock().query_row("select count(*) from settings where key = 'two_step_off_at'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
 	let again = rebuilt(&on, "on").await;
 	let count: i64 = again.app.db.lock().query_row("select count(*) from audit where action = 'panel.two_step'", [], |row| row.get(0)).unwrap();
 	assert_eq!(count, 2, "an unchanged value writes nothing");
+}
+
+#[tokio::test]
+async fn an_admin_without_a_secret_gets_one_at_start_and_the_password_alone_never_signs_in_while_on() {
+	let off = Harness::with_config(None, |cfg| cfg.two_step = "off".into()).await;
+	off.app.db.lock().execute("update admins set totp_secret = x'', totp_record = x'' where username = 'owner'", []).unwrap();
+	let on = rebuilt(&off, "on").await;
+	assert_eq!(on.app.db.lock().query_row("select count(*) from admins where length(totp_secret) = 0", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+	assert_eq!(on.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD})), "10.0.0.2").await.status, StatusCode::UNAUTHORIZED);
+	let back_off = rebuilt(&on, "off").await;
+	assert_eq!(back_off.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD})), "10.0.0.2").await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn no_admin_is_left_without_a_secret_after_setup_add_reset_or_change_in_either_mode() {
+	for two_step in ["on", "off"] {
+		let h = Harness::with_config(None, |cfg| cfg.two_step = two_step.into()).await;
+		let session = h.login("10.0.0.1").await;
+		let made = h.call(Method::POST, "/p/api/admins", Some(&session), Some(json!({"username": "second", "password": PASSWORD})), "10.0.0.1").await;
+		assert_eq!(made.status, StatusCode::OK, "{two_step}");
+		let id: i64 = h.app.db.lock().query_row("select id from admins where username = 'second'", [], |row| row.get(0)).unwrap();
+		let reset = h.call(Method::POST, &format!("/p/api/admins/{id}/reset"), Some(&session), Some(json!({"new_password": PASSWORD})), "10.0.0.1").await;
+		assert_eq!(reset.status, StatusCode::OK, "{two_step}");
+		let changed = h.call(Method::POST, "/p/api/account/totp", Some(&session), None, "10.0.0.1").await;
+		assert_eq!(changed.status, StatusCode::OK, "{two_step}");
+		assert!(!changed.json()["totp_secret"].as_str().unwrap().is_empty(), "{two_step}");
+		assert_eq!(h.app.db.lock().query_row("select count(*) from admins where length(totp_secret) = 0", [], |row| row.get::<_, i64>(0)).unwrap(), 0, "{two_step}");
+	}
 }
 
 #[tokio::test]

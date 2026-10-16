@@ -5,7 +5,7 @@ import {en, type PanelKey} from "./locales/en.ts";
 import {fa} from "./locales/fa.ts";
 import {ago, ErrorNote, GuardProvider, useGuard, useLoad, useP, useSay} from "./kit.tsx";
 import {AccountPage, type Prefs} from "./pages/account.tsx";
-import {ChangePassword, Enroll, Login, Setup} from "./pages/auth.tsx";
+import {ChangePassword, Login, Setup} from "./pages/auth.tsx";
 import {InboundsPage, loadRunning, RoutingPage} from "./pages/config.tsx";
 import {DashboardPage} from "./pages/dashboard.tsx";
 import {DnsPage} from "./pages/dns.tsx";
@@ -46,14 +46,14 @@ function Brand() {
 	</div>;
 }
 
-type Auth = {kind: "loading"} | {kind: "failed", error: unknown} | {kind: "setup"} | {kind: "login"} | {kind: "enroll"} | {kind: "password"} | {kind: "in", username: string};
+type Auth = {kind: "loading"} | {kind: "failed", error: unknown} | {kind: "setup"} | {kind: "login"} | {kind: "password"} | {kind: "in", username: string};
 
 function Root({prefs, onPrefs}: {prefs: Prefs, onPrefs: (prefs: Prefs) => void}) {
 	const {t} = useP(), say = useSay(), toast = useToast(), [auth, setAuth] = useState<Auth>({kind: "loading"}), [hash, setHash] = useState(location.hash);
 	const [settings, setSettings] = useState<Settings | null>(null), [twoStep, setTwoStep] = useState(true);
 	const start = () => {
 		setAuth({kind: "loading"});
-		api("get", "/status").then(status => { setTwoStep(flags.twoStep = status.two_step); return status.setup_needed ? setAuth({kind: "setup"}) : api("get", "/session").then(info => { session.set(info.csrf); setAuth(info.enroll_required ? {kind: "enroll"} : info.password_change_required ? {kind: "password"} : {kind: "in", username: info.username}); }, () => setAuth({kind: "login"})); }, error => setAuth({kind: "failed", error}));
+		api("get", "/status").then(status => { setTwoStep(flags.twoStep = status.two_step); return status.setup_needed ? setAuth({kind: "setup"}) : api("get", "/session").then(info => { session.set(info.csrf); setAuth(info.password_change_required ? {kind: "password"} : {kind: "in", username: info.username}); }, () => setAuth({kind: "login"})); }, error => setAuth({kind: "failed", error}));
 	};
 	useEffect(() => {
 		start();
@@ -78,7 +78,6 @@ function Root({prefs, onPrefs}: {prefs: Prefs, onPrefs: (prefs: Prefs) => void})
 				{auth.kind === "failed" && <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={start}>{t("action.retry")}</Button>}>{say(auth.error)}</StateBlock>}
 				{auth.kind === "setup" && <Setup onDone={() => setAuth({kind: "login"})}/>}
 				{auth.kind === "login" && <Login onDone={(username, step) => setAuth(step ? {kind: step} : {kind: "in", username})}/>}
-				{auth.kind === "enroll" && <Enroll onDone={() => void enter()} onLogout={logout}/>}
 				{auth.kind === "password" && <ChangePassword onDone={() => void enter()} onLogout={logout}/>}
 			</Glass>
 		</main>

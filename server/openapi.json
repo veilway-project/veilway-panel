@@ -420,18 +420,6 @@
         ],
         "type": "object"
       },
-      "Enroll": {
-        "additionalProperties": false,
-        "properties": {
-          "password": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "password"
-        ],
-        "type": "object"
-      },
       "ErrorBody": {
         "properties": {
           "error": {
@@ -812,10 +800,6 @@
           "csrf": {
             "type": "string"
           },
-          "enroll_required": {
-            "description": "True when two-step sign-in is on and this admin has no authenticator yet, see the session answer.",
-            "type": "boolean"
-          },
           "password_change_required": {
             "description": "True when two-step sign-in is off and this admin's password is shorter than 12 characters: only the password change works until it is done.",
             "type": "boolean"
@@ -831,7 +815,6 @@
           "username",
           "session_id",
           "csrf",
-          "enroll_required",
           "password_change_required"
         ],
         "type": "object"
@@ -1262,10 +1245,6 @@
           "csrf": {
             "type": "string"
           },
-          "enroll_required": {
-            "description": "True when two-step sign-in is on and this admin has no authenticator yet: only the enrollment works until they make one.",
-            "type": "boolean"
-          },
           "password_change_required": {
             "description": "True when two-step sign-in is off and this admin's password is shorter than 12 characters: only the password change works until it is done.",
             "type": "boolean"
@@ -1286,7 +1265,6 @@
           "session_id",
           "csrf",
           "reauth_until",
-          "enroll_required",
           "password_change_required"
         ],
         "type": "object"
@@ -1607,7 +1585,7 @@
             "type": "string"
           },
           "totp_secret": {
-            "description": "Base32, for an authenticator app. Shown once. Empty when two-step sign-in is off.",
+            "description": "Base32, for an authenticator app. Shown once, whatever two-step sign-in is set to.",
             "type": "string"
           }
         },
@@ -2118,76 +2096,6 @@
   },
   "openapi": "3.1.0",
   "paths": {
-    "/account/enroll": {
-      "post": {
-        "operationId": "enrollTotp",
-        "parameters": [],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/Enroll"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TotpEnrolled"
-                }
-              }
-            },
-            "description": "Done."
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "The request is malformed or breaks a rule."
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "Not logged in, or the token is not valid."
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
-          },
-          "429": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "Rate limited."
-          }
-        },
-        "summary": "Makes the first TOTP secret of an account that has none, which is what an admin made while two-step sign-in was off must do after it is turned on again. Takes the password. Shown once.",
-        "x-access": "session"
-      }
-    },
     "/account/password": {
       "post": {
         "operationId": "changePassword",

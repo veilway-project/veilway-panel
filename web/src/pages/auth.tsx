@@ -15,8 +15,7 @@ export function Setup({onDone}: {onDone: () => void}) {
 		setBusy(true);
 		setError(null);
 		try {
-			const made = await api("post", "/setup", {body: {token: token.trim(), username, password}});
-			if (made.totp_secret) setTotp(made); else onDone();
+			setTotp(await api("post", "/setup", {body: {token: token.trim(), username, password}}));
 		} catch (failure) {
 			setError(failure);
 		} finally {
@@ -36,7 +35,7 @@ export function Setup({onDone}: {onDone: () => void}) {
 	</form>;
 }
 
-export function Login({onDone}: {onDone: (username: string, step: "enroll" | "password" | null) => void}) {
+export function Login({onDone}: {onDone: (username: string, step: "password" | null) => void}) {
 	const {t} = useP(), [username, setUsername] = useState(""), [password, setPassword] = useState(""), [code, setCode] = useState(""), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const submit = async () => {
 		setBusy(true);
@@ -44,7 +43,7 @@ export function Login({onDone}: {onDone: (username: string, step: "enroll" | "pa
 		try {
 			const answer = await api("post", "/login", {body: {username: username.trim(), password, totp: flags.twoStep ? code.replace(/\s/g, "") : ""}});
 			session.set(answer.csrf);
-			onDone(answer.username, answer.enroll_required ? "enroll" : answer.password_change_required ? "password" : null);
+			onDone(answer.username, answer.password_change_required ? "password" : null);
 		} catch (failure) {
 			setError(failure);
 			setCode("");
@@ -53,7 +52,6 @@ export function Login({onDone}: {onDone: (username: string, step: "enroll" | "pa
 		}
 	};
 	return <form className="p-stack" onSubmit={event => { event.preventDefault(); void submit(); }}>
-		{/* The code is not required here: an account made while two-step was off has none to type, and the server decides. */}
 		<div><h1 className="vw-h1">{t("login.title")}</h1><p className="vw-muted">{t(flags.twoStep ? "login.lead" : "twostep.lead")}</p></div>
 		{!flags.twoStep && <p className="vw-small p-danger-note" role="alert">{t("twostep.note")}</p>}
 		<TextField label={t("login.username")} autoComplete="username" value={username} onChange={setUsername} technical required autoFocus/>
@@ -61,29 +59,6 @@ export function Login({onDone}: {onDone: (username: string, step: "enroll" | "pa
 		{flags.twoStep && <TextField label={t("login.code")} hint={t("login.codeHint")} inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={code} onChange={setCode} technical/>}
 		<ErrorNote error={error}/>
 		<div><Button type="submit" variant="primary" disabled={busy}>{t("login.submit")}</Button></div>
-	</form>;
-}
-
-// The forced step after two-step sign-in was turned back on for an account made while it was off: the server refuses every other call until this is done.
-export function Enroll({onDone, onLogout}: {onDone: () => void, onLogout: () => void}) {
-	const {t} = useP(), [password, setPassword] = useState(""), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [totp, setTotp] = useState<Totp | null>(null);
-	const submit = async () => {
-		setBusy(true);
-		setError(null);
-		try {
-			setTotp(await api("post", "/account/enroll", {body: {password}}));
-		} catch (failure) {
-			setError(failure);
-		} finally {
-			setBusy(false);
-		}
-	};
-	if (totp) return <TotpShown totp={totp} done={t("totp.doneAccount")} onDone={onDone}/>;
-	return <form className="p-stack" onSubmit={event => { event.preventDefault(); void submit(); }}>
-		<div><h1 className="vw-h1">{t("enroll.title")}</h1><p className="vw-muted">{t("enroll.lead")}</p></div>
-		<TextField label={t("login.password")} type="password" autoComplete="current-password" value={password} onChange={setPassword} required autoFocus/>
-		<ErrorNote error={error}/>
-		<div className="p-cluster"><Button type="submit" variant="primary" disabled={busy}>{t("enroll.submit")}</Button><Button onClick={onLogout}>{t("account.logout")}</Button></div>
 	</form>;
 }
 

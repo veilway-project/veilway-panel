@@ -45,7 +45,6 @@ pub fn routes(schemas: &mut SchemaGenerator) -> Vec<Route> {
 		route::<Nothing, admin::SessionsOut, _, _>(s, M::GET, "/sessions", "listSessions", "The admin's sessions.", Access::Admin, admin::sessions),
 		route::<Nothing, admin::Done, _, _>(s, M::DELETE, "/sessions/{sid}", "revokeSession", "Ends a session.", Access::Admin, admin::revoke_session),
 		route::<admin::NewPassword, admin::Done, _, _>(s, M::POST, "/account/password", "changePassword", "Changes the password and ends every other session.", Access::AdminReauth, admin::change_password),
-		route::<admin::Enroll, admin::TotpEnrolled, _, _>(s, M::POST, "/account/enroll", "enrollTotp", "Makes the first TOTP secret of an account that has none, which is what an admin made while two-step sign-in was off must do after it is turned on again. Takes the password. Shown once.", Access::Admin, admin::enroll),
 		route::<Nothing, admin::TotpEnrolled, _, _>(s, M::POST, "/account/totp", "changeTotp", "Makes a new TOTP secret and ends every other session.", Access::AdminReauth, admin::change_totp),
 		route::<Nothing, admin::AdminsOut, _, _>(s, M::GET, "/admins", "listAdmins", "The admin accounts.", Access::Admin, admin::admins),
 		route::<admin::NewAdmin, admin::TotpEnrolled, _, _>(s, M::POST, "/admins", "createAdmin", "Makes another admin.", Access::AdminReauth, admin::create_admin),

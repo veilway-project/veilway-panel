@@ -49,8 +49,20 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 	{
 		let db = db.lock();
 		let last = db.query_row("select value from settings where key = 'two_step'", [], |row| row.get::<_, String>(0)).unwrap_or_else(|_| "on".into());
-		if last != two_step {db::audit(&db, "panel", "config", "panel.two_step", "panel", two_step)}
+		if last != two_step && two_step == "on" {
+			let since: i64 = db.query_row("select value from settings where key = 'two_step_off_at'", [], |row| row.get::<_, String>(0)).ok().and_then(|text| text.parse().ok()).unwrap_or(0);
+			let ended = db.execute("delete from sessions", []).unwrap_or(0);
+			// Without a recorded time for going off, every token counts as made while it was off.
+			let revoked = db.execute("update api_tokens set revoked_at = ? where created >= ? and revoked_at is null", rusqlite::params![crypto::now(), since]).unwrap_or(0);
+			let _ = db.execute("delete from settings where key = 'two_step_off_at'", []);
+			db::audit(&db, "panel", "config", "panel.two_step", "panel", &format!("on, {ended} sessions ended, {revoked} tokens revoked"));
+		}
+		if last != two_step && two_step == "off" {
+			let _ = db.execute("insert into settings (key, value) values ('two_step_off_at', ?) on conflict (key) do update set value = excluded.value", [crypto::now().to_string()]);
+			db::audit(&db, "panel", "config", "panel.two_step", "panel", "off");
+		}
 		let _ = db.execute("insert into settings (key, value) values ('two_step', ?) on conflict (key) do update set value = excluded.value", [two_step]);
+		if let Some(keys) = &keys {admin::complete_secrets(&db, keys)}
 	}
 	let token = setup_needed.then(|| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<20>()));
 	if let Some(token) = &token {println!("Setup token (one time): {token}\nPOST it with a username and password to {}/api/setup", cfg.prefix);}

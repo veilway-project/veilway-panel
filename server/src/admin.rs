@@ -1,11 +1,11 @@
 //! Admin accounts: setup, login, TOTP, sessions, API tokens, the audit log, settings, signing keys and the node.
-use crate::{app::{bucket, App, Settings, SigningEntry}, auth::{Agent, COOKIE_NAME, TOKEN_PREFIX}, crypto::{self, now}, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
+use crate::{app::{bucket, App, Settings, SigningEntry}, auth::{Agent, COOKIE_NAME, TOKEN_PREFIX}, crypto::{self, now, Keys}, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
 use argon2::{password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
 use axum::{extract::{Path, Query, State}, http::{header::SET_COOKIE, HeaderName, HeaderValue, StatusCode}, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use data_encoding::BASE32_NOPAD;
 use ipnet::{IpNet, Ipv4Net};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -65,17 +65,27 @@ pub async fn status(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 
 #[derive(Serialize, JsonSchema)]
 pub struct TotpEnrolled {
-	/// Base32, for an authenticator app. Shown once. Empty when two-step sign-in is off.
+	/// Base32, for an authenticator app. Shown once, whatever two-step sign-in is set to.
 	pub totp_secret: String, pub otpauth: String,
 }
 
-/// A new secret, or none (empty blobs and empty strings) while two-step sign-in is off, which forces an enrollment at the first sign-in after it is turned on again.
+/// A new secret, made whatever two-step sign-in is set to, so that no account is left without one.
 fn new_totp(app: &App, name: &str) -> Result<(Vec<u8>, Vec<u8>, TotpEnrolled), Failure> {
-	if !app.cfg.two_step_on() {return Ok((Vec::new(), Vec::new(), TotpEnrolled {totp_secret: String::new(), otpauth: String::new()}))}
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
 	let (secret, record) = (crypto::random::<20>(), crypto::random::<16>());
 	let text = BASE32_NOPAD.encode(&secret);
 	Ok((keys.seal_secret(&record, "totp", &secret), record.to_vec(), TotpEnrolled {otpauth: format!("otpauth://totp/Veilway:{name}?secret={text}&issuer=Veilway"), totp_secret: text}))
+}
+
+/// Gives a secret to each admin that has none, which only an account made while two-step sign-in was off can lack. Nobody has seen that secret, so the admin changes it under Account while the code is off, which shows it, or another admin resets the account under Admins.
+pub fn complete_secrets(db: &Connection, keys: &Keys) {
+	let Ok(mut statement) = db.prepare("select id, username from admins where length(totp_secret) = 0") else {return};
+	let missing: Vec<(i64, String)> = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).map(|rows| rows.filter_map(Result::ok).collect()).unwrap_or_default();
+	for (id, name) in missing {
+		let (secret, record) = (crypto::random::<20>(), crypto::random::<16>());
+		let _ = db.execute("update admins set totp_secret = ?, totp_record = ?, totp_last_step = 0 where id = ?", params![keys.seal_secret(&record, "totp", &secret), record.to_vec(), id]);
+		tracing::warn!("admin {name} had no authenticator secret, from a time when two-step sign-in was off, so one was made that nobody has seen. Change the authenticator under Account while two-step sign-in is off, or have another admin reset the account under Admins");
+	}
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -128,8 +138,7 @@ async fn verify(app: &App, admin: Option<AdminRow>, name: &str, password: &str, 
 	let waiting = wait_left(app, name) > 0;
 	if waiting && !app.cfg.two_step_on() {return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries. Wait a while."))}
 	let good = check_password(admin.as_ref().map_or_else(|| dummy().to_string(), |admin| admin.hash.clone()), password.to_string()).await;
-	// An admin with no secret (made while the code was off) passes on the password alone, and the guard then allows nothing but the enrollment until they have one.
-	let need_code = app.cfg.two_step_on() && admin.as_ref().is_some_and(|admin| !admin.secret.is_empty());
+	let need_code = app.cfg.two_step_on();
 	let step = admin.as_ref().filter(|_| need_code).and_then(|admin| {
 		let record: [u8; 16] = admin.record.clone().try_into().ok()?;
 		let secret = app.keys.as_ref()?.open_secret(&record, "totp", &admin.secret)?;
@@ -162,8 +171,6 @@ pub struct Login {pub username: String, pub password: String,
 
 #[derive(Serialize, JsonSchema)]
 pub struct LoggedIn {pub username: String, pub session_id: String, pub csrf: String,
-	/// True when two-step sign-in is on and this admin has no authenticator yet, see the session answer.
-	pub enroll_required: bool,
 	/// True when two-step sign-in is off and this admin's password is shorter than 12 characters: only the password change works until it is done.
 	pub password_change_required: bool}
 
@@ -193,7 +200,7 @@ pub async fn login(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 		audit(&db, &format!("admin:{}", admin.username), &ctx.source, "login", &format!("admin:{}", admin.id), &id);
 	}
 	let cookie = format!("{COOKIE_NAME}={}; Path={}; HttpOnly; SameSite=Strict; Max-Age={}{}", URL_SAFE_NO_PAD.encode(raw), app.cfg.prefix, crate::auth::ABSOLUTE, if app.cfg.secure_cookies {"; Secure"} else {""});
-	let mut response = json(StatusCode::OK, &LoggedIn {enroll_required: app.cfg.two_step_on() && admin.secret.is_empty(), password_change_required: short, username: admin.username, session_id: id, csrf});
+	let mut response = json(StatusCode::OK, &LoggedIn {password_change_required: short, username: admin.username, session_id: id, csrf});
 	response.headers_mut().insert(SET_COOKIE, HeaderValue::from_str(&cookie).map_err(Failure::internal)?);
 	Ok(response)
 }
@@ -216,15 +223,13 @@ pub async fn logout(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>)
 
 #[derive(Serialize, JsonSchema)]
 pub struct SessionInfo {pub username: String, pub session_id: String, pub csrf: String, pub reauth_until: i64,
-	/// True when two-step sign-in is on and this admin has no authenticator yet: only the enrollment works until they make one.
-	pub enroll_required: bool,
 	/// True when two-step sign-in is off and this admin's password is shorter than 12 characters: only the password change works until it is done.
 	pub password_change_required: bool}
 
 pub async fn session(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {
 	let id = ctx.session_id.ok_or_else(|| Failure::bad("This call is for a login session."))?;
 	let (csrf, reauth): (String, i64) = app.db.lock().query_row("select csrf, reauth_at from sessions where id = ?", [&id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-	ok(&SessionInfo {username: ctx.actor.trim_start_matches("admin:").to_string(), session_id: id, csrf, reauth_until: reauth + crate::auth::REAUTH, enroll_required: app.cfg.two_step_on() && crate::auth::unenrolled(&app, ctx.admin_id), password_change_required: !app.cfg.two_step_on() && crate::auth::short_password(&app, ctx.admin_id)})
+	ok(&SessionInfo {username: ctx.actor.trim_start_matches("admin:").to_string(), session_id: id, csrf, reauth_until: reauth + crate::auth::REAUTH, password_change_required: !app.cfg.two_step_on() && crate::auth::short_password(&app, ctx.admin_id)})
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -286,24 +291,6 @@ pub async fn change_totp(State(app): State<Arc<App>>, Extension(ctx): Extension<
 	db.execute("update admins set totp_secret = ?, totp_record = ?, totp_last_step = 0 where id = ?", params![sealed, record, ctx.admin_id])?;
 	db.execute("delete from sessions where admin_id = ? and id != ?", params![ctx.admin_id, ctx.session_id.clone().unwrap_or_default()])?;
 	audit(&db, &ctx.actor, &ctx.source, "account.totp", "admin", "");
-	ok(&shown)
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Enroll {pub password: String}
-
-/// The forced step after two-step sign-in was turned back on: an admin with no secret makes one, with the password as the proof. Never replaces an existing secret.
-pub async fn enroll(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Enroll>) -> Result<Response, Failure> {
-	let name = ctx.actor.trim_start_matches("admin:").to_string();
-	let admin = admin_by(&app, "id", ctx.admin_id.into()).ok_or_else(|| Failure::missing("admin"))?;
-	if !admin.secret.is_empty() {return Err(Failure::conflict("This account already has an authenticator."))}
-	if !check_password(admin.hash.clone(), input.password.clone()).await {return Err(wrong())}
-	let (sealed, record, shown) = new_totp(&app, &name)?;
-	let db = app.db.lock();
-	if db.execute("update admins set totp_secret = ?, totp_record = ?, totp_last_step = 0 where id = ? and length(totp_secret) = 0", params![sealed, record, ctx.admin_id])? == 0 {return Err(Failure::conflict("This account already has an authenticator."))}
-	db.execute("delete from sessions where admin_id = ? and id != ?", params![ctx.admin_id, ctx.session_id.clone().unwrap_or_default()])?;
-	audit(&db, &ctx.actor, &ctx.source, "account.enroll", "admin", "");
 	ok(&shown)
 }
 

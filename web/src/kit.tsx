@@ -113,7 +113,7 @@ export function Copyable({label, value, multiline}: {label: string, value: strin
 export function TotpShown({totp, done, onDone}: {totp: Totp, done: string, onDone: () => void}) {
 	const {t} = useP();
 	return <div className="p-stack">
-		<div><h2 className="vw-h2">{t("totp.title")}</h2><p className="vw-muted">{t("totp.lead")}</p></div>
+		<div><h2 className="vw-h2">{t("totp.title")}</h2><p className="vw-muted">{t("totp.lead")}</p>{!flags.twoStep && <p className="vw-small vw-muted">{t("totp.later")}</p>}</div>
 		<Qr text={totp.otpauth} label={t("totp.qr")}/>
 		<Copyable label={t("totp.key")} value={totp.totp_secret}/>
 		<div><Button variant="primary" onClick={onDone}>{done}</Button></div>

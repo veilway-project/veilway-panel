@@ -20,7 +20,7 @@ export function AdminsTab() {
 		setError(null);
 		try {
 			const totp = form.kind === "add" ? await guard(() => api("post", "/admins", {body: {username: target, password}})) : await guard(() => api("post", "/admins/{id}/reset", {params: {id: form.admin.id}, body: {new_password: password}}));
-			if (totp.totp_secret) setShown({name: target, totp, reset: form.kind === "reset"}); else toast({tone: "success", title: t("twostep.noCode", {name: target})});
+			setShown({name: target, totp, reset: form.kind === "reset"});
 			setForm(null);
 			admins.reload();
 		} catch (failure) {

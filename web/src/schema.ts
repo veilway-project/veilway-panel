@@ -4,23 +4,6 @@
  */
 
 export interface paths {
-    "/account/enroll": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Makes the first TOTP secret of an account that has none, which is what an admin made while two-step sign-in was off must do after it is turned on again. Takes the password. Shown once. */
-        post: operations["enrollTotp"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/account/password": {
         parameters: {
             query?: never;
@@ -1214,9 +1197,6 @@ export interface components {
             file: string;
             filename: string;
         };
-        Enroll: {
-            password: string;
-        };
         ErrorBody: {
             error: components["schemas"]["ErrorDetail"];
         };
@@ -1326,8 +1306,6 @@ export interface components {
         };
         LoggedIn: {
             csrf: string;
-            /** @description True when two-step sign-in is on and this admin has no authenticator yet, see the session answer. */
-            enroll_required: boolean;
             /** @description True when two-step sign-in is off and this admin's password is shorter than 12 characters: only the password change works until it is done. */
             password_change_required: boolean;
             session_id: string;
@@ -1482,8 +1460,6 @@ export interface components {
         };
         SessionInfo: {
             csrf: string;
-            /** @description True when two-step sign-in is on and this admin has no authenticator yet: only the enrollment works until they make one. */
-            enroll_required: boolean;
             /** @description True when two-step sign-in is off and this admin's password is shorter than 12 characters: only the password change works until it is done. */
             password_change_required: boolean;
             /** Format: int64 */
@@ -1624,7 +1600,7 @@ export interface components {
         };
         TotpEnrolled: {
             otpauth: string;
-            /** @description Base32, for an authenticator app. Shown once. Empty when two-step sign-in is off. */
+            /** @description Base32, for an authenticator app. Shown once, whatever two-step sign-in is set to. */
             totp_secret: string;
         };
         UpdateInfo: {
@@ -1782,66 +1758,6 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    enrollTotp: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["Enroll"];
-            };
-        };
-        responses: {
-            /** @description Done. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TotpEnrolled"];
-                };
-            };
-            /** @description The request is malformed or breaks a rule. */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not logged in, or the token is not valid. */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Rate limited. */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
     changePassword: {
         parameters: {
             query?: never;
