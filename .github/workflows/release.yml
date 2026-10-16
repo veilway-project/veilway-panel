@@ -51,6 +51,8 @@ jobs:
           tool: cargo-zigbuild
       - name: Build
         working-directory: ws/veilway-panel/server
+        env:
+          VEILWAY_REQUIRE_WEB: "1"
         run: cargo zigbuild --release --locked --target ${{ matrix.target }} --bin veilway-panel
       - name: Stage asset
         env:

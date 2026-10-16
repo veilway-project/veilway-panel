@@ -27,7 +27,7 @@ COPY --from=sources /src/veilway /src/veilway
 COPY server/ ./
 COPY --from=web /src/veilway-panel/web/dist /src/veilway-panel/web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/veilway-panel/server/target \
-    cargo build --release --locked --bin veilway-panel && cp target/release/veilway-panel /veilway-panel
+    VEILWAY_REQUIRE_WEB=1 cargo build --release --locked --bin veilway-panel && cp target/release/veilway-panel /veilway-panel
 
 FROM alpine:3.22
 RUN mkdir -p /etc/veilway-panel /var/lib/veilway-panel \
