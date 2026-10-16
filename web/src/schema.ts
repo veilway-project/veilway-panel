@@ -500,6 +500,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/profiles/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** The templates of derivedProfiles as they would be with the relays given instead of the saved ones. Nothing is saved. */
+        post: operations["previewProfiles"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/profiles/publish": {
         parameters: {
             query?: never;
@@ -1416,6 +1433,9 @@ export interface components {
             /** Format: int64 */
             up_bytes: number;
         };
+        PreviewIn: {
+            relays: components["schemas"]["Relay"][];
+        };
         Reauth: {
             password: string;
             /**
@@ -1423,6 +1443,36 @@ export interface components {
              * @default
              */
             totp: string;
+        };
+        /** @description A forwarder on another address that passes bytes to the node unchanged: nginx `stream`, a DNAT rule, HAProxy, or a content delivery network. TLS, the proofs and WireGuard run end to end through it, so it sees nothing and cannot pass for the node. */
+        Relay: {
+            /** @description An IP address: apps dial candidates by address, never by name. */
+            address: string;
+            enabled: boolean;
+            /**
+             * @description The tags of the `veilway` inbounds it carries. Empty for all of them.
+             * @default []
+             */
+            inbounds: string[];
+            /** @description 1 to 32 characters, unique among the relays. */
+            name: string;
+            /**
+             * @description The relay's port per transport type, where it is not the node's own port.
+             * @default {}
+             */
+            ports: {
+                [key: string]: number;
+            };
+            /**
+             * @description Put its candidates before the node's own address instead of after it.
+             * @default false
+             */
+            prefer: boolean;
+            /**
+             * @description The transport types it carries: udp, udp-obfs, tls, ws, fronted. Empty for all of them.
+             * @default []
+             */
+            transports: string[];
         };
         Requested: {
             ok: boolean;
@@ -1536,6 +1586,11 @@ export interface components {
              * @default []
              */
             refresh_mirrors: unknown[];
+            /**
+             * @description Forwarders in front of the node. Each one adds its address to the candidates of the transports it carries when profiles are derived.
+             * @default []
+             */
+            relays: components["schemas"]["Relay"][];
             /**
              * @description Store no copy of a token: a link is shown at creation and reset, and never again.
              * @default false
@@ -3578,6 +3633,66 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["OverrideIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    previewProfiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreviewIn"];
             };
         };
         responses: {

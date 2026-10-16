@@ -714,6 +714,28 @@ async fn profiles_are_derived_from_inbounds_with_overrides_kept() {
 }
 
 #[tokio::test]
+async fn relays_are_saved_with_the_settings_and_previewed_before() {
+	let (_fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"node_host": "192.0.2.10"})).await;
+	let relays = json!([{"name": "edge", "address": "198.51.100.7", "transports": ["udp-obfs"], "ports": {"udp-obfs": 4000}, "prefer": true, "enabled": true}]);
+	let preview = h.call(Method::POST, "/p/api/profiles/preview", Some(&session), Some(json!({"relays": relays})), "10.0.0.1").await.json();
+	assert_eq!(preview["templates"][0]["profile"]["transports"][1]["endpoints"], json!(["198.51.100.7:4000", "192.0.2.10:51821"]));
+	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(derived["templates"][0]["profile"]["transports"][1]["endpoints"], json!(["192.0.2.10:51821"]), "a preview saves nothing");
+	let refused = h.call(Method::POST, "/p/api/profiles/preview", Some(&session), Some(json!({"relays": [{"name": "edge", "address": "relay.example.org", "enabled": true}]})), "10.0.0.1").await;
+	assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+	let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	settings["relays"] = relays;
+	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(settings.clone()), "10.0.0.1").await.status, StatusCode::OK);
+	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(derived["templates"][0]["profile"]["transports"][1]["endpoints"], json!(["198.51.100.7:4000", "192.0.2.10:51821"]));
+	settings["relays"][0]["address"] = json!("127.0.0.1");
+	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(settings), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn stats_are_recorded_per_bucket_and_survive_a_node_restart() {
 	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
 	let h = Harness::with_socket(Some(socket)).await;

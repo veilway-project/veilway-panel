@@ -4,9 +4,10 @@ import {api, type NotFound, type Settings} from "../api.ts";
 import {ErrorNote, lines, LinesField, Mark, PageHead, useGuard, useLoad, useP, useReorder, useSay} from "../kit.tsx";
 import {SettingsContext} from "../settings.ts";
 import {ProfilesEditor} from "./handwritten.tsx";
+import {RelaysEditor} from "./relays.tsx";
 
 type Mirror = {url: string, pins: string};
-const SECTIONS = ["endpoint", "refresh", "new-users", "mirrors", "strangers", "profiles", "keys"] as const;
+const SECTIONS = ["endpoint", "refresh", "new-users", "mirrors", "relays", "strangers", "profiles", "keys"] as const;
 
 // Every setting on one page. The settings are one document saved with PUT, so the whole form saves at once from the bar that shows while anything is changed; signing keys act on their own.
 export function SettingsPage() {
@@ -64,7 +65,7 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 			setBusy(false);
 		}
 	};
-	const head = (key: "endpoint" | "refresh" | "newUsers" | "mirrors" | "strangers" | "profiles") => <div><h2 className="vw-h3" tabIndex={-1}>{t(`settings.${key}`)}</h2><p>{t(`settings.${key}Lead`)}</p></div>;
+	const head = (key: "endpoint" | "refresh" | "newUsers" | "mirrors" | "relays" | "strangers" | "profiles") => <div><h2 className="vw-h3" tabIndex={-1}>{t(`settings.${key}`)}</h2><p>{t(`settings.${key}Lead`)}</p></div>;
 	return <form className="p-stack" onSubmit={event => { event.preventDefault(); void save(); }} noValidate>
 		<Glass className="p-panel p-sections">
 			<section className="p-section" id="set-endpoint">
@@ -105,6 +106,10 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 					<p className="vw-muted vw-small">{t("subs.relayHint")} <a className="p-link" href="https://veilway-project.github.io/veilway-docs/manuals/panel/#relay-mirrors" target="_blank" rel="noreferrer noopener">{t("subs.relayManual")}</a></p>
 					{mirrors.length < 4 && <div><Button size="sm" icon="plus" onClick={() => set({mirrors: [...mirrors, {url: "", pins: ""}]})}>{t("subs.addMirror")}</Button></div>}
 				</div>
+			</section>
+			<section className="p-section" id="set-relays">
+				{head("relays")}
+				<RelaysEditor value={draft.relays ?? []} onChange={relays => patch({relays})}/>
 			</section>
 			<section className="p-section" id="set-strangers">
 				{head("strangers")}
