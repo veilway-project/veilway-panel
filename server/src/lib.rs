@@ -26,7 +26,8 @@ use axum::{extract::{Request, State}, http::{StatusCode, header::{CACHE_CONTROL,
 use auth::{Access, Guard};
 use config::Config;
 use http::Failure;
-use std::{collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, time::Duration};
+use rusqlite::OptionalExtension;
+use std::{collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, time::Duration};
 
 /// Opens the database and the key files. The first start with no accounts makes the keys and prints a setup token.
 pub fn build(cfg: Config) -> Result<Arc<App>, String> {
@@ -35,15 +36,19 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 		tracing::info!("finished a restore that was cut short");
 	}
 	let db = db::Db::open(&cfg.database).map_err(|error| format!("{}: {error}", cfg.database.display()))?;
-	let accounts: i64 = db.blocking(|connection| connection.query_row("select (select count(*) from users) + (select count(*) from admins)", [], |row| row.get(0))).map_err(|error| error.to_string())?;
+	let (accounts, settings, admins) = db.blocking(|connection| -> rusqlite::Result<(i64, Settings, i64)> {
+		let accounts = connection.query_row("select (select count(*) from users) + (select count(*) from admins)", [], |row| row.get(0))?;
+		let settings = connection.query_row("select value from settings where key = 'settings'", [], |row| row.get::<_, String>(0)).optional()?.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+		Ok((accounts, settings, connection.query_row("select count(*) from admins", [], |row| row.get(0))?))
+	}).map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 	let keys = match (cfg.keys.exists(), accounts) {
 		(true, _) => crypto::Keys::load(&cfg.keys).map_err(|error| tracing::error!("the key file {} cannot be used: {error}", cfg.keys.display())).ok(),
 		(false, 0) => Some(crypto::Keys::create(&cfg.keys).map_err(|error| format!("{}: {error}", cfg.keys.display()))?),
 		(false, _) => None,
 	};
 	let signing = Signing::load(&cfg.signing)?;
-	let not_found = db.blocking(|connection| connection.query_row("select value from settings where key = 'settings'", [], |row| row.get::<_, String>(0)).ok().and_then(|text| serde_json::from_str::<Settings>(&text).ok()).and_then(|settings| settings.not_found));
-	let setup_needed = db.blocking(|connection| connection.query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0))).map_err(|error| error.to_string())? == 0;
+	let not_found = settings.not_found.clone();
+	let setup_needed = admins == 0;
 	let two_step = if cfg.two_step_on() {"on"} else {"off"};
 	if !cfg.two_step_on() {tracing::warn!("with two-step sign-in off, a stored password cannot be checked for length: an admin whose password is shorter than 12 characters is found at their next sign-in and must change it before anything else works")}
 	if !cfg.two_step_on() {tracing::warn!("two-step sign-in is OFF (two_step is \"off\" in the panel's config file): anyone with an admin password can sign in. Use this for demos only")}
@@ -64,10 +69,10 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 		let _ = connection.execute("insert into settings (key, value) values ('two_step', ?) on conflict (key) do update set value = excluded.value", [two_step]);
 		if let Some(keys) = &keys {admin::complete_secrets(connection, keys)}
 		keys
-	});
+	}).map_err(|error| error.to_string())?;
 	let token = setup_needed.then(|| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<20>()));
 	if let Some(token) = &token {println!("Setup token (one time): {token}\nPOST it with a username and password to {}/api/setup", cfg.prefix);}
-	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: AtomicBool::new(false), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), mirrors_seen: Default::default(), publishing: tokio::sync::Mutex::new(())}))
+	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: Arc::new(AtomicBool::new(false)), settings: Arc::new(RwLock::new(settings)), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), mirrors_seen: Default::default(), publishing: tokio::sync::Mutex::new(())}))
 }
 
 /// What the upkeep loop remembers between passes.
@@ -79,7 +84,8 @@ pub fn spawn_upkeep(app: Arc<App>) {
 	tokio::spawn(async move {
 		let mut state = Upkeep::default();
 		loop {
-			upkeep_once(&app, &mut state).await;
+			let pass = tokio::spawn({let app = app.clone(); async move {let mut state = state; upkeep_once(&app, &mut state).await; state}});
+			state = match pass.await {Ok(state) => state, Err(error) => {tracing::error!("an upkeep pass failed and runs again in a few seconds: {error}"); Upkeep::default()}};
 			tokio::time::sleep(Duration::from_secs(5)).await;
 		}
 	});
@@ -90,11 +96,11 @@ pub async fn upkeep_once(app: &Arc<App>, state: &mut Upkeep) {
 	let at = crypto::now();
 	if at - state.cleaned_at >= 3600 {
 		state.cleaned_at = at;
-		app.db.call(move |db| {
+		if app.db.call(move |db| {
 			let _ = db.execute("delete from sessions where last_seen < ? or created < ?", [at - auth::IDLE, at - auth::ABSOLUTE]);
 			let _ = subs::expire_pending(db, at);
 			stats::prune(db, at);
-		}).await;
+		}).await.is_err() {tracing::warn!("the database clean-up did not run: the database cannot take the call")}
 		if let Err(error) = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).prune() {tracing::error!("the signing keys could not be pruned: {error}")}
 		if app.keys.is_none() {tracing::error!("the key file is missing: the subscription endpoint answers every request as an unknown path and no secret can be opened")}
 	}

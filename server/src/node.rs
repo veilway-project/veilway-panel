@@ -43,18 +43,20 @@ fn default_holds(document: &Value, exits: &str, exit: &str) -> bool {
 /// After the node took a document, forgets the default exits it left out, so the panel shows what the node runs.
 pub(crate) async fn clear_defaults(app: &App, document: &Value) {
 	let document = document.clone();
-	app.db.call(move |db| {
-		let stale: Vec<(i64, String, String)> = db.prepare("select id, name, exits, default_exit from users where default_exit is not null").and_then(|mut statement| statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?.collect::<Result<Vec<_>, _>>()).unwrap_or_default().into_iter().filter(|(_, _, exits, exit)| !default_holds(&document, exits, exit)).map(|(id, name, _, exit)| (id, name, exit)).collect();
+	let result = app.db.call(move |db| -> rusqlite::Result<()> {
+		let stale: Vec<(i64, String, String)> = db.prepare("select id, name, exits, default_exit from users where default_exit is not null")?.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?.collect::<Result<Vec<_>, _>>()?.into_iter().filter(|(_, _, exits, exit)| !default_holds(&document, exits, exit)).map(|(id, name, _, exit)| (id, name, exit)).collect();
 		for (id, name, exit) in stale {
 			if let Err(error) = db.execute("update users set default_exit = null where id = ?", [id]) {tracing::error!("the default exit of {name} could not be cleared: {error}"); continue}
 			tracing::info!("user {name} no longer has default exit {exit}: the node has no such exit or the user may not use it");
 		}
-	}).await
+		Ok(())
+	}).await;
+	if let Err(error) = result.map_err(|error| error.to_string()).and_then(|done| done.map_err(|error| error.to_string())) {tracing::error!("the default exits could not be checked: {error}")}
 }
 
 /// Puts the panel's users into the document's `users`, and the panel's credentials into the `clients` of the Xray inbounds it made, making one for a user who has none yet. A user with no device is left out, since the node needs one. An Xray inbound the panel did not make keeps its clients, less those whose user is gone.
 pub(crate) async fn fill(app: &Arc<App>, document: &mut Value) -> Result<(), String> {
-	let (handle, app, mut copy) = (app.db.clone(), app.clone(), document.clone());
+	let (handle, app, mut copy, dirty) = (app.db.clone(), app.clone(), document.clone(), app.dirty.clone());
 	*document = handle.call(move |db| -> Result<Value, String> {
 		let (document, keys) = (&mut copy, app.keys.as_ref().ok_or("the key file is missing, so no secret can be opened")?);
 		subs::expire_pending(db, now()).map_err(|error| error.to_string())?;
@@ -104,6 +106,7 @@ pub(crate) async fn fill(app: &Arc<App>, document: &mut Value) -> Result<(), Str
 							format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
 						} else if protocol == "shadowsocks" {key32()} else {URL_SAFE_NO_PAD.encode([bytes.as_slice(), &crypto::random::<8>()].concat())};
 						db.execute("insert into xray_clients (tag, user_id, secret) values (?, ?, ?)", params![tag, id, keys.seal_secret(record, &format!("xray:{tag}"), secret.as_bytes())]).map_err(|error| error.to_string())?;
+						dirty.store(true, Ordering::Relaxed);
 						secret
 					}
 				};
@@ -112,13 +115,15 @@ pub(crate) async fn fill(app: &Arc<App>, document: &mut Value) -> Result<(), Str
 			inbound["clients"] = Value::Array(clients);
 		}
 		Ok(copy)
-	}).await?;
+	}).await.map_err(|error| error.to_string())??;
 	Ok(())
 }
 
 /// Puts the panel's users into the node's running config. A stale revision is read again once.
 pub async fn sync(app: &Arc<App>) -> Result<(), String> {
 	let _turn = app.node_lock.lock().await;
+	// Cleared before the document is read, so a change committed while this push runs keeps the flag set.
+	app.dirty.store(false, Ordering::Relaxed);
 	let result = async {
 		for _ in 0..3 {
 			let (status, body) = request(&app.cfg.node_socket, "GET", "/v1/config", None, None).await?;
@@ -139,7 +144,7 @@ pub async fn sync(app: &Arc<App>) -> Result<(), String> {
 		Err("the node's config kept changing underneath the panel".into())
 	}.await;
 	*app.last_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(match &result {Ok(()) => format!("ok at {}", now()), Err(error) => format!("failed at {}: {error}", now())});
-	app.dirty.store(result.is_err(), Ordering::Relaxed);
+	if result.is_err() {app.dirty.store(true, Ordering::Relaxed)}
 	if let Err(error) = &result {tracing::warn!("the node was not updated: {error}")}
 	result
 }

@@ -3,7 +3,7 @@
 //! Layout (`.vwbackup`), all numbers big-endian:
 //! `magic "VWPBACKP"` (8) | `format version` (1) | `argon2id memory in KiB` (4) | `passes` (4) | `lanes` (4) | `salt` (16) | `nonce` (12) | ChaCha20-Poly1305 of the content with a 16 byte tag.
 //! The first 49 bytes are the header and are the AAD. The content is three sections, each a 4 byte length and the bytes: database, `panel.keys`, signing keys.
-use crate::{app::{App, SigningEntry}, config::Config, crypto::{self, now}, db::{audit, SCHEMA_VERSION}, http::{ok, Body, Ctx, Failure}};
+use crate::{app::{App, SigningEntry}, config::Config, crypto::{self, now}, db::{audit, migrate, MIGRATIONS}, http::{ok, Body, Ctx, Failure}};
 use argon2::{Algorithm, Argon2, Params, Version};
 use axum::{extract::{FromRequestParts, State}, http::request::Parts, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
@@ -117,6 +117,14 @@ pub fn unpack(content: &[u8]) -> Result<[Vec<u8>; 3], String> {
 	Ok(sections.try_into().expect("three sections"))
 }
 
+/// What stops a staged database from replacing the live one, or None. Its migrations run here, on the staged copy, so a backup this panel cannot migrate is refused before the swap.
+fn staged_refusal(staged: &mut Connection, migrations: &[&str]) -> rusqlite::Result<Option<String>> {
+	if staged.query_row("pragma integrity_check", [], |row| row.get::<_, String>(0))? != "ok" {return Ok(Some("The database in the backup is damaged.".into()))}
+	if staged.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))? > 1 + migrations.len() as i64 {return Ok(Some("This backup was made by a newer panel. Update this panel first.".into()))}
+	if staged.query_row("select count(*) from sqlite_master where type = 'table' and name in ('admins', 'sessions', 'users', 'settings')", [], |row| row.get::<_, i64>(0))? != 4 {return Ok(Some("The database in the backup is not a panel database.".into()))}
+	Ok(migrate(staged, migrations).err().map(|error| format!("The database in the backup cannot be moved to this panel's version: {error}")))
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct DownloadIn {
 	/// At least 12 characters. It cannot be recovered: a backup without it is useless.
@@ -147,7 +155,7 @@ pub async fn download(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx
 		let made = db.blocking(move |connection| connection.execute("vacuum into ?", [target]));
 		let database = fs::read(&snapshot);
 		let _ = fs::remove_file(&snapshot);
-		made.map_err(Failure::internal)?;
+		made.map_err(Failure::internal)?.map_err(Failure::internal)?;
 		let content = pack([&database.map_err(Failure::internal)?, &fs::read(&cfg.keys).map_err(Failure::internal)?, &fs::read(&cfg.signing).map_err(Failure::internal)?]);
 		if content.len() + HEADER + 16 > FILE_MAX {return Err(Failure::conflict("The database is larger than a backup can hold."))}
 		seal(&input.passphrase, &content).map_err(Failure::internal)
@@ -189,17 +197,15 @@ pub async fn restore(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 			crypto::write_private(path, content, false).map_err(Failure::internal)?;
 		}
 		drop(database);
-		let refusal = (|| -> rusqlite::Result<Option<&str>> {
-			let staged = Connection::open(&new_database)?;
+		let refusal = (|| -> rusqlite::Result<Option<String>> {
+			let mut staged = Connection::open(&new_database)?;
 			staged.execute_batch("pragma trusted_schema=off")?;
-			if staged.query_row("pragma integrity_check", [], |row| row.get::<_, String>(0))? != "ok" {return Ok(Some("The database in the backup is damaged."))}
-			if staged.query_row("pragma user_version", [], |row| row.get::<_, i64>(0))? > SCHEMA_VERSION {return Ok(Some("This backup was made by a newer panel. Update this panel first."))}
-			if staged.query_row("select count(*) from sqlite_master where type = 'table' and name in ('admins', 'sessions', 'users', 'settings')", [], |row| row.get::<_, i64>(0))? != 4 {return Ok(Some("The database in the backup is not a panel database."))}
+			if let Some(message) = staged_refusal(&mut staged, MIGRATIONS)? {return Ok(Some(message))}
 			staged.execute("delete from sessions", [])?;
 			staged.execute("update api_tokens set revoked_at = ? where revoked_at is null", [now()])?;
 			audit(&staged, &ctx.actor, &ctx.source, "backup.restore", "panel", "restored from a backup; every session ended and every API token was revoked");
 			Ok(None)
-		})().unwrap_or(Some("The database in the backup cannot be read."));
+		})().unwrap_or(Some("The database in the backup cannot be read.".into()));
 		if let Some(message) = refusal {
 			for path in [&new_database, &new_keys, &new_signing] {let _ = fs::remove_file(path);}
 			return Err(Failure::bad(message));
@@ -216,7 +222,7 @@ pub async fn restore(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 		db.blocking(move |live| {
 			audit(live, &ctx.actor, &ctx.source, "backup.restore", "panel", &detail);
 			live.execute("vacuum into ?", [target])
-		}).map_err(Failure::internal)?;
+			}).map_err(Failure::internal)?.map_err(Failure::internal)?;
 		fs::copy(&cfg.keys, saved.join("panel.keys")).map_err(Failure::internal)?;
 		fs::copy(&cfg.signing, saved.join("signing.keys")).map_err(Failure::internal)?;
 		crypto::write_private(&marker(&cfg), b"", false).map_err(Failure::internal)?;
@@ -281,6 +287,16 @@ mod tests {
 		file[8] = FORMAT;
 		file[9..13].copy_from_slice(&u32::MAX.to_be_bytes());
 		assert!(open(PASSPHRASE, file.clone()).unwrap_err().contains("more work"));
+	}
+
+	#[test]
+	fn a_staged_database_is_migrated_or_refused_before_the_swap() {
+		let mut staged = rusqlite::Connection::open_in_memory().unwrap();
+		migrate(&mut staged, &[]).unwrap();
+		assert!(staged_refusal(&mut staged, &["this is not sql"]).unwrap().unwrap().contains("cannot be moved"));
+		assert_eq!(staged.query_row("pragma user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+		assert_eq!(staged_refusal(&mut staged, &["create table extra (id integer)"]).unwrap(), None);
+		assert_eq!(staged.query_row("pragma user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
 	}
 
 	#[test]

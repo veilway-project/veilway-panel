@@ -240,7 +240,7 @@ fn derive(settings: &Settings, document: &Value) -> Vec<Value> {
 
 pub async fn derived_profiles(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let (revision, _, document) = running(&app).await?;
-	ok(&json!({"revision": revision, "templates": derive(&app.settings().await, &document)}))
+	ok(&json!({"revision": revision, "templates": derive(&app.settings(), &document)}))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -253,7 +253,7 @@ pub struct PreviewIn {
 /// The templates as they would be with these relays instead of the saved ones. Nothing is saved.
 pub async fn preview_profiles(State(app): State<Arc<App>>, Body(input): Body<PreviewIn>) -> Result<Response, Failure> {
 	let (revision, _, document) = running(&app).await?;
-	ok(&json!({"revision": revision, "templates": derive(&Settings {relays: input.relays, ..app.settings().await}, &document)}))
+	ok(&json!({"revision": revision, "templates": derive(&Settings {relays: input.relays, ..app.settings()}, &document)}))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -265,25 +265,25 @@ pub struct OverrideIn {
 
 pub async fn put_override(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(inbound): Path<String>, Body(input): Body<OverrideIn>) -> Result<Response, Failure> {
 	if inbound.is_empty() || inbound.len() > 64 || input.set.contains_key("device") || input.set.contains_key("id") || input.set.len() > 32 {return Err(Failure::bad("An override has at most 32 members and none of them is `id` or `device`."))}
-	let mut settings = app.settings().await;
-	if input.set.is_empty() {settings.profile_overrides.remove(&inbound);} else {settings.profile_overrides.insert(inbound.clone(), Value::Object(input.set));}
-	app.save_settings(&settings).await;
+	let (tag, set) = (inbound.clone(), input.set);
+	app.update_settings(move |settings| if set.is_empty() {settings.profile_overrides.remove(&tag);} else {settings.profile_overrides.insert(tag, Value::Object(set));}).await.map_err(Failure::internal)?;
 	app.db.audit(&ctx.actor, &ctx.source, "profile.override", &inbound, "").await;
-	ok(&json!({"overrides": settings.profile_overrides}))
+	ok(&json!({"overrides": app.settings().profile_overrides}))
 }
 
 /// Writes the derived templates into the settings' `profiles`, which is what the subscription endpoint serves. A profile that is not derived from an inbound stays. A template with something missing stops the publish.
 pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {
 	let (_, _, document) = running(&app).await?;
-	let mut settings = app.settings().await;
-	let templates = derive(&settings, &document);
+	let templates = derive(&app.settings(), &document);
 	if let Some(bad) = templates.iter().find(|template| !template["missing"].as_array().is_some_and(Vec::is_empty)) {return Err(Failure::bad(format!("The profile of inbound {} still needs: {}.", bad["inbound"].as_str().unwrap_or_default(), bad["missing"])))}
 	let ids: Vec<Value> = templates.iter().map(|template| template["profile"]["id"].clone()).collect();
-	settings.profiles.retain(|profile| !ids.contains(&profile["id"]));
-	settings.profiles.extend(templates.iter().map(|template| template["profile"].clone()));
-	app.save_settings(&settings).await;
+	let fresh: Vec<Value> = templates.iter().map(|template| template["profile"].clone()).collect();
+	app.update_settings(move |settings| {
+		settings.profiles.retain(|profile| !ids.contains(&profile["id"]));
+		settings.profiles.extend(fresh);
+	}).await.map_err(Failure::internal)?;
 	app.db.audit(&ctx.actor, &ctx.source, "settings.update", "settings", &format!("profiles changed at {}", now())).await;
-	ok(&json!({"profiles": settings.profiles}))
+	ok(&json!({"profiles": app.settings().profiles}))
 }
 
 #[cfg(test)]

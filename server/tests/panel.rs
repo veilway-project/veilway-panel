@@ -60,7 +60,7 @@ impl Harness {
 	fn code(&self, offset: i64) -> String {format!("{:06}", crypto::totp_at(&self.totp, (crypto::now() / 30 + offset) as u64))}
 	async fn login(&self, source: &str) -> Session {
 		// Time passing between two logins is simulated by forgetting the last used code.
-		self.app.db.call(|db| db.execute("update admins set totp_last_step = 0", []).unwrap()).await;
+		self.app.db.call(|db| db.execute("update admins set totp_last_step = 0", []).unwrap()).await.unwrap();
 		let answer = self.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD, "totp": self.code(0)})), source).await;
 		assert_eq!(answer.status, StatusCode::OK, "{}", String::from_utf8_lossy(&answer.body));
 		let cookie = answer.headers.get(SET_COOKIE).unwrap().to_str().unwrap().to_string();
@@ -126,10 +126,10 @@ async fn login_totp_rate_limit_and_csrf() {
 	let session = h.login("10.0.0.3").await;
 	let set_cookie = h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD, "totp": h.code(0)})), "10.0.0.3").await;
 	assert_eq!(set_cookie.status, StatusCode::UNAUTHORIZED, "a used code works once");
-	let cookie_line = h.app.db.call(|db| db.query_row("select count(*) from sessions", [], |row| row.get::<_, i64>(0)).unwrap()).await;
+	let cookie_line = h.app.db.call(|db| db.query_row("select count(*) from sessions", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap();
 	assert_eq!(cookie_line, 1);
 	// Cookie attributes come from the login answer.
-	h.app.db.call(|db| db.execute("update admins set totp_last_step = 0", []).unwrap()).await;
+	h.app.db.call(|db| db.execute("update admins set totp_last_step = 0", []).unwrap()).await.unwrap();
 	let fresh = h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD, "totp": h.code(0)})), "10.0.0.3").await;
 	let attributes = fresh.headers.get(SET_COOKIE).unwrap().to_str().unwrap().to_string();
 	assert!(attributes.contains("HttpOnly") && attributes.contains("Secure") && attributes.contains("SameSite=Strict"), "{attributes}");
@@ -150,7 +150,7 @@ async fn login_totp_rate_limit_and_csrf() {
 	for index in 1..=20 {h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": "nope nope nope", "totp": "000000"})), &format!("10.1.0.{index}")).await;}
 	let waiting = h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": "nope nope nope", "totp": "000000"})), "10.0.2.1").await;
 	assert_eq!(waiting.status, StatusCode::TOO_MANY_REQUESTS);
-	h.app.db.call(|db| db.execute("update admins set totp_last_step = 0", []).unwrap()).await;
+	h.app.db.call(|db| db.execute("update admins set totp_last_step = 0", []).unwrap()).await.unwrap();
 	let right = h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD, "totp": h.code(0)})), "10.0.2.2").await;
 	assert_eq!(right.status, StatusCode::OK);
 	// And one source is limited on its own, whatever the account.
@@ -184,14 +184,14 @@ async fn api_token_scopes() {
 	let bound = h.token(&session, "full", json!({"allowed_sources": ["192.0.2.1"]})).await;
 	assert_eq!(h.bearer(Method::GET, "/p/api/users", &bound, None, "192.0.2.1").await.status, StatusCode::OK);
 	assert_eq!(h.bearer(Method::GET, "/p/api/users", &bound, None, "192.0.2.2").await.status, StatusCode::UNAUTHORIZED);
-	h.app.db.call(|db| db.execute("update api_tokens set expires_at = 1 where name = 'read'", []).unwrap()).await;
+	h.app.db.call(|db| db.execute("update api_tokens set expires_at = 1 where name = 'read'", []).unwrap()).await.unwrap();
 	assert_eq!(h.bearer(Method::GET, "/p/api/users", &read, None, src).await.status, StatusCode::UNAUTHORIZED);
 	let id = h.call(Method::GET, "/p/api/tokens", Some(&session), None, src).await.json()["tokens"].as_array().unwrap().iter().find(|token| token["name"] == "users").unwrap()["id"].as_i64().unwrap();
 	assert_eq!(h.call(Method::DELETE, &format!("/p/api/tokens/{id}"), Some(&session), None, src).await.status, StatusCode::OK);
 	assert_eq!(h.bearer(Method::GET, "/p/api/users", &users, None, src).await.status, StatusCode::UNAUTHORIZED);
 	// A token that is stored only as a hash: the plain text is nowhere in the database.
 	let hash = crypto::sha256(full.as_bytes()).to_vec();
-	let stored: i64 = h.app.db.call(move |db| db.query_row("select count(*) from api_tokens where token_hash = ?", [hash.as_slice()], |row| row.get(0)).unwrap()).await;
+	let stored: i64 = h.app.db.call(move |db| db.query_row("select count(*) from api_tokens where token_hash = ?", [hash.as_slice()], |row| row.get(0)).unwrap()).await.unwrap();
 	assert_eq!(stored, 1);
 	for _ in 0..125 {h.bearer(Method::GET, "/p/api/users", &full, None, src).await;}
 	assert_eq!(h.bearer(Method::GET, "/p/api/users", &full, None, src).await.status, StatusCode::TOO_MANY_REQUESTS);
@@ -290,7 +290,7 @@ async fn link_reset_show_and_show_once() {
 	assert!(shown.json()["qr_svg"].as_str().unwrap().contains("<svg"));
 	assert_eq!(shown.headers.get("cache-control").unwrap(), "no-store");
 	// Showing needs a recent re-authentication.
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
 	assert_eq!(h.call(Method::POST, &format!("/p/api/users/{id}/subscription/show"), Some(&session), None, "10.0.0.1").await.json()["error"]["code"], "reauth_required");
 	let reset = h.call(Method::POST, &format!("/p/api/users/{id}/subscription/reset"), Some(&session), Some(json!({"remove_devices": false})), "10.0.0.1").await.json();
 	assert_eq!(reset["old_devices"].as_array().unwrap().len(), 1);
@@ -301,17 +301,32 @@ async fn link_reset_show_and_show_once() {
 	assert_eq!(again["old_devices"].as_array().unwrap().len(), 1, "only the device of the generation being reset");
 	assert_eq!(h.call(Method::GET, &format!("/p/api/users/{id}/devices"), Some(&session), None, "10.0.0.1").await.json()["devices"].as_array().unwrap().len(), 1, "the device of the first generation stays");
 	// Sealed copy: the token is not in the database in the clear, and the copy opens only for its own record.
-	let (lookup, copy): (Vec<u8>, Vec<u8>) = h.app.db.call(move |db| db.query_row("select token_lookup, token_copy from users where id = ?", [id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()).await;
+	let (lookup, copy): (Vec<u8>, Vec<u8>) = h.app.db.call(move |db| db.query_row("select token_lookup, token_copy from users where id = ?", [id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()).await.unwrap();
 	assert_eq!((lookup.len(), copy.len()), (32, 44));
 	let keys = h.app.keys.as_ref().unwrap();
 	assert!(keys.open_copy(&[0; 16], &copy).is_none());
 	// "Show links once": copies go, and a link can no longer be shown.
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
 	h.configure(&session, json!({"show_links_once": true})).await;
 	assert_eq!(h.call(Method::POST, &format!("/p/api/users/{id}/subscription/show"), Some(&session), None, "10.0.0.1").await.status, StatusCode::GONE);
 	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await;
 	assert!(audit.body.windows(10).all(|window| window != b"veilway://"), "no link in the audit log");
 	assert!(std::fs::metadata(&h.app.cfg.keys).map(|meta| std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777 == 0o600).unwrap());
+}
+
+#[tokio::test]
+async fn show_links_once_is_read_in_the_job_that_stores_the_copy() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"show_links_once": false})).await;
+	let no_copy = |id: i64| h.app.db.call(move |db| db.query_row("select token_copy is null from users where id = ?", [id], |row| row.get::<_, bool>(0)).unwrap());
+	let (kept, _) = h.user(&session, "kept", json!({})).await;
+	assert!(!no_copy(kept).await.unwrap(), "a copy is stored with the setting off");
+	h.configure(&session, json!({"show_links_once": true})).await;
+	let (once, _) = h.user(&session, "once", json!({})).await;
+	assert!(no_copy(once).await.unwrap(), "no copy is stored with the setting on");
+	assert_eq!(h.call(Method::POST, &format!("/p/api/users/{kept}/subscription/reset"), Some(&session), Some(json!({"remove_devices": false})), "10.0.0.1").await.status, StatusCode::OK);
+	assert!(no_copy(kept).await.unwrap(), "a reset with the setting on stores no copy either");
 }
 
 #[tokio::test]
@@ -330,9 +345,9 @@ async fn a_sealed_file_of_the_link_needs_a_recent_reauth_a_password_and_the_curr
 	assert_eq!(open(&made, password).unwrap(), old_text(&old), "the file holds the link the panel shows");
 	assert!(open(&made, "another unguessable one").is_err());
 	// A recent re-authentication, as for showing the link.
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
 	assert_eq!(h.call(Method::POST, &path, Some(&session), Some(json!({"password": password})), "10.0.0.1").await.json()["error"]["code"], "reauth_required");
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
 	// With no copy kept, only the user's current link is taken, and the file always has the panel's own endpoint and key.
 	h.configure(&session, json!({"show_links_once": true})).await;
 	assert_eq!(h.call(Method::POST, &path, Some(&session), Some(json!({"password": password})), "10.0.0.1").await.status, StatusCode::GONE);
@@ -458,9 +473,9 @@ async fn setup_needs_the_terms_and_records_the_acceptance() {
 	let mut accepted = setup;
 	accepted["accepted_terms"] = json!(true);
 	assert_eq!(h.call(Method::POST, "/p/api/setup", None, Some(accepted), "10.0.0.1").await.status, StatusCode::OK);
-	let detail: String = h.app.db.call(|db| db.query_row("select detail from audit where action = 'setup'", [], |row| row.get(0)).unwrap()).await;
+	let detail: String = h.app.db.call(|db| db.query_row("select detail from audit where action = 'setup'", [], |row| row.get(0)).unwrap()).await.unwrap();
 	assert_eq!(detail, "first admin created, terms 2026-10-16 accepted");
-	let kept: String = h.app.db.call(|db| db.query_row("select value from settings where key = 'terms_accepted'", [], |row| row.get(0)).unwrap()).await;
+	let kept: String = h.app.db.call(|db| db.query_row("select value from settings where key = 'terms_accepted'", [], |row| row.get(0)).unwrap()).await.unwrap();
 	assert_eq!(serde_json::from_str::<Value>(&kept).unwrap()["version"], "2026-10-16");
 }
 
@@ -511,7 +526,7 @@ async fn forwarded_sources_keep_their_address_and_origins_follow_allowed_hosts()
 	let session = h.login("10.0.0.1").await;
 	let forwarded = h.send(Request::builder().method(Method::POST).uri("/p/api/login").header(HOST, "panel.test").header(CONTENT_TYPE, "application/json").header("x-forwarded-for", "198.51.100.4, 203.0.113.5:4433"), Some(json!({"username": "owner", "password": "nope nope nope", "totp": "000000"})), "10.0.0.9").await;
 	assert_eq!(forwarded.status, StatusCode::UNAUTHORIZED);
-	let logged: i64 = h.app.db.call(|db| db.query_row("select count(*) from audit where source = '203.0.113.5' and action = 'login.failed'", [], |row| row.get(0)).unwrap()).await;
+	let logged: i64 = h.app.db.call(|db| db.query_row("select count(*) from audit where source = '203.0.113.5' and action = 'login.failed'", [], |row| row.get(0)).unwrap()).await.unwrap();
 	assert_eq!(logged, 1);
 	let same_host = h.send(Request::builder().method(Method::POST).uri("/p/api/users").header(HOST, "panel.test").header(ORIGIN, "https://panel.test").header(COOKIE, &session.cookie).header("x-csrf-token", &session.csrf).header(CONTENT_TYPE, "application/json"), Some(json!({"name": "zed"})), "10.0.0.1").await;
 	assert_eq!(same_host.status, StatusCode::OK);
@@ -521,7 +536,7 @@ async fn forwarded_sources_keep_their_address_and_origins_follow_allowed_hosts()
 async fn failed_logins_name_only_accounts_that_exist() {
 	let h = Harness::new().await;
 	h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "ghost", "password": "nope nope nope", "totp": "000000"})), "10.0.0.2").await;
-	let names: Vec<String> = h.app.db.call(|db| db.prepare("select actor from audit where action = 'login.failed'").unwrap().query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap()).await;
+	let names: Vec<String> = h.app.db.call(|db| db.prepare("select actor from audit where action = 'login.failed'").unwrap().query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap()).await.unwrap();
 	assert_eq!(names, vec!["unknown".to_string()]);
 }
 
@@ -741,10 +756,10 @@ async fn guarded_sections_need_a_recent_reauth_and_no_token_and_null_removes_opt
 	let session = h.login("10.0.0.1").await;
 	let full = h.token(&session, "full", json!({})).await;
 	assert_eq!(h.bearer(Method::PUT, "/p/api/config/log", &full, Some(json!({"revision": "rev1", "value": {"level": "warn"}})), "10.1.1.1").await.status, StatusCode::FORBIDDEN, "a token never changes log");
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
 	let stale = h.call(Method::PUT, "/p/api/config/log", Some(&session), Some(json!({"revision": "rev1", "value": {"level": "warn"}})), "10.0.0.1").await;
 	assert_eq!((stale.status, stale.json()["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("reauth_required")));
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
 	assert_eq!(h.call(Method::PUT, "/p/api/config/log", Some(&session), Some(json!({"revision": "rev1", "value": {"level": "warn", "destinations": false}})), "10.0.0.1").await.status, StatusCode::OK);
 	assert_eq!(h.call(Method::PUT, "/p/api/config/log", Some(&session), Some(json!({"revision": "rev2", "value": {"level": "warn", "destinations": true}})), "10.0.0.1").await.status, StatusCode::OK);
 	let links = json!([{"tag": "l1", "allow_private": false, "transport_secret": "SECRETVALUE"}]);
@@ -762,9 +777,9 @@ async fn guarded_sections_need_a_recent_reauth_and_no_token_and_null_removes_opt
 	assert_eq!(h.bearer(Method::PUT, "/p/api/config", &full, Some(json!({"revision": "rev5", "document": document.clone()})), "10.1.1.1").await.status, StatusCode::FORBIDDEN, "a token changes no exits through the whole config");
 	document = fake.document.lock().unwrap().clone();
 	document["dns"] = json!({"servers": ["1.1.1.1:53"]});
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
 	assert_eq!(h.call(Method::PUT, "/p/api/config", Some(&session), Some(json!({"revision": "rev5", "document": document.clone()})), "10.0.0.1").await.json()["error"]["code"], "reauth_required");
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
 	assert_eq!(h.call(Method::PUT, "/p/api/config/notices", Some(&session), Some(json!({"revision": "rev5", "value": [{"severity": "information", "text": "Hello"}]})), "10.0.0.1").await.status, StatusCode::OK);
 	assert_eq!(h.call(Method::PUT, "/p/api/config/notices", Some(&session), Some(json!({"revision": "rev6", "value": null})), "10.0.0.1").await.status, StatusCode::OK);
 	assert!(fake.applied.lock().unwrap().last().unwrap().get("notices").is_none(), "null removes an optional section");
@@ -844,9 +859,9 @@ async fn stats_are_recorded_per_bucket_and_survive_a_node_restart() {
 	let now = h.call(Method::GET, "/p/api/stats/now", Some(&session), None, "10.0.0.1").await.json();
 	assert_eq!((now["reachable"].clone(), now["online_users"].clone(), now["sessions"].clone(), now["exits"][0]["tag"].clone()), (json!(true), json!(["ann"]), json!(2), json!("main")));
 	assert_eq!(h.call(Method::GET, "/p/api/stats/usage?kind=nothing", Some(&session), None, "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
-	h.app.db.call(|db| db.execute("update usage_buckets set at = at - 2 * 86400 where res = 60", []).unwrap()).await;
-	h.app.db.call(|db| veilway_panel::stats::prune(db, crypto::now())).await;
-	let left: i64 = h.app.db.call(|db| db.query_row("select count(*) from usage_buckets where res = 60", [], |row| row.get(0)).unwrap()).await;
+	h.app.db.call(|db| db.execute("update usage_buckets set at = at - 2 * 86400 where res = 60", []).unwrap()).await.unwrap();
+	h.app.db.call(|db| veilway_panel::stats::prune(db, crypto::now())).await.unwrap();
+	let left: i64 = h.app.db.call(|db| db.query_row("select count(*) from usage_buckets where res = 60", [], |row| row.get(0)).unwrap()).await.unwrap();
 	assert_eq!(left, 0, "minutes older than a day are pruned");
 }
 
@@ -998,13 +1013,13 @@ async fn a_backup_is_downloaded_and_restored_with_the_panel_restarting_on_the_ol
 	assert_eq!(garbage.status, StatusCode::BAD_REQUEST);
 	let newer = h.dir.join("newer.db");
 	let newer_path = newer.to_string_lossy().to_string();
-	h.app.db.call(move |db| db.execute("vacuum into ?", [newer_path]).unwrap()).await;
+	h.app.db.call(move |db| db.execute("vacuum into ?", [newer_path]).unwrap()).await.unwrap();
 	rusqlite::Connection::open(&newer).unwrap().pragma_update(None, "user_version", 99).unwrap();
 	let content = veilway_panel::backup::pack([&std::fs::read(&newer).unwrap(), &std::fs::read(&h.app.cfg.keys).unwrap(), &std::fs::read(&h.app.cfg.signing).unwrap()]);
 	let refused = h.call(Method::POST, "/p/api/backup/restore", Some(&session), Some(restore(STANDARD.encode(veilway_panel::backup::seal("a long enough passphrase", &content).unwrap()), "a long enough passphrase")), "10.0.0.1").await;
 	assert_eq!(refused.status, StatusCode::BAD_REQUEST);
 	assert!(refused.json()["error"]["message"].as_str().unwrap().contains("newer"));
-	assert!(h.app.db.call(|db| db.query_row("select count(*) from users where name = 'late'", [], |row| row.get::<_, i64>(0)).unwrap()).await == 1);
+	assert!(h.app.db.call(|db| db.query_row("select count(*) from users where name = 'late'", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap() == 1);
 	let done = h.call(Method::POST, "/p/api/backup/restore", Some(&session), Some(restore(file, "a long enough passphrase")), "10.0.0.1").await;
 	assert_eq!(done.status, StatusCode::OK, "{}", String::from_utf8_lossy(&done.body));
 	tokio::time::timeout(std::time::Duration::from_secs(2), h.app.restart.notified()).await.expect("the server is told to restart");
@@ -1014,15 +1029,15 @@ async fn a_backup_is_downloaded_and_restored_with_the_panel_restarting_on_the_ol
 	let saved = h.dir.join(done.json()["saved_as"].as_str().unwrap());
 	assert!(saved.join("panel.db").exists() && saved.join("panel.keys").exists() && saved.join("signing.keys").exists());
 	let reopened = build(h.app.cfg.clone()).unwrap();
-	let names: Vec<String> = reopened.db.call(|db| db.prepare("select name from users").unwrap().query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect()).await;
+	let names: Vec<String> = reopened.db.call(|db| db.prepare("select name from users").unwrap().query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect()).await.unwrap();
 	assert_eq!(names, ["alice"]);
-	assert_eq!(reopened.db.call(|db| db.query_row("select count(*) from sessions", [], |row| row.get::<_, i64>(0)).unwrap()).await, 0);
-	assert!(reopened.db.call(|db| db.query_row("select count(*) from audit where action = 'backup.restore'", [], |row| row.get::<_, i64>(0)).unwrap()).await >= 1);
+	assert_eq!(reopened.db.call(|db| db.query_row("select count(*) from sessions", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap(), 0);
+	assert!(reopened.db.call(|db| db.query_row("select count(*) from audit where action = 'backup.restore'", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap() >= 1);
 	assert!(reopened.keys.is_some());
-	assert_eq!(reopened.db.call(|db| db.query_row("select count(*) from api_tokens where revoked_at is null", [], |row| row.get::<_, i64>(0)).unwrap()).await, 0);
+	assert_eq!(reopened.db.call(|db| db.query_row("select count(*) from api_tokens where revoked_at is null", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap(), 0);
 	assert_ne!(reopened.start_id, h.app.start_id);
 	assert!(!veilway_panel::backup::marker(&h.app.cfg).exists());
-	assert_eq!(reopened.settings().await.provider_name, "Test Net");
+	assert_eq!(reopened.settings().provider_name, "Test Net");
 }
 
 #[tokio::test]
@@ -1041,9 +1056,9 @@ async fn an_update_is_requested_with_a_file_that_holds_only_the_word_panel() {
 	assert!(!h.app.cfg.update_request.exists());
 	h.app.update.lock().unwrap().found = Some(veilway_panel::updater::Found {version: "9.9.9".into(), notes_url: "https://github.com/veilway-project/veilway-panel/releases/tag/v9.9.9".into()});
 	assert_eq!(h.bearer(Method::POST, "/p/api/update/request", &full, None, "10.1.1.1").await.status, StatusCode::FORBIDDEN);
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
 	assert_eq!(h.call(Method::POST, "/p/api/update/request", Some(&session), None, "10.0.0.1").await.json()["error"]["code"], "reauth_required");
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
 	std::fs::write(h.app.cfg.update_request.with_extension("tmp"), b"stale").unwrap();
 	let made = h.call(Method::POST, "/p/api/update/request", Some(&session), None, "10.0.0.1").await;
 	assert_eq!(made.status, StatusCode::OK, "{}", String::from_utf8_lossy(&made.body));
@@ -1052,7 +1067,7 @@ async fn an_update_is_requested_with_a_file_that_holds_only_the_word_panel() {
 	assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&h.app.cfg.update_request).unwrap().permissions()) & 0o777, 0o600);
 	assert_eq!(h.call(Method::GET, "/p/api/update", Some(&session), None, "10.0.0.1").await.json()["updating"], true);
 	assert_eq!(h.call(Method::POST, "/p/api/update/request", Some(&session), None, "10.0.0.1").await.status, StatusCode::CONFLICT);
-	let audit: i64 = h.app.db.call(|db| db.query_row("select count(*) from audit where action = 'update.request' and detail = 'from ' || ? || ' to 9.9.9'", [veilway_panel::updater::CURRENT], |row| row.get(0)).unwrap()).await;
+	let audit: i64 = h.app.db.call(|db| db.query_row("select count(*) from audit where action = 'update.request' and detail = 'from ' || ? || ' to 9.9.9'", [veilway_panel::updater::CURRENT], |row| row.get(0)).unwrap()).await.unwrap();
 	assert_eq!(audit, 1);
 	std::fs::remove_dir_all(folder).unwrap();
 	h.app.update.lock().unwrap().requested_at = None;
@@ -1070,7 +1085,7 @@ async fn a_restore_cut_short_is_finished_at_the_next_start() {
 	std::fs::copy(&cfg.signing, staged(&cfg.signing)).unwrap();
 	std::fs::write(veilway_panel::backup::marker(&cfg), b"").unwrap();
 	let staged_path = staged(&cfg.database).to_string_lossy().to_string();
-	h.app.db.call(move |db| db.execute("vacuum into ?", [staged_path]).unwrap()).await;
+	h.app.db.call(move |db| db.execute("vacuum into ?", [staged_path]).unwrap()).await.unwrap();
 	let reopened = build(cfg.clone()).unwrap();
 	assert!(reopened.keys.is_some());
 	assert_eq!(std::fs::read(&cfg.keys).unwrap().len(), 96);
@@ -1083,7 +1098,7 @@ async fn restore_memory_at_the_cap() {
 	let peak = || std::fs::read_to_string("/proc/self/status").unwrap().lines().find(|line| line.starts_with("VmHWM")).unwrap().to_string();
 	let h = Harness::new().await;
 	let session = h.login("10.0.0.1").await;
-	h.app.db.call(|db| db.execute("insert into settings (key, value) values ('filler', randomblob(30000000))", []).unwrap()).await;
+	h.app.db.call(|db| db.execute("insert into settings (key, value) values ('filler', randomblob(30000000))", []).unwrap()).await.unwrap();
 	println!("before download: {}", peak());
 	let made = h.call(Method::POST, "/p/api/backup/download", Some(&session), Some(json!({"passphrase": "a long enough passphrase"})), "10.0.0.1").await;
 	assert_eq!(made.status, StatusCode::OK, "{}", String::from_utf8_lossy(&made.body));
@@ -1116,11 +1131,11 @@ async fn admins_are_listed_added_reset_and_removed_but_never_yourself() {
 	assert_eq!(h.call(Method::DELETE, &format!("/p/api/admins/{second_id}"), Some(&theirs), None, "10.0.0.2").await.status, StatusCode::CONFLICT, "not yourself, as the other admin either");
 	assert_eq!(h.call(Method::POST, &format!("/p/api/admins/{owner_id}/reset"), Some(&session), Some(json!({"new_password": "a third long password"})), "10.0.0.1").await.status, StatusCode::CONFLICT, "your own goes through the account routes");
 	assert_eq!(h.call(Method::POST, &format!("/p/api/admins/{second_id}/reset"), Some(&session), Some(json!({"new_password": "short"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
 	let stale = h.call(Method::POST, &format!("/p/api/admins/{second_id}/reset"), Some(&session), Some(json!({"new_password": "a third long password"})), "10.0.0.1").await;
 	assert_eq!((stale.status, stale.json()["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("reauth_required")));
 	let token = {
-		h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await;
+		h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
 		h.token(&session, "full", json!({})).await
 	};
 	let theirs_token = h.token(&theirs, "full", json!({})).await;
@@ -1136,8 +1151,8 @@ async fn admins_are_listed_added_reset_and_removed_but_never_yourself() {
 	assert_eq!(h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "second", "password": "a third long password", "totp": code_of(&renewed)})), "10.0.0.3").await.status, StatusCode::OK);
 	assert_eq!(h.call(Method::DELETE, &format!("/p/api/admins/{second_id}"), Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
 	assert_eq!(h.call(Method::DELETE, &format!("/p/api/admins/{second_id}"), Some(&session), None, "10.0.0.1").await.status, StatusCode::NOT_FOUND);
-	assert_eq!(h.app.db.call(move |db| db.query_row("select count(*) from sessions where admin_id = ?", [second_id], |row| row.get::<_, i64>(0)).unwrap()).await, 0);
-	h.app.db.call(|db| db.execute("update audit set at = at - 100 where action = 'login'", []).unwrap()).await;
+	assert_eq!(h.app.db.call(move |db| db.query_row("select count(*) from sessions where admin_id = ?", [second_id], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap(), 0);
+	h.app.db.call(|db| db.execute("update audit set at = at - 100 where action = 'login'", []).unwrap()).await.unwrap();
 	assert_eq!(h.call(Method::POST, "/p/api/admins", Some(&session), Some(json!({"username": "second", "password": "a fourth long password"})), "10.0.0.1").await.status, StatusCode::OK);
 	let again = h.call(Method::GET, "/p/api/admins", Some(&session), None, "10.0.0.1").await.json();
 	assert_eq!((again["admins"][1]["username"].clone(), again["admins"][1]["last_login"].clone()), (json!("second"), Value::Null), "a name made again does not inherit the old logins");
@@ -1207,17 +1222,17 @@ async fn an_xray_inbound_is_edited_and_every_user_keeps_their_credential() {
 	assert!(renewed != server && renewed.as_str().unwrap().len() == 44 && applied["xray"]["inbounds"][1]["clients"][0]["secret"] == password, "a new server key, the same user key");
 	assert_eq!(h.bearer(Method::PATCH, &path("ss"), &full, Some(json!({"port": 8391, "new_server_key": true})), "10.1.1.1").await.status, StatusCode::FORBIDDEN, "no API token makes a new server key");
 	assert_eq!(h.bearer(Method::PATCH, &path("ss"), &full, Some(json!({"port": 8391})), "10.1.1.1").await.status, StatusCode::OK, "a token edits an inbound without a new key");
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
 	let stale = h.call(Method::PATCH, &path("ss"), Some(&session), Some(json!({"port": 8391, "new_server_key": true})), "10.0.0.1").await;
 	assert_eq!((stale.status, stale.json()["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("reauth_required")));
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
 	*fake.document.lock().unwrap() = {let mut document = applied.clone(); document["invalid"] = json!(true); document};
 	assert_eq!(h.call(Method::PATCH, &path("vless1"), Some(&session), Some(json!({"port": 9444, "cert": "/a", "key": "/b", "host": "other.example.org"})), "10.0.0.1").await.status, StatusCode::UNPROCESSABLE_ENTITY, "the node refuses");
 	assert_eq!(h.call(Method::GET, "/p/api/xray", Some(&session), None, "10.0.0.1").await.json()["inbounds"][0]["own_host"], "edge.example.org", "a refused edit leaves the host as it was");
 	let stored = |tag: &'static str| h.app.db.call(move |db| db.query_row("select server_key from xray_inbounds where tag = ?", [tag], |row| row.get::<_, Vec<u8>>(0)).unwrap());
-	let (kept, reached) = (stored("ss").await, fake.applied.lock().unwrap().len());
+	let (kept, reached) = (stored("ss").await.unwrap(), fake.applied.lock().unwrap().len());
 	assert_eq!(h.call(Method::PATCH, &path("ss"), Some(&session), Some(json!({"port": 8392, "new_server_key": true})), "10.0.0.1").await.status, StatusCode::UNPROCESSABLE_ENTITY, "the node refuses a new key");
-	assert_eq!((stored("ss").await == kept, fake.applied.lock().unwrap().len() == reached), (true, true), "a refused new key is in neither the panel nor the node");
+	assert_eq!((stored("ss").await.unwrap() == kept, fake.applied.lock().unwrap().len() == reached), (true, true), "a refused new key is in neither the panel nor the node");
 	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await;
 	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "xray.edit" && entry["target"] == "vless1" && entry["detail"] == "listen 192.0.2.5:8444 -> [::]:9443, cert/key changed, host \"\" -> \"edge.example.org\""));
 	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "xray.edit" && entry["target"] == "ss" && entry["detail"].as_str().unwrap().ends_with("new server key")));
@@ -1338,7 +1353,7 @@ async fn two_step_off_asks_for_the_password_only_and_only_when_the_file_says_so(
 	}
 	let off = Harness::with_config(None, |cfg| cfg.two_step = "off".into()).await;
 	assert!(!off.totp.is_empty());
-	assert_eq!(off.app.db.call(|db| db.query_row("select count(*) from admins where length(totp_secret) = 0", [], |row| row.get::<_, i64>(0)).unwrap()).await, 0);
+	assert_eq!(off.app.db.call(|db| db.query_row("select count(*) from admins where length(totp_secret) = 0", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap(), 0);
 	assert_eq!(off.call(Method::GET, "/p/api/status", None, None, "10.0.0.1").await.json()["two_step"], false);
 	let answer = sign_in(&off, json!({"username": "owner", "password": PASSWORD})).await;
 	assert_eq!(answer.status, StatusCode::OK, "{}", String::from_utf8_lossy(&answer.body));
@@ -1393,18 +1408,18 @@ async fn turning_it_back_on_ends_sessions_and_revokes_the_tokens_made_while_off(
 	let entries = on.call(Method::GET, "/p/api/audit?limit=1000", Some(&fresh), None, "10.0.0.3").await.json();
 	let seen: Vec<(String, String)> = entries["entries"].as_array().unwrap().iter().filter(|entry| entry["action"] == "panel.two_step").map(|entry| (entry["detail"].as_str().unwrap().to_string(), entry["actor"].as_str().unwrap().to_string())).collect();
 	assert_eq!(seen, vec![("on, 2 sessions ended, 1 tokens revoked".to_string(), "panel".to_string()), ("off".to_string(), "panel".to_string())], "newest first");
-	assert_eq!(on.app.db.call(|db| db.query_row("select count(*) from settings where key = 'two_step_off_at'", [], |row| row.get::<_, i64>(0)).unwrap()).await, 0);
+	assert_eq!(on.app.db.call(|db| db.query_row("select count(*) from settings where key = 'two_step_off_at'", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap(), 0);
 	let again = rebuilt(&on, "on").await;
-	let count: i64 = again.app.db.call(|db| db.query_row("select count(*) from audit where action = 'panel.two_step'", [], |row| row.get(0)).unwrap()).await;
+	let count: i64 = again.app.db.call(|db| db.query_row("select count(*) from audit where action = 'panel.two_step'", [], |row| row.get(0)).unwrap()).await.unwrap();
 	assert_eq!(count, 2, "an unchanged value writes nothing");
 }
 
 #[tokio::test]
 async fn an_admin_without_a_secret_gets_one_at_start_and_the_password_alone_never_signs_in_while_on() {
 	let off = Harness::with_config(None, |cfg| cfg.two_step = "off".into()).await;
-	off.app.db.call(|db| db.execute("update admins set totp_secret = x'', totp_record = x'' where username = 'owner'", []).unwrap()).await;
+	off.app.db.call(|db| db.execute("update admins set totp_secret = x'', totp_record = x'' where username = 'owner'", []).unwrap()).await.unwrap();
 	let on = rebuilt(&off, "on").await;
-	assert_eq!(on.app.db.call(|db| db.query_row("select count(*) from admins where length(totp_secret) = 0", [], |row| row.get::<_, i64>(0)).unwrap()).await, 0);
+	assert_eq!(on.app.db.call(|db| db.query_row("select count(*) from admins where length(totp_secret) = 0", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap(), 0);
 	assert_eq!(on.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD})), "10.0.0.2").await.status, StatusCode::UNAUTHORIZED);
 	let back_off = rebuilt(&on, "off").await;
 	assert_eq!(back_off.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD})), "10.0.0.2").await.status, StatusCode::OK);
@@ -1417,13 +1432,13 @@ async fn no_admin_is_left_without_a_secret_after_setup_add_reset_or_change_in_ei
 		let session = h.login("10.0.0.1").await;
 		let made = h.call(Method::POST, "/p/api/admins", Some(&session), Some(json!({"username": "second", "password": PASSWORD})), "10.0.0.1").await;
 		assert_eq!(made.status, StatusCode::OK, "{two_step}");
-		let id: i64 = h.app.db.call(|db| db.query_row("select id from admins where username = 'second'", [], |row| row.get(0)).unwrap()).await;
+		let id: i64 = h.app.db.call(|db| db.query_row("select id from admins where username = 'second'", [], |row| row.get(0)).unwrap()).await.unwrap();
 		let reset = h.call(Method::POST, &format!("/p/api/admins/{id}/reset"), Some(&session), Some(json!({"new_password": PASSWORD})), "10.0.0.1").await;
 		assert_eq!(reset.status, StatusCode::OK, "{two_step}");
 		let changed = h.call(Method::POST, "/p/api/account/totp", Some(&session), None, "10.0.0.1").await;
 		assert_eq!(changed.status, StatusCode::OK, "{two_step}");
 		assert!(!changed.json()["totp_secret"].as_str().unwrap().is_empty(), "{two_step}");
-		assert_eq!(h.app.db.call(|db| db.query_row("select count(*) from admins where length(totp_secret) = 0", [], |row| row.get::<_, i64>(0)).unwrap()).await, 0, "{two_step}");
+		assert_eq!(h.app.db.call(|db| db.query_row("select count(*) from admins where length(totp_secret) = 0", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap(), 0, "{two_step}");
 	}
 }
 
@@ -1471,7 +1486,7 @@ async fn with_the_code_off_short_passwords_are_refused_and_a_stored_short_one_mu
 	assert_eq!(h.call(Method::POST, "/p/api/account/password", Some(&session), Some(json!({"new_password": short})), "10.0.0.2").await.status, StatusCode::BAD_REQUEST);
 	let salt = argon2::password_hash::SaltString::generate(&mut argon2::password_hash::rand_core::OsRng);
 	let hash = argon2::password_hash::PasswordHasher::hash_password(&argon2::Argon2::default(), short.as_bytes(), &salt).unwrap().to_string();
-	h.app.db.call(move |db| db.execute("update admins set password_hash = ?", [hash]).unwrap()).await;
+	h.app.db.call(move |db| db.execute("update admins set password_hash = ?", [hash]).unwrap()).await.unwrap();
 	let old = sign_in(&h, short, "10.0.0.3").await;
 	assert_eq!(old.status, StatusCode::OK);
 	assert_eq!(old.json()["password_change_required"], true);

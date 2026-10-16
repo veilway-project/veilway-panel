@@ -6,7 +6,8 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::{HashMap, VecDeque}, fs, net::IpAddr, os::unix::fs::PermissionsExt, sync::{atomic::AtomicBool, Mutex}};
+use rusqlite::Connection;
+use std::{collections::{HashMap, VecDeque}, fs, net::IpAddr, os::unix::fs::PermissionsExt, sync::{atomic::AtomicBool, Arc, Mutex, RwLock}};
 
 /// 365 days, then a retired signing key is destroyed.
 pub const RETIRED_KEPT: i64 = 365 * 86_400;
@@ -139,7 +140,9 @@ pub struct App {
 	pub node_lock: tokio::sync::Mutex<()>,
 	pub last_sync: Mutex<Option<String>>,
 	/// Set when the node's config was not brought up to date, and cleared by the next push that works.
-	pub dirty: AtomicBool,
+	pub dirty: Arc<AtomicBool>,
+	/// The settings as last stored. Written only inside a database job, together with the table, so the cache and the table move in step.
+	pub settings: Arc<RwLock<Settings>>,
 	/// The settings' answer for unknown paths, kept here so a stranger's request never reads the database.
 	pub not_found_page: Mutex<Option<NotFound>>,
 	/// What the last poll of the node's stats saw.
@@ -160,8 +163,11 @@ pub struct App {
 }
 
 impl App {
-	pub async fn settings(&self) -> Settings {self.db.call(|db| db.query_row("select value from settings where key = 'settings'", [], |row| row.get::<_, String>(0)).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()).await}
-	pub async fn save_settings(&self, settings: &Settings) {let text = serde_json::to_string(settings).unwrap_or_default(); self.db.call(move |db| {let _ = db.execute("insert into settings (key, value) values ('settings', ?) on conflict (key) do update set value = excluded.value", [text]);}).await}
+	pub fn settings(&self) -> Settings {self.settings.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()}
+	pub async fn update_settings(&self, change: impl FnOnce(&mut Settings) + Send + 'static) -> Result<(), String> {
+		let cache = self.settings.clone();
+		self.db.call(move |db| store_settings(db, &cache, change)).await.map_err(|error| error.to_string())?
+	}
 	/// The one answer for everything the panel does not serve: what the operator's web server says for a path it does not know.
 	pub fn not_found(&self) -> Response {
 		let page = self.not_found_page.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone().unwrap_or_else(|| self.cfg.not_found.clone());
@@ -173,4 +179,14 @@ impl App {
 		response
 	}
 	pub fn standard(bytes: &[u8]) -> String {STANDARD.encode(bytes)}
+}
+
+/// Stores the settings a job changed, then refreshes the cache. A failed write leaves both as they were.
+pub fn store_settings(connection: &Connection, cache: &RwLock<Settings>, change: impl FnOnce(&mut Settings)) -> Result<(), String> {
+	let mut settings = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+	change(&mut settings);
+	let text = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
+	connection.execute("insert into settings (key, value) values ('settings', ?) on conflict (key) do update set value = excluded.value", [text]).map_err(|error| error.to_string())?;
+	*cache.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = settings;
+	Ok(())
 }

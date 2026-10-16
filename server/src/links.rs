@@ -195,9 +195,11 @@ pub async fn confirm(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 			return Err(Failure::new(StatusCode::GONE, "expired", "The offer expired, so the pairing is discarded. Start again with a new offer."));
 		}
 		Err(Unconfirmed::Mismatch(kept)) => {
+			{
+				let mut pairing = app.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+				if tries + 1 >= TRIES {pairing.meta.remove(&id);} else {pairing.pending.insert(id.clone(), (*kept, tries + 1));}
+			}
 			app.db.audit(&ctx.actor, &ctx.source, "link.mismatch", &meta.tag, &format!("try {}", tries + 1)).await;
-			let mut pairing = app.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-			if tries + 1 >= TRIES {pairing.meta.remove(&id);} else {pairing.pending.insert(id, (*kept, tries + 1));}
 			return Err(Failure::new(StatusCode::FORBIDDEN, "fingerprint_mismatch", "These are not the groups this pairing has for the other side. If they were read and typed right, somebody changed a code on its way: stop and pair again over another channel."));
 		}
 	};

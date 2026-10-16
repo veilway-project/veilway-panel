@@ -122,11 +122,11 @@ async fn keys_are_stored_sealed_on_the_request_of_a_confirmed_device_and_of_no_o
 	let (id, link) = h.user(&session, "ann").await;
 	let stored = |device: u8| h.app.db.call(move |db| db.query_row("select mirror_name, mirror_key, mirror_gen from devices where public_key = ?", [STANDARD.encode([device; 32])], |row| Ok((row.get::<_, Option<Vec<u8>>>(0)?, row.get::<_, Option<Vec<u8>>>(1)?, row.get::<_, Option<i64>>(2)?))).unwrap());
 	assert_eq!(h.fetch(&link, 1, "fetch").await.status, StatusCode::OK);
-	assert_eq!(stored(1).await, (None, None, None), "a pending device has none");
+	assert_eq!(stored(1).await.unwrap(), (None, None, None), "a pending device has none");
 	assert_eq!(h.fetch(&link, 1, "confirm").await.status, StatusCode::OK);
-	let (Some(name), Some(key), Some(generation)) = stored(1).await else {panic!("a confirmed device has keys")};
+	let (Some(name), Some(key), Some(generation)) = stored(1).await.unwrap() else {panic!("a confirmed device has keys")};
 	assert_eq!(generation, 1);
-	let (record, keys) = (h.app.db.call(move |db| db.query_row("select record_id from users where id = ?", [id], |row| row.get::<_, Vec<u8>>(0)).unwrap()).await, h.app.keys.as_ref().unwrap());
+	let (record, keys) = (h.app.db.call(move |db| db.query_row("select record_id from users where id = ?", [id], |row| row.get::<_, Vec<u8>>(0)).unwrap()).await.unwrap(), h.app.keys.as_ref().unwrap());
 	let record: [u8; 16] = record.try_into().unwrap();
 	let derived = derived(&link, 1);
 	let (expected_name, expected_key) = derived.expose();
@@ -385,9 +385,9 @@ async fn the_status_names_the_folders_and_the_zip_needs_a_recent_confirmation() 
 	assert!(folder["sync"].as_array().unwrap().iter().all(|hint| hint["command"].as_str().unwrap().contains(&h.current(BASE).display().to_string())));
 	assert!(!after.to_string().contains("decoy") && !after.to_string().contains("real"), "which files are real is never shown");
 	let label = statics::label(BASE);
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
 	assert_eq!(h.call(Method::POST, &format!("/p/api/static/{label}/zip"), Some(&session), None, "10.0.0.1").await.json()["error"]["code"], "reauth_required");
-	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await;
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
 	assert_eq!(h.call(Method::POST, "/p/api/static/nothing/zip", Some(&session), None, "10.0.0.1").await.status, StatusCode::NOT_FOUND);
 	let zipped = h.call(Method::POST, &format!("/p/api/static/{label}/zip"), Some(&session), None, "10.0.0.1").await.json();
 	let bytes = STANDARD.decode(zipped["file"].as_str().unwrap()).unwrap();

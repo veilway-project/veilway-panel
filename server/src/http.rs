@@ -1,5 +1,6 @@
 //! The shapes every handler shares: the failure answer, the JSON body reader and who is calling.
 use crate::app::App;
+use crate::db::Unavailable;
 use axum::{extract::{FromRequest, Request}, http::{header::CONTENT_TYPE, HeaderValue, StatusCode}, response::{IntoResponse, Response}};
 use http_body_util::BodyExt;
 use schemars::JsonSchema;
@@ -26,6 +27,10 @@ impl Failure {
 		tracing::error!("internal error: {error}");
 		Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "Something went wrong. The log has the cause.")
 	}
+}
+
+impl From<Unavailable> for Failure {
+	fn from(_: Unavailable) -> Self {Self::new(StatusCode::SERVICE_UNAVAILABLE, "database_busy", "The panel is busy with its database. Try again in a moment.")}
 }
 
 impl From<rusqlite::Error> for Failure {

@@ -51,14 +51,14 @@ fn source_allowed(allowed: &[String], source: &str) -> bool {
 fn refuse(status: StatusCode, code: &'static str, message: &str) -> Response {Failure::new(status, code, message).into_response()}
 
 /// Whether a sign-in with two-step off found this admin's password shorter than the rule.
-pub async fn short_password(app: &App, admin_id: i64) -> bool {
-	app.db.call(move |db| db.query_row("select 1 from settings where key = ?", [format!("short_password:{admin_id}")], |_| Ok(())).is_ok()).await
+pub async fn short_password(app: &App, admin_id: i64) -> Result<bool, Failure> {
+	Ok(app.db.call(move |db| db.query_row("select 1 from settings where key = ?", [format!("short_password:{admin_id}")], |_| Ok(())).is_ok()).await?)
 }
 
 /// For a change a handler makes beyond what its route allows: an API token never has a re-authentication, and a session needs one in the last five minutes.
 pub async fn reauthed(app: &App, ctx: &Ctx) -> Result<(), Failure> {
 	let Some(id) = ctx.session_id.clone() else {return Err(Failure::new(StatusCode::FORBIDDEN, "forbidden", "An API token cannot make this change."))};
-	let reauth: i64 = app.db.call(move |db| db.query_row("select reauth_at from sessions where id = ?", [id], |row| row.get(0))).await?;
+	let reauth: i64 = app.db.call(move |db| db.query_row("select reauth_at from sessions where id = ?", [id], |row| row.get(0))).await??;
 	if now() - reauth > REAUTH {return Err(Failure::new(StatusCode::FORBIDDEN, "reauth_required", "Confirm your password and code first."))}
 	Ok(())
 }
@@ -95,7 +95,7 @@ pub async fn guard(State(guard): State<Arc<Guard>>, mut request: Request, next: 
 	}
 	if let Some(bearer) = bearer {
 		let hash = crypto::sha256(bearer.as_bytes());
-		let found = app.db.call(move |db| db.query_row("select t.id, t.name, t.scope, t.expires_at, t.sources, t.revoked_at, a.id from api_tokens t join admins a on a.id = t.admin_id where t.token_hash = ?", [hash.as_slice()], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<i64>>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, i64>(6)?))).optional().unwrap_or(None)).await;
+		let found = app.db.call(move |db| db.query_row("select t.id, t.name, t.scope, t.expires_at, t.sources, t.revoked_at, a.id from api_tokens t join admins a on a.id = t.admin_id where t.token_hash = ?", [hash.as_slice()], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<i64>>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, i64>(6)?))).optional().unwrap_or(None)).await.unwrap_or(None);
 		let Some((id, name, scope, expires, sources, revoked, admin_id)) = found else {return refuse(StatusCode::UNAUTHORIZED, "unauthorized", "The token is not valid.")};
 		let allowed: Vec<String> = serde_json::from_str(&sources).unwrap_or_default();
 		if revoked.is_some() || expires.is_some_and(|at| at <= now()) || (!allowed.is_empty() && !source_allowed(&allowed, &source)) {return refuse(StatusCode::UNAUTHORIZED, "unauthorized", "The token is not valid.")}
@@ -120,7 +120,7 @@ pub async fn guard(State(guard): State<Arc<Guard>>, mut request: Request, next: 
 	let Some(cookie) = cookie_value(&request, COOKIE_NAME) else {return refuse(StatusCode::UNAUTHORIZED, "unauthorized", "Log in first.")};
 	let Some(raw) = URL_SAFE_NO_PAD.decode(&cookie).ok().filter(|raw| raw.len() == 32) else {return refuse(StatusCode::UNAUTHORIZED, "unauthorized", "Log in first.")};
 	let hash = crypto::sha256(&raw);
-	let found = app.db.call(move |db| db.query_row("select s.id, s.csrf, s.created, s.last_seen, s.reauth_at, a.id, a.username from sessions s join admins a on a.id = s.admin_id where s.token_hash = ?", [hash.as_slice()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?, row.get::<_, i64>(5)?, row.get::<_, String>(6)?))).optional().unwrap_or(None)).await;
+	let found = app.db.call(move |db| db.query_row("select s.id, s.csrf, s.created, s.last_seen, s.reauth_at, a.id, a.username from sessions s join admins a on a.id = s.admin_id where s.token_hash = ?", [hash.as_slice()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?, row.get::<_, i64>(5)?, row.get::<_, String>(6)?))).optional().unwrap_or(None)).await.unwrap_or(None);
 	let Some((id, csrf, created, seen, reauth_at, admin_id, username)) = found else {return refuse(StatusCode::UNAUTHORIZED, "unauthorized", "Log in first.")};
 	let at = now();
 	if at - seen > IDLE || at - created > ABSOLUTE {
@@ -128,7 +128,7 @@ pub async fn guard(State(guard): State<Arc<Guard>>, mut request: Request, next: 
 		return refuse(StatusCode::UNAUTHORIZED, "unauthorized", "The session has expired.");
 	}
 	if changes && !request.headers().get("x-csrf-token").and_then(|value| value.to_str().ok()).is_some_and(|sent| crypto::equal(sent.as_bytes(), csrf.as_bytes())) {return refuse(StatusCode::FORBIDDEN, "csrf", "The CSRF token is missing or wrong.")}
-	if !app.cfg.two_step_on() && ![format!("{}/api/account/password", app.cfg.prefix), format!("{}/api/session/reauth", app.cfg.prefix), format!("{}/api/session", app.cfg.prefix), format!("{}/api/logout", app.cfg.prefix)].contains(&path) && short_password(app, admin_id).await {return refuse(StatusCode::FORBIDDEN, "password_change_required", "Change your password first. It is shorter than 12 characters.")}
+	if !app.cfg.two_step_on() && ![format!("{}/api/account/password", app.cfg.prefix), format!("{}/api/session/reauth", app.cfg.prefix), format!("{}/api/session", app.cfg.prefix), format!("{}/api/logout", app.cfg.prefix)].contains(&path) && short_password(app, admin_id).await.unwrap_or(true) {return refuse(StatusCode::FORBIDDEN, "password_change_required", "Change your password first. It is shorter than 12 characters.")}
 	if access == Access::AdminReauth && at - reauth_at > REAUTH {return refuse(StatusCode::FORBIDDEN, "reauth_required", "Confirm your password and code again first.")}
 	let touched = id.clone();
 	let _ = app.db.call(move |db| db.execute("update sessions set last_seen = ? where id = ?", params![at, touched])).await;
