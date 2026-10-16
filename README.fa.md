@@ -111,6 +111,8 @@ API مدیریتی زیر `{prefix}/api` قرار دارد. جدول مسیره�
 
 ## مشارکت و امنیت
 
+پرسش‌ها و کمک برای راه‌اندازی در [GitHub Discussions](https://github.com/veilway-project/veilway/discussions) جا دارند، به انگلیسی یا فارسی. Issues برای باگ‌ها و درخواست‌های مشخص است.
+
 اول [CONTRIBUTING.md](CONTRIBUTING.md) را بخوانید. اولین درخواست ادغام شما از شما می‌خواهد یک بار [CLA](CLA.md) را امضا کنید. آسیب‌پذیری‌ها را طبق [SECURITY.md](SECURITY.md) به‌صورت خصوصی گزارش دهید، نه در یک مسئلهٔ عمومی.
 
 ## مجوز
