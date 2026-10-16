@@ -29,6 +29,8 @@ pub struct UserOut {
 	pub id: i64, pub name: String, pub enabled: bool, pub groups: Vec<String>,
 	/// "all" or a list of exit tags.
 	pub exits: Value,
+	/// The exit the user's devices leave through when they choose none. Null is the node's default.
+	pub exit: Option<String>,
 	pub quota_bytes: Option<i64>, pub quota_period: Option<String>, pub expires_at: Option<i64>,
 	/// 0 is no limit beyond the node's own 16.
 	pub device_limit: i64, pub note: String, pub created: i64, pub subscription_id: String,
@@ -38,7 +40,7 @@ pub struct UserOut {
 }
 
 fn out(user: &UserRow, devices: i64, pending: i64, node: Option<Value>) -> UserOut {
-	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, node}
+	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, node}
 }
 
 fn counts(app: &App, id: i64) -> (i64, i64) {
@@ -76,6 +78,8 @@ pub async fn get(State(app): State<Arc<App>>, Path(id): Path<i64>) -> Result<Res
 #[serde(deny_unknown_fields)]
 pub struct UserIn {
 	pub name: String, pub enabled: Option<bool>, pub groups: Option<Vec<String>>, pub exits: Option<Value>,
+	/// One of the user's exits, or null for the node's default.
+	pub exit: Option<String>,
 	pub quota_bytes: Option<u64>,
 	/// "daily", "weekly" or "monthly". Needs quota_bytes.
 	pub quota_period: Option<String>,
@@ -87,11 +91,18 @@ pub struct UserIn {
 #[serde(deny_unknown_fields)]
 pub struct UserPatch {
 	pub name: Option<String>, pub enabled: Option<bool>, pub groups: Option<Vec<String>>, pub exits: Option<Value>,
+	/// One of the user's exits, or null for the node's default. A default the new exits leave out is cleared.
+	#[serde(default, deserialize_with = "double")] pub exit: Option<Option<String>>,
 	#[serde(default, deserialize_with = "double")] pub quota_bytes: Option<Option<u64>>,
 	#[serde(default, deserialize_with = "double")] pub quota_period: Option<Option<String>>,
 	#[serde(default, deserialize_with = "double")] pub expires_at: Option<Option<i64>>,
 	pub device_limit: Option<u16>, pub note: Option<String>,
 }
+
+/// Whether `exit` may be the default of a user with these exits. Whether the node has it is decided at the next sync.
+fn default_ok(exits: &Value, exit: &str) -> bool {name_ok(exit, false) && (exits == &json!("all") || exits.as_array().is_some_and(|tags| tags.iter().any(|tag| tag == exit)))}
+
+const DEFAULT_REFUSED: &str = "exit is one of the user's exits, or null for the node's default.";
 
 fn check(groups: Option<&Vec<String>>, exits: Option<&Value>, quota: Option<u64>, period: Option<&str>) -> Result<(), Failure> {
 	if groups.is_some_and(|groups| groups.len() > 256 || groups.iter().any(|group| !name_ok(group, true))) {return Err(Failure::bad("A group is 1 to 64 characters of a-z, 0-9, dot, dash and underscore, and a user has at most 256."))}
@@ -123,13 +134,14 @@ pub struct Created {pub user: UserOut, pub link: Option<LinkView>, pub link_erro
 pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<UserIn>) -> Result<Response, Failure> {
 	if !name_ok(&input.name, true) {return Err(Failure::bad("name is 1 to 64 characters of a-z, 0-9, dot, dash and underscore, starting with a letter or digit."))}
 	check(input.groups.as_ref(), input.exits.as_ref(), input.quota_bytes, input.quota_period.as_deref())?;
+	if input.exit.as_deref().is_some_and(|exit| !default_ok(input.exits.as_ref().unwrap_or(&json!("all")), exit)) {return Err(Failure::bad(DEFAULT_REFUSED))}
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing, so no account can be made."))?;
 	let settings = app.settings();
 	let (token, record, sub_id) = (crypto::random::<16>(), crypto::random::<16>(), URL_SAFE_NO_PAD.encode(crypto::random::<16>()));
 	let copy = (!settings.show_links_once).then(|| keys.seal_copy(&record, &token));
 	let id = {
 		let db = app.db.lock();
-		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(settings.default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, keys.token_lookup(&token).as_slice(), copy, now()])?;
+		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created, default_exit) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(settings.default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, keys.token_lookup(&token).as_slice(), copy, now(), input.exit])?;
 		let id = db.last_insert_rowid();
 		audit(&db, &ctx.actor, &ctx.source, "user.create", &format!("user:{id}"), &input.name);
 		id
@@ -147,10 +159,13 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	let quota = input.quota_bytes.unwrap_or(user.quota_bytes.map(|quota| quota as u64));
 	let period = input.quota_period.unwrap_or(user.quota_period.clone());
 	check(input.groups.as_ref(), input.exits.as_ref(), quota, period.as_deref())?;
+	let exits = input.exits.clone().unwrap_or_else(|| serde_json::from_str(&user.exits).unwrap_or(json!("all")));
+	if input.exit.as_ref().is_some_and(|exit| exit.as_deref().is_some_and(|exit| !default_ok(&exits, exit))) {return Err(Failure::bad(DEFAULT_REFUSED))}
+	let exit = input.exit.clone().unwrap_or(user.default_exit.clone()).filter(|exit| default_ok(&exits, exit));
 	if input.name.as_ref().is_some_and(|name| !name_ok(name, true)) {return Err(Failure::bad("name is 1 to 64 characters of a-z, 0-9, dot, dash and underscore, starting with a letter or digit."))}
 	{
 		let db = app.db.lock();
-		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), input.exits.map_or(user.exits.clone(), |exits| serde_json::to_string(&exits).unwrap_or_default()), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), id])?;
+		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ?, default_exit = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), serde_json::to_string(&exits).unwrap_or_default(), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), exit, id])?;
 		audit(&db, &ctx.actor, &ctx.source, "user.update", &format!("user:{id}"), &user.name);
 	}
 	let node = push(&app).await;
@@ -176,9 +191,9 @@ pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 #[serde(deny_unknown_fields)]
 pub struct Bulk {
 	pub ids: Vec<i64>,
-	/// enable, disable, delete, reset_usage, add_group, remove_group, set_quota, set_expiry or set_device_limit.
+	/// enable, disable, delete, reset_usage, add_group, remove_group, set_quota, set_expiry, set_device_limit or set_exits.
 	pub action: String,
-	/// The group name, the quota (an object with quota_bytes and quota_period), the expiry in Unix seconds or null, or the device limit.
+	/// The group name, the quota (an object with quota_bytes and quota_period), the expiry in Unix seconds or null, the device limit, or the exits ("all" or a list of exit tags). A default exit the new exits leave out is cleared.
 	pub value: Option<Value>,
 }
 
@@ -215,6 +230,11 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 				}
 				"set_expiry" => {app.db.lock().execute("update users set expires_at = ? where id = ?", params![value.as_ref().and_then(Value::as_i64), id]).map_err(|error| error.to_string())?;}
 				"set_device_limit" => {app.db.lock().execute("update users set device_limit = ? where id = ?", params![value.as_ref().and_then(Value::as_u64).filter(|limit| *limit <= 65535).ok_or("value is a number from 0 to 65535")?, id]).map_err(|error| error.to_string())?;}
+				"set_exits" => {
+					let exits = value.ok_or("value is \"all\" or a list of exit tags")?;
+					check(None, Some(&exits), None, None).map_err(|error| error.message)?;
+					app.db.lock().execute("update users set exits = ?, default_exit = ? where id = ?", params![serde_json::to_string(&exits).unwrap_or_default(), user.default_exit.filter(|exit| default_ok(&exits, exit)), id]).map_err(|error| error.to_string())?;
+				}
 				other => return Err(format!("unknown action {other}")),
 			}
 			Ok(())

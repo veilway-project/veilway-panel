@@ -109,7 +109,7 @@
         "additionalProperties": false,
         "properties": {
           "action": {
-            "description": "enable, disable, delete, reset_usage, add_group, remove_group, set_quota, set_expiry or set_device_limit.",
+            "description": "enable, disable, delete, reset_usage, add_group, remove_group, set_quota, set_expiry, set_device_limit or set_exits.",
             "type": "string"
           },
           "ids": {
@@ -120,7 +120,7 @@
             "type": "array"
           },
           "value": {
-            "description": "The group name, the quota (an object with quota_bytes and quota_period), the expiry in Unix seconds or null, or the device limit."
+            "description": "The group name, the quota (an object with quota_bytes and quota_period), the expiry in Unix seconds or null, the device limit, or the exits (\"all\" or a list of exit tags). A default exit the new exits leave out is cleared."
           }
         },
         "required": [
@@ -1685,6 +1685,13 @@
               "null"
             ]
           },
+          "exit": {
+            "description": "One of the user's exits, or null for the node's default.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "exits": true,
           "expires_at": {
             "description": "Unix seconds.",
@@ -1750,6 +1757,13 @@
           },
           "enabled": {
             "type": "boolean"
+          },
+          "exit": {
+            "description": "The exit the user's devices leave through when they choose none. Null is the node's default.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "exits": {
             "description": "\"all\" or a list of exit tags."
@@ -1831,6 +1845,14 @@
           "enabled": {
             "type": [
               "boolean",
+              "null"
+            ]
+          },
+          "exit": {
+            "default": null,
+            "description": "One of the user's exits, or null for the node's default. A default the new exits leave out is cleared.",
+            "type": [
+              "string",
               "null"
             ]
           },

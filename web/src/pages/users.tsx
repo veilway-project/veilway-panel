@@ -1,6 +1,6 @@
 import {Banner, Button, ConfirmDialog, Dialog, Glass, NumberField, RadioGroup, Segmented, SelectField, StateBlock, Switch, TextField, UsageBar, useToast} from "@veilway/ui";
 import {useEffect, useId, useState} from "react";
-import {api, type LinkView, type NodeState, type NodeUser, type User} from "../api.ts";
+import {api, type LinkView, type NodeState, type NodeUser, type User, type UserPatch} from "../api.ts";
 import {ago, DayField, ErrorNote, fromDay, Mark, NodeNote, PageHead, toDay, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {useSettings} from "../settings.ts";
 
@@ -120,18 +120,21 @@ export function UsersPage({adding}: {adding: boolean}) {
 // The bulk changes that need a value, behind one dialog so the bar stays short.
 function BulkChange({count, busy, error, onClose, onApply}: {count: number, busy: boolean, error: unknown, onClose: () => void, onApply: (action: string, value: unknown) => void}) {
 	const {t} = useP(), [action, setAction] = useState("add_group"), [group, setGroup] = useState("*"), [quota, setQuota] = useState<number | "">(""), [period, setPeriod] = useState<Period>("monthly"), [day, setDay] = useState(""), [limit, setLimit] = useState<number | "">(3), [problem, setProblem] = useState("");
+	const [exits, setExits] = useState<Exits>("all"), nodeExits = useExits(action === "set_exits"), kept = keptExits(exits, nodeExits.data);
 	const apply = () => {
 		if ((action === "add_group" || action === "remove_group") && !NAME.test(group)) return setProblem(t("error.group"));
+		if (action === "set_exits" && kept.length === 0) return setProblem(t("exits.pick"));
 		setProblem("");
-		onApply(action, action === "set_quota" ? {quota_bytes: quota === "" ? null : Math.round(quota * GB), quota_period: quota === "" || period === "none" ? null : period} : action === "set_expiry" ? fromDay(day) : action === "set_device_limit" ? (limit === "" ? 0 : limit) : group);
+		onApply(action, action === "set_quota" ? {quota_bytes: quota === "" ? null : Math.round(quota * GB), quota_period: quota === "" || period === "none" ? null : period} : action === "set_expiry" ? fromDay(day) : action === "set_device_limit" ? (limit === "" ? 0 : limit) : action === "set_exits" ? kept : group);
 	};
 	return <Dialog open onOpenChange={open => { if (!open) onClose(); }} title={t("bulk.changeTitle", {count})}>
 		<form className="p-stack" onSubmit={event => { event.preventDefault(); apply(); }}>
-			<RadioGroup label={t("bulk.action")} value={action} onChange={setAction} options={[{value: "add_group", label: t("bulk.addGroup")}, {value: "remove_group", label: t("bulk.removeGroup")}, {value: "set_quota", label: t("bulk.setQuota")}, {value: "set_expiry", label: t("bulk.setExpiry")}, {value: "set_device_limit", label: t("bulk.setLimit")}]}/>
+			<RadioGroup label={t("bulk.action")} value={action} onChange={setAction} options={[{value: "add_group", label: t("bulk.addGroup")}, {value: "remove_group", label: t("bulk.removeGroup")}, {value: "set_quota", label: t("bulk.setQuota")}, {value: "set_expiry", label: t("bulk.setExpiry")}, {value: "set_device_limit", label: t("bulk.setLimit")}, {value: "set_exits", label: t("bulk.setExits")}]}/>
 			{(action === "add_group" || action === "remove_group") && <TextField label={t("form.groups")} value={group} onChange={value => setGroup(value.toLowerCase().trim())} error={problem || undefined} technical/>}
 			{action === "set_quota" && <><NumberField label={t("form.quota")} hint={t("form.quotaHint")} unit={t("unit.gb")} min={0} step="any" value={quota} onChange={setQuota}/><SelectField label={t("form.period")} value={period} onChange={value => setPeriod(value as Period)} disabled={quota === ""} options={(["none", "daily", "weekly", "monthly"] as const).map(p => ({value: p, label: t(`form.period.${p}`)}))}/></>}
 			{action === "set_expiry" && <DayField label={t("form.expiry")} hint={t("form.expiryHint")} value={day} onChange={setDay}/>}
 			{action === "set_device_limit" && <NumberField label={t("form.limit")} hint={t("form.limitHint")} unit={t("form.devices")} min={0} max={65535} value={limit} onChange={setLimit}/>}
+			{action === "set_exits" && <><p className="vw-note">{t("bulk.exitsNote")}</p><ExitPicker value={exits} onChange={setExits} exits={nodeExits} problem={problem || undefined}/></>}
 			<ErrorNote error={error}/>
 			<div className="vw-dialog-foot"><Button onClick={onClose}>{t("action.cancel")}</Button><Button type="submit" variant="primary" disabled={busy}>{t("bulk.apply")}</Button></div>
 		</form>
@@ -151,11 +154,16 @@ export function useExits(wanted = true) {
 // What a save sends: tags the node no longer has are dropped, which is how a deleted exit leaves a user.
 export const keptExits = (value: Exits, rows: ExitRow[] | null) => value === "all" || !rows ? value : value.filter(tag => rows.some(e => e.tag === tag));
 
-export function ExitPicker({value, onChange, exits, problem}: {value: Exits, onChange: (value: Exits) => void, exits: ReturnType<typeof useExits>, problem?: string}) {
+// The default exit a save sends: none once the exits leave it out or the node no longer has it.
+export const keptFallback = (value: Exits, fallback: string | null | undefined, rows: ExitRow[] | null) => fallback && (value === "all" ? !rows || rows.some(e => e.tag === fallback) : keptExits(value, rows).includes(fallback)) ? fallback : null;
+
+export function ExitPicker({value, onChange, exits, problem, fallback, onFallback}: {value: Exits, onChange: (value: Exits) => void, exits: ReturnType<typeof useExits>, problem?: string, fallback?: string | null, onFallback?: (exit: string | null) => void}) {
 	const {t} = useP(), id = useId(), chosen = value === "all" ? [] : value, rows = exits.data ?? [], missing = exits.data ? chosen.filter(tag => !rows.some(e => e.tag === tag)) : [];
+	const allowed = rows.filter(e => value === "all" || chosen.includes(e.tag)), picker = onFallback && <SelectField label={t("exits.default")} hint={t("exits.defaultHint")} value={keptFallback(value, fallback, exits.data) ?? ""} onChange={next => onFallback(next || null)} disabled={!exits.data} options={[{value: "", label: t("exits.nodeDefault")}, ...allowed.map(e => ({value: e.tag, label: e.name ? e.name + " (" + e.tag + ")" : e.tag}))]}/>;
 	const pick = (tag: string, on: boolean) => onChange(on ? [...chosen, tag] : chosen.filter(held => held !== tag));
 	return <div className="p-stack">
 		<Segmented label={t("exits.choice")} value={value === "all" ? "all" : "only"} onChange={next => onChange(next === "all" ? "all" : chosen)} options={[{value: "all", label: t("exits.all")}, {value: "only", label: t("exits.only")}]}/>
+		{value === "all" && picker}
 		{value !== "all" && (exits.error && !exits.data ? <Banner tone="danger" title={t("exits.loadFailed")} action={<Button size="sm" icon="refresh" onClick={exits.reload}>{t("action.retry")}</Button>}/>
 		: !exits.data ? <p className="vw-muted vw-small">{t("common.loading")}</p>
 		: <>
@@ -174,6 +182,7 @@ export function ExitPicker({value, onChange, exits, problem}: {value: Exits, onC
 				</label></li>)}
 			</ul>
 			{problem && <p className="vw-note p-exit-problem" role="alert">{problem}</p>}
+			{picker}
 		</>)}
 	</div>;
 }
@@ -182,7 +191,7 @@ export function UserForm({user, defaultLimit, onClose, onSaved}: {user: User | n
 	const {t} = useP(), guard = useGuard();
 	const [name, setName] = useState(user?.name ?? ""), [groups, setGroups] = useState(user?.groups.join(", ") ?? ""), [quota, setQuota] = useState<number | "">(user?.quota_bytes ? Math.round(user.quota_bytes / GB * 100) / 100 : "");
 	const [period, setPeriod] = useState<Period>((user?.quota_period as Period | null) ?? "none"), [day, setDay] = useState(toDay(user?.expires_at)), [limit, setLimit] = useState<number | "">(user?.device_limit ?? defaultLimit), [note, setNote] = useState(user?.note ?? ""), [enabled, setEnabled] = useState(user?.enabled ?? true);
-	const [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [tried, setTried] = useState(false), [exits, setExits] = useState<Exits>("all"), nodeExits = useExits(!user);
+	const [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [tried, setTried] = useState(false), [exits, setExits] = useState<Exits>("all"), [fallback, setFallback] = useState<string | null>(null), nodeExits = useExits(!user);
 	const list = groups.split(",").map(g => g.trim().toLowerCase()).filter(Boolean);
 	const problems = {name: NAME.test(name) ? undefined : t("error.userName"), groups: list.every(g => NAME.test(g)) ? undefined : t("error.group"), exits: keptExits(exits, nodeExits.data).length === 0 ? t("exits.pick") : undefined};
 	const save = async () => {
@@ -192,9 +201,10 @@ export function UserForm({user, defaultLimit, onClose, onSaved}: {user: User | n
 		setError(null);
 		const body = {name, groups: list, quota_bytes: quota === "" ? null : Math.round(quota * GB), quota_period: quota === "" || period === "none" ? null : period, expires_at: fromDay(day), device_limit: limit === "" ? 0 : limit, note, enabled};
 		try {
-			if (user) onSaved((await guard(() => api("patch", "/users/{id}", {params: {id: user.id}, body}))).user, null, null);
+			// The schema lists the nullable fields as required, but the server leaves out what is not sent, so the default exit stays.
+			if (user) onSaved((await guard(() => api("patch", "/users/{id}", {params: {id: user.id}, body: body as UserPatch}))).user, null, null);
 			else {
-				const answer = await guard(() => api("post", "/users", {body: {...body, exits: keptExits(exits, nodeExits.data)}}));
+				const answer = await guard(() => api("post", "/users", {body: {...body, exits: keptExits(exits, nodeExits.data), exit: keptFallback(exits, fallback, nodeExits.data)}}));
 				onSaved(answer.user, answer.link ?? null, answer.link_error ?? null);
 			}
 		} catch (failure) {
@@ -215,7 +225,7 @@ export function UserForm({user, defaultLimit, onClose, onSaved}: {user: User | n
 				<DayField label={t("form.expiry")} hint={t("form.expiryHint")} value={day} onChange={setDay} optional/>
 				<NumberField label={t("form.limit")} hint={t("form.limitHint")} unit={t("form.devices")} min={0} max={65535} value={limit} onChange={setLimit}/>
 			</div>
-			{!user && <div className="vw-field"><span className="vw-label">{t("exits.title")}</span><p className="vw-note">{t("exits.lead")}</p><ExitPicker value={exits} onChange={setExits} exits={nodeExits} problem={tried ? problems.exits : undefined}/></div>}
+			{!user && <div className="vw-field"><span className="vw-label">{t("exits.title")}</span><p className="vw-note">{t("exits.lead")}</p><ExitPicker value={exits} onChange={setExits} exits={nodeExits} problem={tried ? problems.exits : undefined} fallback={fallback} onFallback={setFallback}/></div>}
 			<TextField label={t("form.note")} hint={t("form.noteHint")} value={note} onChange={setNote} optional/>
 			<Switch label={t("form.enabled")} hint={t("form.enabledHint")} checked={enabled} onChange={setEnabled}/>
 			<ErrorNote error={error}/>

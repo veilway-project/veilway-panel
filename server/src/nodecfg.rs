@@ -72,6 +72,7 @@ pub(crate) async fn apply(app: &Arc<App>, ctx: &Ctx, document: Value, revision: 
 	let (status, applied) = call(app, "PUT", "/v1/config", Some(revision), Some(&document)).await?;
 	match status {
 		200 => {
+			node::clear_defaults(app, &document);
 			audit(&app.db.lock(), &ctx.actor, &ctx.source, "config.apply", target, &format!("generation {}", applied.get("generation").and_then(Value::as_u64).unwrap_or(0)));
 			Ok(applied)
 		}

@@ -18,7 +18,7 @@ create table if not exists xray_clients (tag text not null references xray_inbou
 ";
 
 /// Kept in the file's `user_version`. A file with a higher number was made by a newer panel and is refused, at start-up and in a restore. A file with none is the first layout.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
@@ -32,6 +32,8 @@ impl Db {
 		connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 		// Added after the first release of the table; an error means the column is there.
 		let _ = connection.execute("alter table xray_inbounds add column server_key blob", []);
+		// Version 2: the exit a user's devices leave through when they choose none.
+		let _ = connection.execute("alter table users add column default_exit text", []);
 		Ok(Self(Arc::new(Mutex::new(connection))))
 	}
 	/// Held for the length of one query or one short transaction and never across an await.

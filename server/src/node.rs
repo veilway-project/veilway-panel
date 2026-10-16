@@ -34,15 +34,31 @@ pub async fn usage(app: &App) -> HashMap<String, Value> {
 	serde_json::from_slice::<Value>(&body).ok().and_then(|value| value.get("users").cloned()).and_then(|users| users.as_array().cloned()).unwrap_or_default().into_iter().filter_map(|user| Some((user.get("name")?.as_str()?.to_string(), user))).collect()
 }
 
+/// Whether a stored default exit still holds in this document: the node has the exit and the user may use it.
+fn default_holds(document: &Value, exits: &str, exit: &str) -> bool {
+	let exits: Value = serde_json::from_str(exits).unwrap_or(json!("all"));
+	document["exits"].as_array().is_some_and(|list| list.iter().any(|found| found["tag"] == exit)) && (exits == json!("all") || exits.as_array().is_some_and(|tags| tags.iter().any(|tag| tag == exit)))
+}
+
+/// After the node took a document, forgets the default exits it left out, so the panel shows what the node runs.
+pub(crate) fn clear_defaults(app: &App, document: &Value) {
+	let db = app.db.lock();
+	let stale: Vec<(i64, String, String)> = db.prepare("select id, name, exits, default_exit from users where default_exit is not null").and_then(|mut statement| statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?.collect::<Result<Vec<_>, _>>()).unwrap_or_default().into_iter().filter(|(_, _, exits, exit)| !default_holds(document, exits, exit)).map(|(id, name, _, exit)| (id, name, exit)).collect();
+	for (id, name, exit) in stale {
+		if let Err(error) = db.execute("update users set default_exit = null where id = ?", [id]) {tracing::error!("the default exit of {name} could not be cleared: {error}"); continue}
+		tracing::info!("user {name} no longer has default exit {exit}: the node has no such exit or the user may not use it");
+	}
+}
+
 /// Puts the panel's users into the document's `users`, and the panel's credentials into the `clients` of the Xray inbounds it made, making one for a user who has none yet. A user with no device is left out, since the node needs one. An Xray inbound the panel did not make keeps its clients, less those whose user is gone.
 pub(crate) fn fill(app: &App, document: &mut Value) -> Result<(), String> {
 	let keys = app.keys.as_ref().ok_or("the key file is missing, so no secret can be opened")?;
 	let db = app.db.lock();
 	subs::expire_pending(&db, now()).map_err(|error| error.to_string())?;
-	let mut statement = db.prepare("select id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, record_id from users order by id").map_err(|error| error.to_string())?;
-	let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<i64>>(7)?, row.get::<_, Vec<u8>>(8)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+	let mut statement = db.prepare("select id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, record_id, default_exit from users order by id").map_err(|error| error.to_string())?;
+	let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<i64>>(7)?, row.get::<_, Vec<u8>>(8)?, row.get::<_, Option<String>>(9)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
 	let (mut out, mut present) = (Vec::new(), Vec::new());
-	for (id, name, enabled, groups, exits, quota, period, expires, record) in rows {
+	for (id, name, enabled, groups, exits, quota, period, expires, record, exit) in rows {
 		let record: [u8; 16] = record.try_into().map_err(|_| "a user record id is not 16 bytes")?;
 		let mut devices = db.prepare("select id, public_key, address, transport_secret from devices where user_id = ? and state = 'enrolled' order by id").map_err(|error| error.to_string())?;
 		let devices = devices.query_map([id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
@@ -52,6 +68,8 @@ pub(crate) fn fill(app: &App, document: &mut Value) -> Result<(), String> {
 			Ok::<_, String>(json!({"name": format!("d{device}"), "public_key": public_key, "transport_secrets": [App::standard(&secret)], "addresses": [address]}))
 		}).collect::<Result<_, _>>()?;
 		let mut user = json!({"name": name, "enabled": enabled, "groups": serde_json::from_str::<Value>(&groups).unwrap_or(json!([])), "devices": devices, "exits": serde_json::from_str::<Value>(&exits).unwrap_or(json!("all"))});
+		// A default the document no longer allows is left out here, and cleared once the node takes the document.
+		if let Some(exit) = exit.filter(|exit| default_holds(document, &exits, exit)) {user["exit"] = json!(exit);}
 		if let Some(quota) = quota {user["quota_bytes"] = json!(quota);}
 		if let (Some(_), Some(period)) = (quota, period) {user["quota_period"] = json!(period);}
 		if let Some(expires) = expires {user["expires_at"] = json!(OffsetDateTime::from_unix_timestamp(expires).map_err(|error| error.to_string())?.format(&Rfc3339).map_err(|error| error.to_string())?);}
@@ -103,7 +121,10 @@ pub async fn sync(app: &Arc<App>) -> Result<(), String> {
 			fill(app, &mut document)?;
 			let (status, body) = request(&app.cfg.node_socket, "PUT", "/v1/config", Some(&revision), Some(&document)).await?;
 			match status {
-				200 => return Ok(()),
+				200 => {
+					clear_defaults(app, &document);
+					return Ok(())
+				}
 				409 => continue,
 				other => return Err(format!("the node refused the config with {other}: {}", String::from_utf8_lossy(&body).chars().take(300).collect::<String>())),
 			}

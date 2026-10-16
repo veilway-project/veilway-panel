@@ -609,6 +609,47 @@ async fn notices_dns_log_links_and_replay_are_sections_like_the_others() {
 }
 
 #[tokio::test]
+async fn a_default_exit_is_one_of_the_users_exits_and_goes_with_its_exit() {
+	let mut document = node_document("10.66.0.1/24");
+	document["exits"] = json!([{"tag": "fra", "backend": {"type": "netstack", "outbound": "plain"}}, {"tag": "ams", "backend": {"type": "netstack", "outbound": "plain"}}]);
+	let (fake, socket) = Fake::start(document).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	assert_eq!(h.call(Method::POST, "/p/api/users", Some(&session), Some(json!({"name": "ann", "exits": ["fra"], "exit": "ams"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "a default outside the allowed exits");
+	let made = h.call(Method::POST, "/p/api/users", Some(&session), Some(json!({"name": "ann", "exits": ["fra", "ams"], "exit": "ams"})), "10.0.0.1").await.json();
+	let id = made["user"]["id"].as_i64().unwrap();
+	assert_eq!(made["user"]["exit"], "ams");
+	assert_eq!(h.call(Method::POST, &format!("/p/api/users/{id}/devices"), Some(&session), Some(json!({"name": "phone"})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(fake.applied.lock().unwrap().last().unwrap()["users"][0]["exit"], "ams", "the default reaches the node");
+	assert_eq!(h.call(Method::PATCH, &format!("/p/api/users/{id}"), Some(&session), Some(json!({"exit": "nowhere"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	assert_eq!(h.call(Method::PATCH, &format!("/p/api/users/{id}"), Some(&session), Some(json!({"exits": ["fra"]})), "10.0.0.1").await.json()["user"]["exit"], Value::Null, "narrowing the exits clears a default they leave out");
+	assert_eq!(h.call(Method::PATCH, &format!("/p/api/users/{id}"), Some(&session), Some(json!({"exits": "all", "exit": "fra"})), "10.0.0.1").await.json()["user"]["exit"], "fra");
+	let revision = h.call(Method::GET, "/p/api/config/exits", Some(&session), None, "10.0.0.1").await.json()["revision"].clone();
+	let applied = h.call(Method::PUT, "/p/api/config/exits", Some(&session), Some(json!({"revision": revision, "value": [{"tag": "ams", "backend": {"type": "netstack", "outbound": "plain"}}]})), "10.0.0.1").await;
+	assert_eq!(applied.status, StatusCode::OK, "{}", String::from_utf8_lossy(&applied.body));
+	assert!(fake.applied.lock().unwrap().last().unwrap()["users"][0].get("exit").is_none(), "a default whose exit is gone is not sent");
+	assert_eq!(h.call(Method::GET, &format!("/p/api/users/{id}"), Some(&session), None, "10.0.0.1").await.json()["exit"], Value::Null, "and is cleared once the node took the change");
+}
+
+#[tokio::test]
+async fn bulk_exits_set_every_user_and_clear_defaults_they_leave_out() {
+	let mut document = node_document("10.66.0.1/24");
+	document["exits"] = json!([{"tag": "fra", "backend": {"type": "netstack", "outbound": "plain"}}, {"tag": "ams", "backend": {"type": "netstack", "outbound": "plain"}}]);
+	let (_fake, socket) = Fake::start(document).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	let a = h.call(Method::POST, "/p/api/users", Some(&session), Some(json!({"name": "ann", "exit": "fra"})), "10.0.0.1").await.json()["user"]["id"].as_i64().unwrap();
+	let b = h.call(Method::POST, "/p/api/users", Some(&session), Some(json!({"name": "bob", "exits": ["ams"], "exit": "ams"})), "10.0.0.1").await.json()["user"]["id"].as_i64().unwrap();
+	assert_eq!(h.call(Method::POST, "/p/api/users/bulk", Some(&session), Some(json!({"ids": [a, b], "action": "set_exits", "value": {"no": "list"}})), "10.0.0.1").await.json()["failed"].as_array().unwrap().len(), 2);
+	assert_eq!(h.call(Method::POST, "/p/api/users/bulk", Some(&session), Some(json!({"ids": [a, b], "action": "set_exits", "value": ["ams", "lon"]})), "10.0.0.1").await.json()["done"], 2);
+	let users = h.call(Method::GET, "/p/api/users", Some(&session), None, "10.0.0.1").await.json();
+	let seen: Vec<(Value, Value)> = users["users"].as_array().unwrap().iter().map(|user| (user["exits"].clone(), user["exit"].clone())).collect();
+	assert_eq!(seen, vec![(json!(["ams", "lon"]), Value::Null), (json!(["ams", "lon"]), json!("ams"))], "ann's default fra is left out and cleared, bob's ams stays");
+	assert_eq!(h.call(Method::POST, "/p/api/users/bulk", Some(&session), Some(json!({"ids": [a, b], "action": "set_exits", "value": "all"})), "10.0.0.1").await.json()["done"], 2);
+	assert_eq!(h.call(Method::GET, &format!("/p/api/users/{b}"), Some(&session), None, "10.0.0.1").await.json()["exits"], "all");
+}
+
+#[tokio::test]
 async fn profiles_are_derived_from_inbounds_with_overrides_kept() {
 	let (_fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
 	let h = Harness::with_socket(Some(socket)).await;
