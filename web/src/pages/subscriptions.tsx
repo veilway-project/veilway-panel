@@ -3,6 +3,7 @@ import {useContext, useEffect, useState} from "react";
 import {api, type NotFound, type Settings} from "../api.ts";
 import {ErrorNote, lines, LinesField, Mark, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {SettingsContext} from "../settings.ts";
+import {ProfilesEditor} from "./handwritten.tsx";
 
 type Mirror = {url: string, pins: string};
 const SECTIONS = ["endpoint", "refresh", "new-users", "mirrors", "strangers", "profiles", "keys"] as const;
@@ -114,7 +115,7 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 			</section>
 			<section className="p-section" id="set-profiles">
 				{head("profiles")}
-				<Field label={t("subs.profilesField")} hint={t("subs.profilesHint")}>{ids => <textarea {...ids} className="vw-input vw-code p-textarea" dir="ltr" spellCheck={false} rows={10} value={profiles} onChange={event => set({profiles: event.target.value})}/>}</Field>
+				<ProfilesEditor value={profiles} onChange={text => set({profiles: text})}/>
 			</section>
 		</Glass>
 		{(changed || error !== null) && <Glass className="p-savebar" layer="chrome" role="region" aria-label={t("settings.unsaved")}>

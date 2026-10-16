@@ -73,6 +73,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admins/{id}/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Gives another admin a new password and a new TOTP secret, shown once, and ends their sessions. Audited. No API token can do this. */
+        post: operations["resetAdmin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/audit": {
         parameters: {
             query?: never;
@@ -1047,7 +1064,8 @@ export interface paths {
         delete: operations["deleteXrayInbound"];
         options?: never;
         head?: never;
-        patch?: never;
+        /** Changes an Xray inbound the panel made: port, listen address, certificate files, decoy, host, and for shadowsocks a new server key. Every user keeps their credential. Share links change when the port, the host or the server key do. Validated like createXrayInbound, applied on the node and audited. */
+        patch: operations["editXrayInbound"];
         trace?: never;
     };
 }
@@ -1059,7 +1077,16 @@ export interface components {
             created: number;
             /** Format: int64 */
             id: number;
+            /**
+             * Format: int64
+             * @description The last login, from the audit log. None when the log holds none.
+             */
+            last_login?: number | null;
+            /** @description Whether a code from the current TOTP secret has been used, which says the admin set up their authenticator. False after a reset until the next login. */
+            totp_used: boolean;
             username: string;
+            /** @description The admin who asks. */
+            you: boolean;
         };
         AdminsOut: {
             admins: components["schemas"]["AdminRowOut"][];
@@ -1197,6 +1224,24 @@ export interface components {
             tag: string;
             /** @description The public half of the node transport key. Null when the inbound has none. */
             transport_public_key?: string | null;
+        };
+        InboundEdit: {
+            /** @description As on create: needed for vless and trojan, refused for shadowsocks. */
+            cert?: string | null;
+            /** @description For vless and trojan. The inbound's own decoy stays when left out. */
+            decoy?: string | null;
+            /** @description The host the links name. Empty or left out for the node's first public address. */
+            host?: string | null;
+            key?: string | null;
+            /** @description The address Xray listens on. 0.0.0.0 when left out. */
+            listen?: string | null;
+            /**
+             * @description For shadowsocks: a new server key. Every share link of the inbound holds the old one, so every user needs a new link.
+             * @default false
+             */
+            new_server_key: boolean;
+            /** Format: uint16 */
+            port: number;
         };
         InboundIn: {
             /** @description Paths of the certificate and key files on the node. Needed for vless and trojan, refused for shadowsocks. */
@@ -1647,12 +1692,16 @@ export interface components {
             certificate_missing: boolean;
             /** Format: uint */
             clients: number;
+            /** @description The origin of the web server a stranger is handed to, for vless and trojan. */
+            decoy?: string | null;
             /** @description The host the links name. */
             host: string;
             key?: string | null;
             listen: string;
             /** @description Whether the panel made this inbound and holds its credentials, which links need. */
             managed: boolean;
+            /** @description The host the panel was given for this inbound, empty when links name the node's address. */
+            own_host: string;
             /** Format: uint16 */
             port: number;
             /** @description vless, trojan or shadowsocks. */
@@ -1936,6 +1985,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Done"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    resetAdmin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewPassword"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TotpEnrolled"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */
@@ -5708,6 +5819,68 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    editXrayInbound: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tag: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InboundEdit"];
+            };
+        };
         responses: {
             /** @description Done. */
             200: {

@@ -2,7 +2,7 @@
 use crate::{admin::Done, app::App, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, nodecfg, subs::UserRow, users::{self, name_ok, NodeState}};
 use axum::{extract::{Path, State}, http::StatusCode, response::Response, Extension};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -45,11 +45,15 @@ pub struct XrayInboundOut {
 	pub clients: usize,
 	/// The host the links name.
 	pub host: String,
+	/// The host the panel was given for this inbound, empty when links name the node's address.
+	pub own_host: String,
 	/// Whether the panel made this inbound and holds its credentials, which links need.
 	pub managed: bool,
 	/// A vless or trojan inbound without certificate files, which the node refuses.
 	pub certificate_missing: bool,
 	pub cert: Option<String>, pub key: Option<String>,
+	/// The origin of the web server a stranger is handed to, for vless and trojan.
+	pub decoy: Option<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -66,7 +70,7 @@ pub async fn get(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let inbounds = document["xray"]["inbounds"].as_array().into_iter().flatten().map(|inbound| {
 		let (tag, listen) = (inbound["tag"].as_str().unwrap_or_default().to_string(), inbound["listen"].as_str().unwrap_or_default().to_string());
 		let own = made.iter().find(|(made, _)| *made == tag);
-		XrayInboundOut {protocol: inbound["protocol"].as_str().unwrap_or_default().to_string(), port: listen.rsplit_once(':').and_then(|(_, port)| port.parse().ok()).unwrap_or(0), security: if inbound.get("tls").is_some() {"tls"} else {"none"}.into(), clients: inbound["clients"].as_array().map_or(0, Vec::len), host: host_of(&app, &document, own.map_or("", |(_, host)| host.as_str())), managed: own.is_some(), certificate_missing: inbound["protocol"] != "shadowsocks" && inbound.get("tls").is_none(), cert: inbound["tls"]["cert"].as_str().map(str::to_string), key: inbound["tls"]["key"].as_str().map(str::to_string), tag, listen}
+		XrayInboundOut {protocol: inbound["protocol"].as_str().unwrap_or_default().to_string(), port: listen.rsplit_once(':').and_then(|(_, port)| port.parse().ok()).unwrap_or(0), security: if inbound.get("tls").is_some() {"tls"} else {"none"}.into(), clients: inbound["clients"].as_array().map_or(0, Vec::len), host: host_of(&app, &document, own.map_or("", |(_, host)| host.as_str())), own_host: own.map_or(String::new(), |(_, host)| host.clone()), managed: own.is_some(), certificate_missing: inbound["protocol"] != "shadowsocks" && inbound.get("tls").is_none(), cert: inbound["tls"]["cert"].as_str().map(str::to_string), key: inbound["tls"]["key"].as_str().map(str::to_string), decoy: inbound["decoy"].as_str().map(str::to_string), tag, listen}
 	}).collect();
 	ok(&XrayOut {installed, release, inbounds})
 }
@@ -88,35 +92,44 @@ pub struct InboundIn {
 	pub decoy: Option<String>,
 }
 
+/// The checks create and edit share: the listen address with the port, the certificate files and the host. Shadowsocks takes no certificate; vless and trojan need both files.
+fn checked(protocol: &str, port: u16, listen: Option<&str>, cert: &Option<String>, key: &Option<String>, host: Option<String>) -> Result<(String, Option<Value>, String), Failure> {
+	if port == 0 {return Err(Failure::bad("port is 1 to 65535."))}
+	let listen: IpAddr = listen.unwrap_or("0.0.0.0").parse().map_err(|_| Failure::bad("listen is an IP address."))?;
+	let path_ok = |path: &Option<String>| path.as_ref().is_some_and(|path| path.starts_with('/') && path.len() <= 4096 && !path.contains('\0'));
+	let tls = match (protocol == "shadowsocks", cert.is_some() || key.is_some()) {
+		(true, true) => return Err(Failure::bad("shadowsocks takes no certificate: it encrypts itself.")),
+		(true, false) => None,
+		(false, _) if path_ok(cert) && path_ok(key) => Some(json!({"cert": cert, "key": key})),
+		_ => return Err(Failure::bad("vless and trojan need the absolute paths of the certificate and key files on the node.")),
+	};
+	let host = host.unwrap_or_default();
+	if host.len() > 253 || !host.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-:".contains(&byte)) {return Err(Failure::bad("host is a domain name or an IP address."))}
+	Ok((if listen.is_ipv6() {format!("[{listen}]:{port}")} else {format!("{listen}:{port}")}, tls, host))
+}
+
+/// A decoy is the origin of the operator's own web server, plain http on the node.
+fn decoy_ok(decoy: Option<String>) -> Result<String, Failure> {
+	decoy.filter(|decoy| decoy.len() <= 300 && decoy.starts_with("http://") && !decoy.contains(char::is_whitespace)).ok_or_else(|| Failure::bad("A vless or trojan inbound needs a decoy: the origin of your own web server (http://127.0.0.1:8080), which anything that is not a user's connection is handed to, so the port answers a stranger as a web server would. The node has no tls transport with one to take it from, so give `decoy`."))
+}
+
 /// Adds an inbound with a credential for every user the node carries, and applies the config on the node. The inbound answers on the server's address, which the native profiles use too, so it makes all of them easier to identify: every profile is capped at Detectable in the signed document.
 pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<InboundIn>) -> Result<Response, Failure> {
 	if !name_ok(&input.tag, false) {return Err(Failure::bad("tag is 1 to 64 characters of a-z, 0-9, dash and underscore, starting with a letter or digit."))}
 	if !PROTOCOLS.contains(&input.protocol.as_str()) {return Err(Failure::bad("protocol is vless, trojan or shadowsocks."))}
-	if input.port == 0 {return Err(Failure::bad("port is 1 to 65535."))}
-	let listen: IpAddr = input.listen.as_deref().unwrap_or("0.0.0.0").parse().map_err(|_| Failure::bad("listen is an IP address."))?;
-	let path_ok = |path: &Option<String>| path.as_ref().is_some_and(|path| path.starts_with('/') && path.len() <= 4096 && !path.contains('\0'));
-	let tls = match (input.protocol == "shadowsocks", input.cert.is_some() || input.key.is_some()) {
-		(true, true) => return Err(Failure::bad("shadowsocks takes no certificate: it encrypts itself.")),
-		(true, false) => None,
-		(false, _) if path_ok(&input.cert) && path_ok(&input.key) => Some(json!({"cert": input.cert, "key": input.key})),
-		_ => return Err(Failure::bad("vless and trojan need the absolute paths of the certificate and key files on the node.")),
-	};
-	let host = input.host.unwrap_or_default();
-	if host.len() > 253 || !host.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-:".contains(&byte)) {return Err(Failure::bad("host is a domain name or an IP address."))}
+	let (listen, tls, host) = checked(&input.protocol, input.port, input.listen.as_deref(), &input.cert, &input.key, input.host)?;
 	if app.keys.is_none() {return Err(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))}
 	if !addon(&app).await.0 {return Err(Failure::new(StatusCode::CONFLICT, "addon_missing", "The Xray add-on is not installed on the node. Run scripts/veilway.sh addon xray install on the server."))}
 	let (revision, _, mut document) = nodecfg::running(&app).await?;
 	let mut inbounds = document["xray"]["inbounds"].as_array().cloned().unwrap_or_default();
 	if inbounds.len() >= 16 {return Err(Failure::conflict("The node takes at most 16 Xray inbounds."))}
 	if inbounds.iter().any(|inbound| inbound["tag"] == input.tag.as_str()) {return Err(Failure::conflict("An Xray inbound has this tag."))}
-	let mut inbound = json!({"tag": input.tag, "protocol": input.protocol, "listen": if listen.is_ipv6() {format!("[{listen}]:{}", input.port)} else {format!("{listen}:{}", input.port)}, "clients": []});
+	let mut inbound = json!({"tag": input.tag, "protocol": input.protocol, "listen": listen, "clients": []});
 	if let Some(tls) = tls {inbound["tls"] = tls;}
 	let server_key = (input.protocol == "shadowsocks").then(key32);
 	if let Some(key) = &server_key {inbound["server_key"] = json!(key);}
 	else {
-		let decoy = input.decoy.clone().or_else(|| node_decoy(&document));
-		let Some(decoy) = decoy.filter(|decoy| decoy.len() <= 300 && decoy.starts_with("http://") && !decoy.contains(char::is_whitespace)) else {return Err(Failure::bad("A vless or trojan inbound needs a decoy: the origin of your own web server (http://127.0.0.1:8080), which anything that is not a user's connection is handed to, so the port answers a stranger as a web server would. The node has no tls transport with one to take it from, so give `decoy`."))};
-		inbound["decoy"] = json!(decoy);
+		inbound["decoy"] = json!(decoy_ok(input.decoy.clone().or_else(|| node_decoy(&document)))?);
 	}
 	inbounds.push(inbound);
 	document["xray"] = json!({"inbounds": inbounds});
@@ -134,6 +147,55 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	for profile in settings.profiles.iter_mut().filter(|profile| profile["type"] == "veilway" && profile["rating_cap"] != "unsafe") {profile["rating_cap"] = json!("detectable");}
 	app.save_settings(&settings);
 	audit(&app.db.lock(), &ctx.actor, &ctx.source, "xray.create", &input.tag, &format!("{} on port {}, profiles capped at detectable", input.protocol, input.port));
+	ok(&Done {ok: true})
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InboundEdit {
+	pub port: u16,
+	/// The address Xray listens on. 0.0.0.0 when left out.
+	pub listen: Option<String>,
+	/// As on create: needed for vless and trojan, refused for shadowsocks.
+	pub cert: Option<String>, pub key: Option<String>,
+	/// The host the links name. Empty or left out for the node's first public address.
+	pub host: Option<String>,
+	/// For vless and trojan. The inbound's own decoy stays when left out.
+	pub decoy: Option<String>,
+	/// For shadowsocks: a new server key. Every share link of the inbound holds the old one, so every user needs a new link.
+	#[serde(default)] pub new_server_key: bool,
+}
+
+/// Changes where an inbound the panel made listens, its certificate files, its decoy, its host and, for Shadowsocks, its server key. Every user keeps their credential, which `node::fill` puts back in from the panel's database. Share links change when the port, the host or the server key do.
+pub async fn edit(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(tag): Path<String>, Body(input): Body<InboundEdit>) -> Result<Response, Failure> {
+	let (protocol, old_host, old_key): (String, String, Option<Vec<u8>>) = app.db.lock().query_row("select protocol, host, server_key from xray_inbounds where tag = ?", [&tag], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional()?.ok_or_else(|| Failure::missing("Xray inbound the panel made"))?;
+	let (listen, tls, host) = checked(&protocol, input.port, input.listen.as_deref(), &input.cert, &input.key, input.host)?;
+	if input.new_server_key && protocol != "shadowsocks" {return Err(Failure::bad("Only a shadowsocks inbound has a server key."))}
+	if input.new_server_key && app.keys.is_none() {return Err(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))}
+	let (revision, _, mut document) = nodecfg::running(&app).await?;
+	let mut inbounds = document["xray"]["inbounds"].as_array().cloned().unwrap_or_default();
+	let node_default = node_decoy(&document);
+	let Some(inbound) = inbounds.iter_mut().find(|inbound| inbound["tag"] == tag.as_str()) else {return Err(Failure::missing("Xray inbound"))};
+	let before = inbound["listen"].as_str().unwrap_or_default().to_string();
+	inbound["listen"] = json!(listen);
+	let object = inbound.as_object_mut().ok_or_else(|| Failure::internal("an Xray inbound is not an object"))?;
+	match tls {Some(tls) => {object.insert("tls".into(), tls);} None => {object.remove("tls");}}
+	if protocol != "shadowsocks" {
+		let decoy = decoy_ok(input.decoy.clone().or_else(|| object.get("decoy").and_then(Value::as_str).map(str::to_string)).or(node_default))?;
+		object.insert("decoy".into(), json!(decoy));
+	}
+	document["xray"]["inbounds"] = Value::Array(inbounds);
+	let new_key = input.new_server_key.then(|| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&tag), key32().as_bytes()))).flatten();
+	{
+		let db = app.db.lock();
+		db.execute("update xray_inbounds set host = ? where tag = ?", params![host, tag])?;
+		if let Some(sealed) = &new_key {db.execute("update xray_inbounds set server_key = ? where tag = ?", params![sealed, tag])?;}
+	}
+	if let Err(error) = nodecfg::apply(&app, &ctx, document, &revision, &format!("xray:{tag}")).await {
+		app.db.lock().execute("update xray_inbounds set host = ?, server_key = ? where tag = ?", params![old_host, old_key, tag])?;
+		return Err(error)
+	}
+	audit(&app.db.lock(), &ctx.actor, &ctx.source, "xray.edit", &tag, &format!("listen {before} to {listen}{}", if new_key.is_some() {", new server key"} else {""}));
 	ok(&Done {ok: true})
 }
 
