@@ -1,11 +1,12 @@
-import {Banner, Button, Checkbox, ConfirmDialog, Dialog, Field, Glass, IconButton, List, ListRow, NumberField, RadioGroup, SelectField, StateBlock, Switch, TextField, useToast} from "@veilway/ui";
+import {Banner, Button, Checkbox, ConfirmDialog, Dialog, Field, Glass, Icon, IconButton, List, ListRow, NumberField, RadioGroup, SelectField, StateBlock, Switch, TextField, useToast} from "@veilway/ui";
 import {useRef, useState} from "react";
-import {api, ApiError, type NodeLink, type Pairings, type Pasted, type Template} from "../api.ts";
+import {api, ApiError, type NodeLink, type Pairings, type Pasted, type Running, type Template, type User, type UserPatch} from "../api.ts";
 import {ago, Copyable, DayField, ErrorNote, lines, LinesField, Mark, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {SectionReview, useRunning} from "./apply.tsx";
 import {loadRunning} from "./config.tsx";
 
 type Compare = {id: string, fingerprint: string, name: string};
+type Side = "entry" | "exit";
 // A link as the config holds it. Keys, secrets and transports are the pairing's and are kept as they are.
 type LinkConfig = {tag: string, direction: string, inbound?: string, peer?: unknown, enabled?: boolean, exit?: string, exits?: string[], allow_private?: boolean, max_flows?: number, quota_bytes?: number, quota_period?: string, expires_at?: string, mtu?: number, [key: string]: unknown};
 const GB = 1024 ** 3;
@@ -14,7 +15,7 @@ const STATE_TONE: Record<string, "success" | "info" | "warning" | "danger" | und
 // This node and every node it is linked to, one card each, with the pairing steps for a new link.
 export function NodesPage({status, reachable, online}: {status: {version?: string, generation?: number, uptime_secs?: number, public_addresses?: string[]} | null, reachable: boolean, online: number | undefined}) {
 	const {t, bytes, time, number} = useP(), say = useSay(), toast = useToast(), links = useLoad(() => api("get", "/links") as Promise<{links: NodeLink[] | null}>, []), pairings = useLoad(() => api("get", "/links/pairings") as Promise<Pairings>, []);
-	const [flow, setFlow] = useState<"offer" | "paste" | null>(null), [compare, setCompare] = useState<Compare | null>(null), [answering, setAnswering] = useState<string | null>(null);
+	const [flow, setFlow] = useState<"offer" | "paste" | null>(null), [preset, setPreset] = useState<{side: Side | null, direction: string} | null>(null), [compare, setCompare] = useState<Compare | null>(null), [answering, setAnswering] = useState<string | null>(null);
 	const running = useRunning(), configured = (running.data?.document.links ?? []) as LinkConfig[], [editing, setEditing] = useState<LinkConfig | null>(null), [removing, setRemoving] = useState<LinkConfig | null>(null), [proposed, setProposed] = useState<{value: LinkConfig[], summary: string} | null>(null);
 	const manage = (tag: string) => { const found = configured.find(link => link.tag === tag); return found && <span className="p-cluster"><Button size="sm" variant="quiet" onClick={() => setEditing(found)}>{t("links.manage")}</Button><Button size="sm" variant="quiet" onClick={() => setRemoving(found)}>{t("common.remove")}</Button></span>; };
 	const idle = configured.filter(link => !(links.data?.links ?? []).some(l => l.tag === link.tag));
@@ -23,6 +24,7 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 	const drop = (id: string) => void api("delete", "/links/pairings/{id}", {params: {id}}).then(() => { toast({tone: "success", title: t("links.dropped")}); pairings.reload(); }, failure => toast({tone: "danger", title: say(failure)}));
 	const waiting = pairings.data ? pairings.data.offers.length + pairings.data.answered.length : 0, span = (seconds: number) => { const found = ago(seconds); return t(found.key, {count: found.count}); };
 	if (compare) return <><PageHead title={t("nav.nodes")}/><Fingerprints pairing={compare} onClose={() => { setCompare(null); refresh(); }}/></>;
+	if (preset) return <><PageHead title={t("nav.nodes")}/><Preset start={preset} onClose={() => { setPreset(null); running.reload(); refresh(); }}/></>;
 	return <>
 		<PageHead title={t("nav.nodes")} lead={t("links.lead")}>
 			<Button variant={flow === "paste" ? "primary" : "secondary"} onClick={() => setFlow(flow === "paste" ? null : "paste")}>{t("links.paste")}</Button>
@@ -31,6 +33,14 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 		{flow === "offer" && <OfferFlow onCompare={toCompare} onClose={() => { setFlow(null); pairings.reload(); }}/>}
 		{flow === "paste" && <PasteFlow onCompare={toCompare} onClose={() => setFlow(null)}/>}
 		{answering && <AnswerStep id={answering} onCompare={toCompare} onClose={() => setAnswering(null)}/>}
+		{!flow && !answering && <Glass className="p-panel">
+			<div className="p-sheet-head"><div><h2 className="vw-h2">{t("preset.title")}</h2><p>{t("preset.lead")}</p></div></div>
+			<div className="p-presets">
+				<button type="button" className="p-preset" onClick={() => setPreset({side: "entry", direction: "forward"})}><strong>{t("preset.entry")}</strong><span>{t("preset.entryDetail")}</span></button>
+				<button type="button" className="p-preset" onClick={() => setPreset({side: "exit", direction: "forward"})}><strong>{t("preset.exit")}</strong><span>{t("preset.exitDetail")}</span></button>
+				<button type="button" className="p-preset" onClick={() => setPreset({side: null, direction: "reverse"})}><strong>{t("preset.reverse")}</strong><span>{t("preset.reverseDetail")}</span></button>
+			</div>
+		</Glass>}
 		{links.error && !links.data && <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={links.reload}>{t("action.retry")}</Button>}>{say(links.error)}</StateBlock>}
 		<div className="p-columns p-node-cards">
 			<Glass className="p-node-card p-sheet-new">
@@ -114,10 +124,10 @@ function LinkDialog({link, exits, onClose, onSave}: {link: LinkConfig, exits: st
 }
 
 // Step 1 on the node that offers: the terms the other node will see, made into a code that holds no secret.
-function OfferFlow({onCompare, onClose}: {onCompare: (pairing: Compare) => void, onClose: () => void}) {
+function OfferFlow({onCompare, onClose, fixed}: {onCompare: (pairing: Compare) => void, onClose: () => void, fixed?: string}) {
 	const {t, time} = useP(), guard = useGuard(), running = useLoad(loadRunning, []), derived = useLoad(() => api("get", "/profiles/derived") as Promise<{templates: Template[]}>, []), nodeInbounds = useLoad(() => api("get", "/links/inbounds") as Promise<{inbounds: {tag: string, public_key: string, transport_public_key: string | null}[]}>, []);
 	const inbounds = ((running.data?.document.inbounds ?? []) as {tag: string, type: string}[]).filter(inbound => inbound.type === "veilway").map(inbound => inbound.tag);
-	const [inbound, setInbound] = useState(""), [tag, setTag] = useState(""), [name, setName] = useState(""), [direction, setDirection] = useState("forward"), [key, setKey] = useState(""), [transportKey, setTransportKey] = useState(""), [dialler, setDialler] = useState(""), [listener, setListener] = useState(""), [transports, setTransports] = useState(""), [minutes, setMinutes] = useState<number | "">(10);
+	const [inbound, setInbound] = useState(""), [tag, setTag] = useState(""), [name, setName] = useState(""), [direction, setDirection] = useState(fixed ?? "forward"), [key, setKey] = useState(""), [transportKey, setTransportKey] = useState(""), [dialler, setDialler] = useState(""), [listener, setListener] = useState(""), [transports, setTransports] = useState(""), [minutes, setMinutes] = useState<number | "">(10);
 	const [made, setMade] = useState<{id: string, code: string, expires_at: number} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const reportedOf = (tagOf: string) => nodeInbounds.data?.inbounds.find(found => found.tag === tagOf);
 	const pick = (tagOf: string) => { const profile = derived.data?.templates.find(template => template.inbound === tagOf)?.profile, reported = reportedOf(tagOf); setInbound(tagOf); setKey(reported?.public_key ?? ""); setTransportKey(reported?.transport_public_key ?? ""); if (profile) { setTransports(JSON.stringify(profile.transports ?? [], null, 2)); } };
@@ -144,7 +154,7 @@ function OfferFlow({onCompare, onClose}: {onCompare: (pairing: Compare) => void,
 		<form className="p-stack" onSubmit={event => { event.preventDefault(); void offer(); }} noValidate>
 			<div><h2 className="vw-h2">{t("links.offer")}</h2><p className="vw-muted">{t("links.offerLead")}</p></div>
 			{running.data && !inbounds.length ? <Banner tone="warning" title={t("links.noInbound")}>{t("links.noInboundBody")}</Banner> : <SelectField label={t("links.inbound")} hint={t("links.inboundHint")} value={inbound} onChange={pick} options={inbounds.map(tagOf => ({value: tagOf, label: tagOf}))}/>}
-			<RadioGroup label={t("links.direction")} value={direction} onChange={setDirection} options={[{value: "forward", label: t("links.forward"), detail: t("links.forwardDetail")}, {value: "reverse", label: t("links.reverse"), detail: t("links.reverseDetail")}]}/>
+			{!fixed && <RadioGroup label={t("links.direction")} value={direction} onChange={setDirection} options={[{value: "forward", label: t("links.forward"), detail: t("links.forwardDetail")}, {value: "reverse", label: t("links.reverse"), detail: t("links.reverseDetail")}]}/>}
 			<div className="p-pair">
 				<TextField label={t("links.tag")} hint={t("links.tagHint")} value={tag} onChange={value => setTag(value.toLowerCase())} technical required/>
 				<TextField label={t("links.name")} hint={t("links.nameHint")} value={name} onChange={setName} maxLength={64} required/>
@@ -175,7 +185,7 @@ function AnswerStep({id, onCompare, onClose, inline}: {id: string, onCompare: (p
 }
 
 // Step 2 on the node that was offered a link: first what it would dial, then the answer code once the operator agreed.
-function PasteFlow({onCompare, onClose}: {onCompare: (pairing: Compare) => void, onClose: () => void}) {
+function PasteFlow({onCompare, onClose, half}: {onCompare: (pairing: Compare) => void, onClose: () => void, half?: Side}) {
 	const {t, date} = useP(), guard = useGuard(), [code, setCode] = useState(""), [seen, setSeen] = useState<Pasted | null>(null), [tag, setTag] = useState(""), [accept, setAccept] = useState(false);
 	const [answer, setAnswer] = useState<{id: string, answer: string, fingerprint: string} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const read = () => { setBusy(true); setError(null); void api("post", "/links/paste", {body: {code: code.trim()}}).then(found => setSeen(found as Pasted), setError).finally(() => setBusy(false)); };
@@ -197,6 +207,7 @@ function PasteFlow({onCompare, onClose}: {onCompare: (pairing: Compare) => void,
 			<div><h2 className="vw-h2">{t("links.offerFrom", {name: seen.name})}</h2><p className="vw-muted">{t(seen.half === "exit" ? "links.youExit" : "links.youEntry")} {t("links.expires", {date: date(new Date(seen.expires_at * 1000), {dateStyle: "medium", timeStyle: "short"})})}</p></div>
 			{seen.expired && <Banner tone="danger" title={t("links.expired")}>{t("links.expiredBody")}</Banner>}
 			{seen.overlaps_pool && <Banner tone="danger" title={t("links.overlap")}>{t("links.overlapBody")}</Banner>}
+			{half && seen.half !== half && <Banner tone="danger" title={t("preset.wrongWay")}>{t(half === "entry" ? "preset.wrongWayEntry" : "preset.wrongWayExit")}</Banner>}
 			<div className="p-stack">
 				<span className="vw-label">{t("links.dials")}</span>
 				<ul className="p-transports">{seen.dials.map(d => <li key={d.address}><span className="vw-code">{d.address}</span>{d.private && <Mark tone="warning">{t("links.private")}</Mark>}</li>)}</ul>
@@ -206,13 +217,13 @@ function PasteFlow({onCompare, onClose}: {onCompare: (pairing: Compare) => void,
 			<TextField label={t("links.tag")} hint={t("links.tagHint")} value={tag} onChange={value => setTag(value.toLowerCase())} technical required/>
 			<Checkbox label={t("links.accept")} checked={accept} onChange={setAccept}/>
 			<ErrorNote error={error}/>
-			<div className="p-cluster"><Button type="submit" variant="primary" disabled={busy || !accept || !tag.trim() || seen.expired || seen.overlaps_pool}>{t("links.answer")}</Button><Button variant="quiet" onClick={onClose}>{t("action.cancel")}</Button></div>
+			<div className="p-cluster"><Button type="submit" variant="primary" disabled={busy || !accept || !tag.trim() || seen.expired || seen.overlaps_pool || (half !== undefined && seen.half !== half)}>{t("links.answer")}</Button><Button variant="quiet" onClick={onClose}>{t("action.cancel")}</Button></div>
 		</form>}
 	</Glass>;
 }
 
 // The last step on both nodes. Each operator reads their own eight groups aloud and types the other side's: a code changed on its way gives two fingerprints that do not match. The groups are hexadecimal and read left to right in both languages.
-function Fingerprints({pairing, onClose}: {pairing: Compare, onClose: () => void}) {
+function Fingerprints({pairing, onClose}: {pairing: Compare, onClose: (tag?: string) => void}) {
 	const {t, number} = useP(), guard = useGuard(), toast = useToast(), say = useSay(), mine = pairing.fingerprint.split(" "), [typed, setTyped] = useState<string[]>(Array(8).fill("")), boxes = useRef<(HTMLInputElement | null)[]>([]);
 	const [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const full = typed.every(group => /^[0-9a-f]{4}$/.test(group)), own = full && typed.join(" ") === pairing.fingerprint;
@@ -229,7 +240,7 @@ function Fingerprints({pairing, onClose}: {pairing: Compare, onClose: () => void
 		try {
 			const running = await loadRunning(), done = await guard(() => api("post", "/links/pairings/{id}/confirm", {params: {id: pairing.id}, body: {typed: typed.join(" "), revision: running.revision}})) as {tag: string};
 			toast({tone: "success", title: t("links.paired", {tag: done.tag})});
-			onClose();
+			onClose(done.tag);
 		} catch (failure) {
 			setError(failure);
 			if (failure instanceof ApiError && failure.code === "fingerprint_mismatch") setTyped(Array(8).fill(""));
@@ -239,7 +250,7 @@ function Fingerprints({pairing, onClose}: {pairing: Compare, onClose: () => void
 	};
 	const gone = error instanceof ApiError && (error.status === 404 || error.status === 410);
 	return <div className="p-stack">
-		<div className="p-row"><div><h2 className="vw-h2">{t("print.title")}</h2><p className="vw-muted p-lead">{t("print.lead")}</p></div><Button variant="quiet" onClick={onClose}>{t("print.later")}</Button></div>
+		<div className="p-row"><div><h2 className="vw-h2">{t("print.title")}</h2><p className="vw-muted p-lead">{t("print.lead")}</p></div><Button variant="quiet" onClick={() => onClose()}>{t("print.later")}</Button></div>
 		<div className="p-columns">
 			<Glass className="p-panel">
 				<div><h3 className="vw-h3">{t("print.read")}</h3><p className="vw-muted vw-small">{t("print.readBody")}</p></div>
@@ -257,4 +268,113 @@ function Fingerprints({pairing, onClose}: {pairing: Compare, onClose: () => void
 		</div>
 		<p className="vw-muted vw-small">{t("print.channel")}</p>
 	</div>;
+}
+
+// Who connects where, drawn for the side this panel is on. The arrow on the link runs from the node that dials to the node that waits.
+function Route({side, direction}: {side: Side | null, direction: string}) {
+	const {t} = useP(), stop = (name: string, role: string, here: boolean) => <div className="p-route-stop" data-here={here || undefined}><strong>{name}</strong><span>{role}</span></div>;
+	return <figure className="p-route" data-dial={direction === "forward" ? "out" : "back"}>
+		{stop(t("preset.route.users"), t("preset.route.usersRole"), false)}
+		<span className="p-route-line" aria-hidden="true"/>
+		{stop(side === "entry" ? t("preset.route.here") : t("preset.route.entry"), t("preset.route.entryRole"), side === "entry")}
+		<figcaption className="p-route-link"><span className="p-route-say">{t(direction === "forward" ? "preset.route.forward" : "preset.route.reverse")}</span><span className="p-route-arrow" aria-hidden="true"/></figcaption>
+		{stop(side === "exit" ? t("preset.route.here") : t("preset.route.exit"), t("preset.route.exitRole"), side === "exit")}
+		<span className="p-route-line" aria-hidden="true"/>
+		{stop(t("preset.route.internet"), t("preset.route.internetRole"), false)}
+	</figure>;
+}
+
+// A guided pairing for one side of a link: what it does, which way it dials, the pairing steps above, then what the link is for on this node.
+function Preset({start, onClose}: {start: {side: Side | null, direction: string}, onClose: () => void}) {
+	const {t, number} = useP(), running = useRunning(), [side, setSide] = useState<Side | null>(start.side), [direction, setDirection] = useState(start.direction), [step, setStep] = useState(0), [pairing, setPairing] = useState<Compare | null>(null), [tag, setTag] = useState(""), [done, setDone] = useState<string[]>([]);
+	// The node with the Veilway inbound makes the offer: the exit of a forward link, the entry of a reverse one.
+	const offers = (side === "exit") === (direction === "forward"), other = side === "entry" ? "preset.exit" : "preset.entry";
+	const names = [t("preset.step.intro"), t("preset.step.direction"), t("preset.step.pair"), t("preset.step.compare"), t(side === "exit" ? "preset.step.exitUse" : "preset.step.entryUse")];
+	const toCompare = (next: Compare) => { setPairing(next); setStep(3); };
+	const finish = (changes: string[]) => { setDone(changes); setStep(5); running.reload(); };
+	return <div className="p-stack">
+		<div className="p-sheet-head"><div><h2 className="vw-h2">{t(side === null ? "preset.reverse" : side === "entry" ? "preset.entry" : "preset.exit")}</h2></div><Button variant="quiet" onClick={onClose}>{t(step === 5 ? "preset.back" : "preset.leave")}</Button></div>
+		<ol className="p-steps" aria-label={t("preset.steps")}>{names.map((name, i) => <li key={i} data-state={i < step ? "done" : i === step ? "now" : undefined} aria-current={i === step ? "step" : undefined}><span className="p-steps-n">{i < step ? <Icon name="check"/> : number(i + 1)}</span><span>{name}</span></li>)}</ol>
+		{step === 0 && <Glass className="p-panel p-form">
+			<div><h3 className="vw-h3">{t(start.side === null ? "preset.introReverse" : side === "entry" ? "preset.introEntry" : "preset.introExit")}</h3><p className="vw-muted">{t(start.side === null ? "preset.introReverseBody" : side === "entry" ? "preset.introEntryBody" : "preset.introExitBody")}</p></div>
+			<Route side={side} direction={direction}/>
+			{start.side === null && <RadioGroup label={t("preset.which")} value={side ?? ""} onChange={value => setSide(value as Side)} options={[{value: "entry", label: t("preset.whichEntry"), detail: t("preset.whichEntryDetail")}, {value: "exit", label: t("preset.whichExit"), detail: t("preset.whichExitDetail")}]}/>}
+			{start.side !== null && <p className="vw-muted vw-small">{t("preset.needOther")}</p>}
+			<div className="p-cluster"><Button variant="primary" disabled={side === null} onClick={() => setStep(1)}>{t("preset.next")}</Button></div>
+		</Glass>}
+		{step === 1 && side !== null && <Glass className="p-panel p-form">
+			<div><h3 className="vw-h3">{t("preset.directionTitle")}</h3><p className="vw-muted">{t("preset.directionLead")}</p></div>
+			<RadioGroup label={t("preset.step.direction")} value={direction} onChange={setDirection} options={[{value: "forward", label: t("preset.forward"), detail: t(side === "entry" ? "preset.forwardEntry" : "preset.forwardExit")}, {value: "reverse", label: t("preset.reverseWay"), detail: t(side === "entry" ? "preset.reverseEntry" : "preset.reverseExit")}]}/>
+			<Route side={side} direction={direction}/>
+			<p className="vw-muted vw-small">{t(offers ? "preset.youOffer" : "preset.youPaste", {other: t(other), direction: t(direction === "forward" ? "preset.forward" : "preset.reverseWay")})}</p>
+			<div className="p-cluster"><Button variant="primary" onClick={() => setStep(2)}>{t("preset.next")}</Button><Button variant="quiet" onClick={() => setStep(0)}>{t("preset.previous")}</Button></div>
+		</Glass>}
+		{step === 2 && (offers ? <OfferFlow fixed={direction} onCompare={toCompare} onClose={() => setStep(1)}/> : <PasteFlow half={side ?? undefined} onCompare={toCompare} onClose={() => setStep(1)}/>)}
+		{step === 3 && pairing && <Fingerprints pairing={pairing} onClose={found => { if (!found) return onClose(); setTag(found); running.reload(); setStep(4); }}/>}
+		{step === 4 && (running.error && !running.data ? <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={running.reload}>{t("action.retry")}</Button>}/> : !running.data || running.loading ? <StateBlock kind="loading" title={t("preset.reading")}/> : side === "exit" ? <ExitUse link={tag} running={running.data} onReload={running.reload} onApplied={finish} onSkip={onClose}/> : <EntryUse link={tag} running={running.data} onReload={running.reload} onApplied={finish} onSkip={onClose}/>)}
+		{step === 5 && <Glass className="p-panel p-form">
+			<div><h3 className="vw-h3">{t("preset.doneTitle")}</h3><p className="vw-muted">{t("preset.doneLead", {link: tag})}</p></div>
+			<ul className="p-changes">{done.map(line => <li key={line}><Icon name="check"/><span>{line}</span></li>)}</ul>
+			<p>{t(side === "exit" ? "preset.checkExit" : "preset.checkEntry")}</p>
+			{side === "entry" && <p className="vw-muted vw-small">{t("preset.noPublish")}</p>}
+			<div className="p-cluster"><Button variant="primary" onClick={onClose}>{t("preset.back")}</Button></div>
+		</Glass>}
+	</div>;
+}
+
+const TAG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+// The last step on the entry: an exit that leaves through the new link, whether it becomes the default, and whether every user may pick it. The config changes in one apply, then the users.
+function EntryUse({link, running, onReload, onApplied, onSkip}: {link: string, running: Running, onReload: () => void, onApplied: (changes: string[]) => void, onSkip: () => void}) {
+	const {t} = useP(), users = useLoad(() => api("get", "/users") as Promise<{users: User[]}>, []), exits = (running.document.exits ?? []) as {tag: string}[], routing = (running.document.routing ?? {}) as {default?: string};
+	const [tag, setTag] = useState(exits.some(exit => exit.tag === link) ? "" : link), [name, setName] = useState(""), [country, setCountry] = useState(""), [main, setMain] = useState(true), [everyone, setEveryone] = useState(true), [review, setReview] = useState<string[] | null>(null), [busy, setBusy] = useState(false);
+	const clean = tag.trim(), taken = exits.some(exit => exit.tag === clean), listed = (users.data?.users ?? []).filter(user => Array.isArray(user.exits) && !(user.exits as string[]).includes(clean)), adds = everyone && listed.length > 0;
+	const ready = TAG.test(clean) && !taken && name.trim().length > 0 && (country === "" || /^[A-Z]{2}$/.test(country)) && users.data !== null;
+	const whole = {...running.document, exits: [...exits, {tag: clean, name: name.trim(), ...(country ? {country} : {}), backend: {type: "chain", links: [link]}}], ...(main ? {routing: {...routing, default: clean}} : {})};
+	const changes = [t("preset.change.exit", {tag: clean, name: name.trim(), link}), ...(main ? [t(routing.default ? "preset.change.default" : "preset.change.defaultNew", {tag: clean, was: routing.default ?? ""})] : []), ...(adds ? [t("preset.change.users", {tag: clean, count: listed.length})] : [])];
+	const applied = async (fresh: boolean) => {
+		setReview(null);
+		if (!fresh) return onReload();
+		setBusy(true);
+		// The exit exists on the node now, so a user's list may name it.
+		const results = adds ? await Promise.allSettled(listed.map(user => api("patch", "/users/{id}", {params: {id: user.id}, body: {exits: [...user.exits as string[], clean]} as UserPatch}))) : [], failed = results.filter(result => result.status === "rejected").length;
+		setBusy(false);
+		onApplied(failed ? [...changes.slice(0, -1), t("preset.change.usersFailed", {count: failed, total: listed.length})] : changes);
+	};
+	return <Glass className="p-panel p-form">
+		<form className="p-stack" onSubmit={event => { event.preventDefault(); if (ready) setReview(changes); }} noValidate>
+			<div><h3 className="vw-h3">{t("preset.useTitle")}</h3><p className="vw-muted">{t("preset.useLead", {link})}</p></div>
+			<div className="p-pair">
+				<TextField label={t("preset.exitName")} hint={t("preset.exitNameHint")} value={name} onChange={setName} maxLength={64} required/>
+				<TextField label={t("config.country")} hint={t("config.countryHint")} value={country} onChange={value => setCountry(value.toUpperCase())} maxLength={2} error={country && !/^[A-Z]{2}$/.test(country) ? t("preset.countryBad") : undefined} technical optional/>
+			</div>
+			<TextField label={t("preset.exitTag")} hint={t("preset.exitTagHint")} value={tag} onChange={value => setTag(value.toLowerCase())} error={taken ? t("preset.exitTaken") : clean && !TAG.test(clean) ? t("preset.exitTagBad") : undefined} technical required/>
+			<Switch label={t("preset.makeDefault")} hint={routing.default ? t("preset.makeDefaultHint", {was: routing.default}) : t("preset.makeDefaultNone")} checked={main} onChange={setMain}/>
+			<Switch label={t("preset.addUsers")} hint={users.data ? listed.length ? t("preset.addUsersHint", {count: listed.length}) : t("preset.addUsersNone") : t("preset.addUsersLoading")} checked={adds} disabled={!listed.length} onChange={setEveryone}/>
+			{users.error !== null && <Banner tone="danger" title={t("preset.usersFailed")} action={<Button size="sm" icon="refresh" onClick={users.reload}>{t("action.retry")}</Button>}/>}
+			<div className="p-cluster"><Button type="submit" variant="primary" disabled={!ready || busy}>{t("config.review")}</Button><Button variant="quiet" onClick={onSkip}>{t("preset.skip")}</Button></div>
+		</form>
+		{review && <SectionReview section="document" running={running} value={whole} summary={<ul className="p-changes">{review.map(line => <li key={line}><span>{line}</span></li>)}</ul>} onClose={() => setReview(null)} onDone={fresh => void applied(fresh)}/>}
+	</Glass>;
+}
+
+// The last step on the exit: which of this node's exits the link's traffic may leave through. Private networks stay closed unless the operator opens them on purpose.
+function ExitUse({link, running, onReload, onApplied, onSkip}: {link: string, running: Running, onReload: () => void, onApplied: (changes: string[]) => void, onSkip: () => void}) {
+	const {t} = useP(), configured = (running.document.links ?? []) as LinkConfig[], found = configured.find(held => held.tag === link), exits = ((running.document.exits ?? []) as {tag: string, name?: string, backend?: {type?: string}}[]).filter(exit => exit.backend?.type !== "chain");
+	const [allowed, setAllowed] = useState(found?.exits ?? []), [open, setOpen] = useState(found?.allow_private ?? false), [review, setReview] = useState(false);
+	if (!found) return <StateBlock kind="error" title={t("preset.linkMissing")} action={<Button icon="refresh" onClick={onReload}>{t("action.retry")}</Button>}>{t("preset.linkMissingBody", {link})}</StateBlock>;
+	const made: LinkConfig = {...found, exits: allowed, allow_private: open};
+	if (!allowed.length) delete made.exits;
+	if (!open) delete made.allow_private;
+	const changes = [allowed.length ? t("preset.change.exits", {link, exits: allowed.join(", ")}) : t("preset.change.exitsRules", {link}), t(open ? "preset.change.private" : "preset.change.noPrivate")];
+	return <Glass className="p-panel p-form">
+		<form className="p-stack" onSubmit={event => { event.preventDefault(); setReview(true); }} noValidate>
+			<div><h3 className="vw-h3">{t("preset.allowTitle")}</h3><p className="vw-muted">{t("preset.allowLead", {link})}</p></div>
+			<div className="vw-field"><span className="vw-label">{t("links.exits")}</span><p className="vw-note">{t("preset.exitsHint")}</p><ul className="p-row-list p-exit-list">{exits.map(exit => <li key={exit.tag}><label className="p-exit"><input type="checkbox" className="p-check" checked={allowed.includes(exit.tag)} onChange={event => setAllowed(event.target.checked ? [...allowed, exit.tag] : allowed.filter(held => held !== exit.tag))}/><span className="p-row-text"><strong className="vw-code">{exit.tag}</strong>{exit.name && <span>{exit.name}</span>}</span><span/></label></li>)}</ul></div>
+			<Switch label={t("links.privateRules")} hint={t("links.privateHint")} checked={open} onChange={setOpen}/>
+			{open && <Banner tone="warning" title={t("preset.privateWarn")}>{t("preset.privateWarnBody")}</Banner>}
+			<div className="p-cluster"><Button type="submit" variant="primary">{t("config.review")}</Button><Button variant="quiet" onClick={onSkip}>{t("preset.skip")}</Button></div>
+		</form>
+		{review && <SectionReview section="links" running={running} value={configured.map(held => held.tag === link ? made : held)} summary={<ul className="p-changes">{changes.map(line => <li key={line}><span>{line}</span></li>)}</ul>} onClose={() => setReview(false)} onDone={fresh => { setReview(false); if (fresh) onApplied(changes); else onReload(); }}/>}
+	</Glass>;
 }
