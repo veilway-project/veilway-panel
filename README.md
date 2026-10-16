@@ -20,10 +20,12 @@ The admin panel of a Veilway node: users, devices, subscription links and an API
 
 Veilway is an open-source VPN platform for people on censored networks: a Rust core, a web panel and first-party apps. The panel is the admin side of a node. It is a Rust server with SQLite, and a React app that is built into the same binary. It runs on the node's host and changes users and settings through the node's control API on its unix socket.
 
-- Admin sign-in with an Argon2id password, a TOTP code, sessions, rate limits and an audit log.
-- Users and devices, and the subscription links they use.
-- The public subscription endpoint, which your own web server forwards to the panel.
-- An admin API with API tokens, described by `server/openapi.json`.
+- Users and devices: quotas per period, expiry, groups, enabling and disabling, device keys, usage resets, and subscription links and QR codes from the public endpoint your web server forwards.
+- Inbounds, exits and routing: native inbounds and the optional Xray add-on, a default exit with exits per user, and routing rules you reorder by drag and drop. A raw JSON editor checks each change against the schema.
+- Node links and mirrors: guided setups for an entry node and a reverse tunnel, relays, and relay and static mirrors.
+- Traffic, DNS, logs and notices: live and past traffic per user, inbound, exit and outbound, DNS settings, logs, and notices to every device.
+- Admins and access: sign-in with a password and a TOTP code, sessions, rate limits, API tokens, and an audit log. The admin API is described by `server/openapi.json`.
+- Operations: backup and restore, updates from the panel, terms and privacy pages, a demo mode with two-step sign-in off that logs a warning, and English and Persian in light and dark themes.
 
 ## Who it is for
 
@@ -31,7 +33,7 @@ Operators who run a Veilway node and want to manage its users from a browser or 
 
 ## Status
 
-> **Early.** The server is built and tested. The web app in `web/` is still being built, so for now the admin work goes through the API.
+> **Alpha, not released.** The server and the web app are built and run against a real node in the alpha gate. `v0.1.0-alpha` is not tagged yet, and the panel has had no outside security review.
 
 ## Quick start
 
@@ -47,8 +49,8 @@ cargo run -- run --config panel.json
 On the first start it prints a one-time setup token to the console. Keep it private.
 
 3. Create the first admin account: send the token with a username and password to `{prefix}/api/setup`. The answer holds a TOTP secret. Add it to an authenticator app, then sign in with the code.
-4. Before you add users, set the endpoint URL, the pool and the profiles with `PUT {prefix}/api/settings`.
-5. Open `{prefix}` in a browser to sign in. The web app that serves this page is not in the repository yet.
+4. Before you add users, set the endpoint URL, the address pool and the profiles in the panel.
+5. Open `{prefix}` in a browser to sign in.
 
 ## Build from source
 
@@ -93,7 +95,7 @@ API tokens let a script call the admin API. A token never reaches the routes tha
 
 ## Screenshots
 
-Screenshots come with the web app.
+Screenshots will be added from the real web app.
 
 ## Repositories
 
