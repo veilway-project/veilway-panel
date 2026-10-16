@@ -1,16 +1,23 @@
-import {Banner, Button, Checkbox, Field, Glass, IconButton, List, ListRow, NumberField, RadioGroup, SelectField, StateBlock, TextField, useToast} from "@veilway/ui";
+import {Banner, Button, Checkbox, ConfirmDialog, Dialog, Field, Glass, IconButton, List, ListRow, NumberField, RadioGroup, SelectField, StateBlock, Switch, TextField, useToast} from "@veilway/ui";
 import {useRef, useState} from "react";
 import {api, ApiError, type NodeLink, type Pairings, type Pasted, type Template} from "../api.ts";
-import {ago, Copyable, ErrorNote, lines, LinesField, Mark, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {ago, Copyable, DayField, ErrorNote, lines, LinesField, Mark, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {SectionReview, useRunning} from "./apply.tsx";
 import {loadRunning} from "./config.tsx";
 
 type Compare = {id: string, fingerprint: string, name: string};
+// A link as the config holds it. Keys, secrets and transports are the pairing's and are kept as they are.
+type LinkConfig = {tag: string, direction: string, inbound?: string, peer?: unknown, enabled?: boolean, exit?: string, exits?: string[], allow_private?: boolean, max_flows?: number, quota_bytes?: number, quota_period?: string, expires_at?: string, mtu?: number, [key: string]: unknown};
+const GB = 1024 ** 3;
 const STATE_TONE: Record<string, "success" | "info" | "warning" | "danger" | undefined> = {up: "success", connecting: "warning", unreachable: "danger", refused: "danger"};
 
 // This node and every node it is linked to, one card each, with the pairing steps for a new link.
 export function NodesPage({status, reachable, online}: {status: {version?: string, generation?: number, uptime_secs?: number, public_addresses?: string[]} | null, reachable: boolean, online: number | undefined}) {
 	const {t, bytes, time, number} = useP(), say = useSay(), toast = useToast(), links = useLoad(() => api("get", "/links") as Promise<{links: NodeLink[] | null}>, []), pairings = useLoad(() => api("get", "/links/pairings") as Promise<Pairings>, []);
 	const [flow, setFlow] = useState<"offer" | "paste" | null>(null), [compare, setCompare] = useState<Compare | null>(null), [answering, setAnswering] = useState<string | null>(null);
+	const running = useRunning(), configured = (running.data?.document.links ?? []) as LinkConfig[], [editing, setEditing] = useState<LinkConfig | null>(null), [removing, setRemoving] = useState<LinkConfig | null>(null), [proposed, setProposed] = useState<{value: LinkConfig[], summary: string} | null>(null);
+	const manage = (tag: string) => { const found = configured.find(link => link.tag === tag); return found && <span className="p-cluster"><Button size="sm" variant="quiet" onClick={() => setEditing(found)}>{t("links.manage")}</Button><Button size="sm" variant="quiet" onClick={() => setRemoving(found)}>{t("common.remove")}</Button></span>; };
+	const idle = configured.filter(link => !(links.data?.links ?? []).some(l => l.tag === link.tag));
 	const refresh = () => { links.reload(); pairings.reload(); };
 	const toCompare = (next: Compare) => { setFlow(null); setAnswering(null); setCompare(next); pairings.reload(); };
 	const drop = (id: string) => void api("delete", "/links/pairings/{id}", {params: {id}}).then(() => { toast({tone: "success", title: t("links.dropped")}); pairings.reload(); }, failure => toast({tone: "danger", title: say(failure)}));
@@ -42,9 +49,17 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 					<div><dt>{t("links.col.traffic")}</dt><dd className="vw-num">{bytes(l.traffic.up_bytes + l.traffic.down_bytes).text}</dd></div>
 					<div><dt>{t("nodes.flows")}</dt><dd className="vw-num">{number(l.flows)}</dd></div>
 				</dl>
+				{manage(l.tag)}
+			</Glass>)}
+			{links.data && idle.map(link => <Glass key={link.tag} className="p-node-card">
+				<div className="p-sheet-head"><div><strong className="vw-code vw-h3">{link.tag}</strong><span className="vw-small vw-muted">{t(exitHalf(link) ? "nodes.half.exit" : "nodes.half.entry")}</span></div><Mark tone="muted">{t(link.enabled === false ? "links.off" : "links.notRunning")}</Mark></div>
+				{manage(link.tag)}
 			</Glass>)}
 		</div>
 		{links.data && !(links.data.links ?? []).length && !flow && <Glass className="p-panel"><StateBlock kind="empty" title={t("links.empty")} action={<Button variant="primary" icon="plus" onClick={() => setFlow("offer")}>{t("links.offer")}</Button>}>{t("links.emptyBody")}</StateBlock></Glass>}
+		{editing && <LinkDialog link={editing} exits={((running.data?.document.exits ?? []) as {tag: string, backend?: {type?: string}}[]).filter(exit => exit.backend?.type !== "chain").map(exit => exit.tag)} onClose={() => setEditing(null)} onSave={changed => { setEditing(null); setProposed({value: configured.map(link => link.tag === changed.tag ? changed : link), summary: t("links.summaryEdit", {name: changed.tag})}); }}/>}
+		<ConfirmDialog open={removing !== null} onOpenChange={open => { if (!open) setRemoving(null); }} danger title={t("links.removeTitle", {name: removing?.tag ?? ""})} body={t("links.removeBody", {name: removing?.tag ?? ""})} confirmLabel={t("links.removeConfirm")} onConfirm={() => { const gone = removing!; setRemoving(null); setProposed({value: configured.filter(link => link.tag !== gone.tag), summary: t("links.summaryRemove", {name: gone.tag})}); }}/>
+		{proposed && running.data && <SectionReview section="links" running={running.data} value={proposed.value} summary={<p>{proposed.summary}</p>} onClose={() => setProposed(null)} onDone={() => { setProposed(null); running.reload(); refresh(); }}/>}
 		{pairings.data && waiting > 0 && <Glass className="p-panel">
 			<div className="p-sheet-head"><div><h2 className="vw-h2">{t("links.waiting")}</h2><p>{t("print.channel")}</p></div></div>
 			<List label={t("links.waiting")}>
@@ -53,6 +68,49 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 			</List>
 		</Glass>}
 	</>;
+}
+
+// The exit half is the node that is dialled in a forward link, or that dials in a reverse one.
+const exitHalf = (link: LinkConfig) => (link.inbound !== undefined) === (link.direction === "forward");
+
+// What can change on a link after pairing: whether it runs, and on the exit half what it may use. The keys and the transports stay as the pairing made them.
+function LinkDialog({link, exits, onClose, onSave}: {link: LinkConfig, exits: string[], onClose: () => void, onSave: (link: LinkConfig) => void}) {
+	const {t} = useP(), exitSide = exitHalf(link), [enabled, setEnabled] = useState(link.enabled ?? true), [exit, setExit] = useState(link.exit ?? ""), [allowed, setAllowed] = useState(link.exits ?? []), [allowPrivate, setAllowPrivate] = useState(link.allow_private ?? false);
+	const [flows, setFlows] = useState<number | "">(link.max_flows ?? ""), [quota, setQuota] = useState<number | "">(link.quota_bytes ? Math.round(link.quota_bytes / GB * 100) / 100 : ""), [period, setPeriod] = useState(link.quota_period ?? "none"), [day, setDay] = useState(link.expires_at ? link.expires_at.slice(0, 10) : ""), [mtu, setMtu] = useState<number | "">(link.mtu ?? "");
+	const save = () => {
+		const made: LinkConfig = {...link};
+		for (const key of ["enabled", "exit", "exits", "allow_private", "max_flows", "quota_bytes", "quota_period", "expires_at", "mtu"]) delete made[key];
+		if (!enabled) made.enabled = false;
+		if (exitSide && exit) made.exit = exit;
+		if (exitSide && allowed.length) made.exits = allowed;
+		if (exitSide && allowPrivate) made.allow_private = true;
+		if (exitSide && flows !== "") made.max_flows = flows;
+		if (exitSide && quota !== "") made.quota_bytes = Math.round(quota * GB);
+		if (exitSide && quota !== "" && period !== "none") made.quota_period = period;
+		if (day) made.expires_at = day + "T23:59:59Z";
+		if (mtu !== "") made.mtu = mtu;
+		onSave(made);
+	};
+	return <Dialog open onOpenChange={open => { if (!open) onClose(); }} title={t("links.manageTitle", {name: link.tag})} description={t(exitSide ? "links.manageExit" : "links.manageEntry")}>
+		<form className="p-stack" onSubmit={event => { event.preventDefault(); save(); }} noValidate>
+			<Switch label={t("links.enabled")} hint={t("links.enabledHint")} checked={enabled} onChange={setEnabled}/>
+			{exitSide && <>
+				<SelectField label={t("links.exit")} hint={t("links.exitHint")} value={exit} onChange={setExit} options={[{value: "", label: t("links.exitDefault")}, ...exits.map(tag => ({value: tag, label: tag}))]}/>
+				<div className="vw-field"><span className="vw-label">{t("links.exits")}</span><p className="vw-note">{t("links.exitsHint")}</p><ul className="p-row-list p-exit-list">{exits.map(tag => <li key={tag}><label className="p-exit"><input type="checkbox" className="p-check" checked={allowed.includes(tag)} onChange={event => setAllowed(event.target.checked ? [...allowed, tag] : allowed.filter(held => held !== tag))}/><span className="p-row-text"><strong className="vw-code">{tag}</strong></span><span/></label></li>)}</ul></div>
+				<Switch label={t("links.privateRules")} hint={t("links.privateHint")} checked={allowPrivate} onChange={setAllowPrivate}/>
+				<NumberField label={t("links.flows")} hint={t("links.flowsHint")} unit={t("links.unitFlows")} min={1} max={65536} value={flows} onChange={setFlows} optional/>
+				<div className="p-pair">
+					<NumberField label={t("form.quota")} hint={t("form.quotaHint")} unit={t("unit.gb")} min={0} step="any" value={quota} onChange={setQuota} optional/>
+					<SelectField label={t("form.period")} value={quota === "" ? "none" : period} onChange={setPeriod} disabled={quota === ""} options={(["none", "daily", "weekly", "monthly"] as const).map(p => ({value: p, label: t(`form.period.${p}`)}))}/>
+				</div>
+			</>}
+			<div className="p-pair">
+				<DayField label={t("form.expiry")} hint={t("links.expiryHint")} value={day} onChange={setDay} optional/>
+				<NumberField label={t("links.mtu")} hint={t("links.mtuHint")} unit={t("links.unitBytes")} min={1280} max={1500} value={mtu} onChange={setMtu} optional/>
+			</div>
+			<div className="vw-dialog-foot"><Button onClick={onClose}>{t("action.cancel")}</Button><Button type="submit" variant="primary">{t("config.review")}</Button></div>
+		</form>
+	</Dialog>;
 }
 
 // Step 1 on the node that offers: the terms the other node will see, made into a code that holds no secret.

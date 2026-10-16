@@ -8,6 +8,7 @@ import {AccountPage, type Prefs} from "./pages/account.tsx";
 import {Login, Setup} from "./pages/auth.tsx";
 import {InboundsPage, loadRunning, RoutingPage} from "./pages/config.tsx";
 import {DashboardPage} from "./pages/dashboard.tsx";
+import {DnsPage} from "./pages/dns.tsx";
 import {NodesPage} from "./pages/links.tsx";
 import {ProfilesPage} from "./pages/profiles.tsx";
 import {SettingsPage} from "./pages/subscriptions.tsx";
@@ -24,7 +25,7 @@ const SIDEBAR = "veilway-panel-sidebar";
 const MOVED: Record<string, string> = {"": "dashboard", node: "inbounds", "node/inbounds": "inbounds", "node/xray": "inbounds", "node/outbounds": "routing/outbounds", "node/exits": "routing/exits", "node/routing": "routing/routing", "node/profiles": "profiles", "node/links": "nodes", subscriptions: "settings", more: "dashboard"};
 type NodeStatus = {version?: string, generation?: number, uptime_secs?: number, public_addresses?: string[]};
 type Entry = {id: string, icon: IconName, count?: number, warn?: boolean};
-const PAGES = ["dashboard", "traffic", "users", "inbounds", "routing", "profiles", "nodes", "tokens", "settings", "account"];
+const PAGES = ["dashboard", "traffic", "users", "inbounds", "routing", "dns", "profiles", "nodes", "tokens", "settings", "account"];
 
 export function App() {
 	const [prefs, setPrefs] = useState<Prefs>(() => {
@@ -108,7 +109,7 @@ function Frame({hash, username, httpBanner, prefs, onPrefs, onLogout}: {hash: st
 	const groups: {label?: PanelKey, items: Entry[]}[] = [
 		{items: [{id: "dashboard", icon: "overview"}, {id: "traffic", icon: "chart"}]},
 		{label: "nav.group.people", items: [{id: "users", icon: "users", count: counts.data?.users}]},
-		{label: "nav.group.network", items: [{id: "nodes", icon: "device", count: list.length - up || undefined, warn: true}, {id: "inbounds", icon: "inbox", count: counts.data?.inbounds}, {id: "routing", icon: "upload"}, {id: "profiles", icon: "components"}]},
+		{label: "nav.group.network", items: [{id: "nodes", icon: "device", count: list.length - up || undefined, warn: true}, {id: "inbounds", icon: "inbox", count: counts.data?.inbounds}, {id: "routing", icon: "upload"}, {id: "dns", icon: "globe"}, {id: "profiles", icon: "components"}]},
 		{label: "nav.group.panel", items: [{id: "tokens", icon: "lock"}, {id: "settings", icon: "settings"}]}
 	];
 	const initials = username.split(/[-._]/).filter(Boolean).map(part => part[0]).join("").slice(0, 2).toUpperCase() || username.slice(0, 2).toUpperCase();
@@ -159,6 +160,7 @@ function Frame({hash, username, httpBanner, prefs, onPrefs, onLogout}: {hash: st
 					{page === "users" && (sub && sub !== "new" && Number.isFinite(Number(sub)) ? <UserPage id={Number(sub)}/> : <UsersPage adding={sub === "new"}/>)}
 					{page === "inbounds" && <InboundsPage/>}
 					{page === "routing" && <RoutingPage tab={sub}/>}
+					{page === "dns" && <DnsPage/>}
 					{page === "profiles" && <ProfilesPage/>}
 					{page === "nodes" && <NodesPage status={status} reachable={node.data?.reachable ?? false} online={online}/>}
 					{page === "tokens" && <TokensPage/>}

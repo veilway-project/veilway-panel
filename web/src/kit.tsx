@@ -121,8 +121,8 @@ export function TotpShown({totp, done, onDone}: {totp: Totp, done: string, onDon
 }
 
 // A field whose value is a list, one item per line.
-export function LinesField({label, hint, value, onChange, rows = 3}: {label: string, hint?: string, value: string, onChange: (value: string) => void, rows?: number}) {
-	return <Field label={label} hint={hint} optional>{ids => <textarea {...ids} className="vw-input vw-code p-textarea" dir="ltr" spellCheck={false} rows={rows} value={value} onChange={event => onChange(event.target.value)}/>}</Field>;
+export function LinesField({label, hint, value, onChange, rows = 3, optional = true}: {label: string, hint?: string, value: string, onChange: (value: string) => void, rows?: number, optional?: boolean}) {
+	return <Field label={label} hint={hint} optional={optional}>{ids => <textarea {...ids} className="vw-input vw-code p-textarea" dir="ltr" spellCheck={false} rows={rows} value={value} onChange={event => onChange(event.target.value)}/>}</Field>;
 }
 
 export const lines = (text: string) => text.split("\n").map(line => line.trim()).filter(Boolean);

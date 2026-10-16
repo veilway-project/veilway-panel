@@ -9,7 +9,9 @@ use std::sync::Arc;
 /// `veilway schema` of the core, kept next to the manifest. The node's own validation stays the authority: this is for an editor.
 const SCHEMA: &str = include_str!("../config.schema.json");
 /// The parts of the document that are edited as structured objects. `users` is the panel's own and never appears here.
-const SECTIONS: [&str; 4] = ["inbounds", "outbounds", "exits", "routing"];
+const SECTIONS: [&str; 9] = ["inbounds", "outbounds", "exits", "routing", "notices", "dns", "log", "links", "replay"];
+/// The sections that are an object. The others are lists.
+const OBJECTS: [&str; 4] = ["routing", "dns", "log", "replay"];
 
 pub async fn schema() -> Response {(StatusCode::OK, [(CONTENT_TYPE, HeaderValue::from_static("application/json"))], SCHEMA).into_response()}
 
@@ -34,7 +36,10 @@ pub async fn get_config(State(app): State<Arc<App>>) -> Result<Response, Failure
 pub async fn get_section(State(app): State<Arc<App>>, Path(section): Path<String>) -> Result<Response, Failure> {
 	if !SECTIONS.contains(&section.as_str()) {return Err(Failure::missing("section"))}
 	let (revision, generation, document) = running(&app).await?;
-	ok(&json!({"revision": revision, "generation": generation, "value": document.get(&section).cloned().unwrap_or(Value::Null)}))
+	let mut answer = json!({"revision": revision, "generation": generation, "value": document.get(&section).cloned().unwrap_or(Value::Null)});
+	// The node reads the size of its replay memory once, at start.
+	if section == "replay" {answer["read_at_start"] = json!(["cache"]);}
+	ok(&answer)
 }
 
 /// The document with the panel's users in it, and their Xray credentials, since the node's `users` is what the panel owns.
@@ -89,13 +94,13 @@ pub async fn put_config(State(app): State<Arc<App>>, Extension(ctx): Extension<C
 #[serde(deny_unknown_fields)]
 pub struct SectionIn {
 	pub revision: String,
-	/// The new content of the section: a list for inbounds, outbounds and exits, an object for routing.
+	/// The new content of the section: an object for routing, dns, log and replay, a list for the others. A change to `replay.cache` takes effect at the node's next start.
 	pub value: Value,
 }
 
 pub async fn put_section(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(section): Path<String>, Body(input): Body<SectionIn>) -> Result<Response, Failure> {
 	if !SECTIONS.contains(&section.as_str()) {return Err(Failure::missing("section"))}
-	if input.value.is_array() == (section == "routing") {return Err(Failure::bad(if section == "routing" {"routing is an object."} else {"This section is a list."}))}
+	if input.value.is_object() != OBJECTS.contains(&section.as_str()) || !(input.value.is_object() || input.value.is_array()) {return Err(Failure::bad(if OBJECTS.contains(&section.as_str()) {"This section is an object."} else {"This section is a list."}))}
 	let (_, _, mut document) = running(&app).await?;
 	document[&section] = input.value;
 	ok(&apply(&app, &ctx, document, &input.revision, &section).await?)

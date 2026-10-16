@@ -24,3 +24,6 @@ jobs:
           workspaces: veilway-project/veilway-panel/server
       - run: cargo test
         working-directory: veilway-project/veilway-panel/server
+      # Every key of the node's config has a form in the web app or a line in the list of keys left to JSON on purpose.
+      - run: node scripts/config-coverage.mjs
+        working-directory: veilway-project/veilway-panel/web

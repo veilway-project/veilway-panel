@@ -13,6 +13,7 @@
 		"check": "openapi-typescript ../server/openapi.json -o /tmp/veilway-panel-schema.ts && cmp src/schema.ts /tmp/veilway-panel-schema.ts && tsc --noEmit",
 		"dev": "vite --host 0.0.0.0",
 		"build": "vite build",
+		"coverage": "node scripts/config-coverage.mjs",
 		"preview": "vite preview --host 0.0.0.0"
 	},
 	"dependencies": {

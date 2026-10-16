@@ -1,0 +1,32 @@
+# Config paths that the web app leaves to the JSON editor of their section on purpose. One path per line; a path covers everything below it.
+# Remove a line when a form for it lands, and the check fails on paths the schema no longer has.
+
+# Secrets: the node never reveals them, and they are made by the panel or by pairing, never typed.
+inbounds[].transport_keys
+links[].transport_secret
+users[].devices[].preshared_key
+users[].devices[].transport_secrets
+xray.inbounds[].clients[].secret
+xray.inbounds[].server_key
+
+# Tuning of exits that few operators touch: idle timers, proxy-only, masquerading and the fallbacks for what a backend cannot carry.
+exits[].backend.proxy_only
+exits[].backend.tcp_idle_secs
+exits[].backend.udp_idle_secs
+exits[].backend.unsupported
+exits[].backend.masquerade
+
+# Inbound internals: padding, per-transport limits, the decoy origin and the web server headers. Wrong values here lock users out, so they stay in reviewed JSON.
+inbounds[].padding
+inbounds[].transports[].limits
+inbounds[].transports[].decoy
+inbounds[].transports[].tls.self_signed
+inbounds[].transports[].client_address_header
+inbounds[].transports[].trusted_proxies
+inbounds[].upgrade_cookie
+inbounds[].upgrade_headers
+
+# What pairing wrote about the other node. A change means pairing again.
+links[].addresses
+links[].peer.transports[].candidates
+links[].peer.transports[].endpoints

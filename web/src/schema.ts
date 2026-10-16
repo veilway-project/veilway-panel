@@ -200,7 +200,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** One of inbounds, outbounds, exits and routing as the node runs it, with the revision to change it on. */
+        /** One of inbounds, outbounds, exits, routing, notices, dns, log, links and replay as the node runs it, with the revision to change it on. A section the document leaves out is null. For replay, read_at_start names what changes only at the node's next start. */
         get: operations["getConfigSection"];
         /** Replaces one section and applies the result like putConfig. A secret left as the node's marker keeps its value. */
         put: operations["putConfigSection"];
@@ -1400,7 +1400,7 @@ export interface components {
         };
         SectionIn: {
             revision: string;
-            /** @description The new content of the section: a list for inbounds, outbounds and exits, an object for routing. */
+            /** @description The new content of the section: an object for routing, dns, log and replay, a list for the others. A change to `replay.cache` takes effect at the node's next start. */
             value: unknown;
         };
         SessionInfo: {

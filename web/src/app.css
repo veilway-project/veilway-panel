@@ -152,6 +152,14 @@
 .p-link:focus-visible { outline: 2px solid var(--c-focus); outline-offset: 2px; border-radius: var(--r-1); }
 .p-check { inline-size: 18px; block-size: 18px; margin: 0; accent-color: var(--c-accent); cursor: pointer; }
 .p-check:focus-visible { outline: 2px solid var(--c-focus); outline-offset: 2px; }
+.p-exit-list > li { display: block; }
+.p-exit { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--s-3); cursor: pointer; }
+.p-exit .p-row-text > .vw-code { justify-self: start; }
+.p-exit-problem { color: var(--c-danger); }
+.p-notices { display: grid; gap: var(--s-3); margin: 0; padding: 0; list-style: none; }
+.p-notices > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--s-3); }
+.p-count-line { margin-block-start: calc(var(--s-2) * -1); color: var(--c-text-muted); font-variant-numeric: tabular-nums; }
+.p-count-line[data-over] { color: var(--c-danger); }
 .p-usage-cell { min-inline-size: 180px; }
 .p-kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--s-2) var(--s-5); margin: 0; font-size: var(--text-2); }
 .p-kv dt { color: var(--c-text-muted); }
