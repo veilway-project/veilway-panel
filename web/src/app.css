@@ -360,3 +360,49 @@
 .p-hand-exits > li { grid-template-columns: minmax(6rem, auto) minmax(0, 1fr) auto; }
 @media (prefers-reduced-motion: reduce) { .p-hand > summary::before { transition: none; } }
 @media (max-width: 480px) { .p-hand-body, .p-hand > .p-hand-summary { padding-inline: var(--s-3); } .p-hand-dial { grid-template-columns: minmax(0, 1fr) 4.75rem; } .p-hand .p-mirror { padding: var(--s-3); } }
+/* Guided link setup: three starting points, a numbered step rail, and the route figure. The figure's arrow runs from the node that dials to the node that waits, and one pulse travels it the same way. */
+.p-presets { display: grid; gap: var(--s-3); grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); }
+.p-preset { display: grid; gap: 2px; align-content: start; padding: var(--s-3) var(--s-4); border: 1px solid var(--c-line); border-radius: var(--r-2); background: transparent; color: inherit; font: inherit; text-align: start; cursor: pointer; transition: border-color 0.15s, background-color 0.15s; }
+.p-preset > span { font-size: var(--text-2); color: var(--c-text-muted); }
+.p-preset:hover { border-color: var(--c-line-strong); background: var(--c-sunken); }
+.p-preset:focus-visible { outline: 2px solid var(--c-focus); outline-offset: 2px; }
+.p-changes li > .vw-icon { flex: none; align-self: center; color: var(--c-accent-ink); }
+.p-steps { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-4); margin: 0; padding: 0; list-style: none; }
+.p-steps li { display: flex; align-items: center; gap: var(--s-2); font-size: var(--text-2); color: var(--c-text-muted); }
+.p-steps-n { display: grid; place-items: center; inline-size: 1.5rem; block-size: 1.5rem; border: 1px solid var(--c-line-strong); border-radius: var(--r-1); font-size: var(--text-1); font-variant-numeric: tabular-nums; }
+.p-steps-n .vw-icon { inline-size: 0.9rem; block-size: 0.9rem; }
+.p-steps li[data-state="now"] { color: var(--c-text); font-weight: var(--weight-strong); }
+.p-steps li[data-state="now"] .p-steps-n { border-color: var(--c-accent); background: var(--c-accent); color: var(--c-on-accent); }
+.p-steps li[data-state="done"] .p-steps-n { border-color: var(--c-accent); color: var(--c-accent-ink); }
+.p-route { display: grid; grid-template-columns: auto minmax(0.75rem, 1fr) auto minmax(7rem, 3fr) auto minmax(0.75rem, 1fr) auto; align-items: center; margin: 0; padding: var(--s-4); border-radius: var(--r-2); background: var(--c-sunken); }
+.p-route-stop { display: grid; gap: 2px; padding: var(--s-2) var(--s-3); border: 1px solid var(--c-line-strong); border-radius: var(--r-1); background: var(--c-surface); text-align: center; }
+.p-route-stop > strong { font-size: var(--text-2); }
+.p-route-stop > span { font-size: var(--text-1); color: var(--c-text-muted); }
+.p-route-stop[data-here] { border-color: var(--c-accent); box-shadow: inset 0 0 0 1px var(--c-accent); }
+.p-route-line { block-size: 0; border-block-start: 1px dashed var(--c-line-strong); }
+.p-route-link { display: grid; gap: var(--s-1); justify-items: center; padding-inline: var(--s-2); }
+.p-route-say { font-size: var(--text-1); color: var(--c-accent-ink); text-align: center; }
+.p-route-arrow { position: relative; inline-size: 100%; block-size: 2px; background: var(--c-accent); }
+.p-route-arrow::before { content: ""; position: absolute; inset-block-start: -2px; inline-size: 6px; block-size: 6px; border-radius: 50%; background: var(--c-accent); animation: p-dial-out 2.4s ease-in-out infinite; }
+.p-route-arrow::after { content: ""; position: absolute; inset-block-start: -4px; border-block: 5px solid transparent; }
+[data-dial="out"] .p-route-arrow::after { inset-inline-end: -2px; border-inline-start: 9px solid var(--c-accent); }
+[data-dial="back"] .p-route-arrow::after { inset-inline-start: -2px; border-inline-end: 9px solid var(--c-accent); }
+[data-dial="back"] .p-route-arrow::before { animation-name: p-dial-back; }
+@keyframes p-dial-out { from { inset-inline-start: 0; opacity: 0; } 20% { opacity: 1; } 80% { opacity: 1; } to { inset-inline-start: calc(100% - 6px); opacity: 0; } }
+@keyframes p-dial-back { from { inset-inline-start: calc(100% - 6px); opacity: 0; } 20% { opacity: 1; } 80% { opacity: 1; } to { inset-inline-start: 0; opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .p-route-arrow::before { display: none; } .p-preset { transition: none; } }
+@media (max-width: 640px) {
+	.p-route { grid-template-columns: minmax(0, 1fr); justify-items: center; padding: var(--s-3); }
+	.p-route-stop { inline-size: min(100%, 16rem); }
+	.p-route-line { inline-size: 0; block-size: var(--s-3); border-block-start: 0; border-inline-start: 1px dashed var(--c-line-strong); }
+	.p-route-link { grid-template-columns: 2px auto; align-items: center; gap: var(--s-3); padding: var(--s-1) 0; }
+	.p-route-say { grid-column: 2; grid-row: 1; text-align: start; }
+	.p-route-arrow { grid-column: 1; grid-row: 1; inline-size: 2px; block-size: 3rem; }
+	.p-route-arrow::before { inset-block-start: 0; inset-inline-start: -2px; animation-name: p-dial-down; }
+	[data-dial="back"] .p-route-arrow::before { animation-name: p-dial-up; }
+	[data-dial] .p-route-arrow::after { inset-inline: -4px auto; border-style: solid; border-color: transparent; border-width: 0 5px; }
+	[data-dial="out"] .p-route-arrow::after { inset-block: auto -2px; border-block-start: 9px solid var(--c-accent); }
+	[data-dial="back"] .p-route-arrow::after { inset-block: -2px auto; border-block-end: 9px solid var(--c-accent); }
+}
+@keyframes p-dial-down { from { inset-block-start: 0; opacity: 0; } 20% { opacity: 1; } 80% { opacity: 1; } to { inset-block-start: calc(100% - 6px); opacity: 0; } }
+@keyframes p-dial-up { from { inset-block-start: calc(100% - 6px); opacity: 0; } 20% { opacity: 1; } 80% { opacity: 1; } to { inset-block-start: 0; opacity: 0; } }
