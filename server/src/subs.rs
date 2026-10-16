@@ -86,6 +86,8 @@ pub fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[SigningE
 	});
 	if !settings.endpoint_pins.is_empty() {payload["endpoint_pins"] = json!(settings.endpoint_pins);}
 	if !settings.refresh_mirrors.is_empty() {payload["refresh_urls"] = json!(settings.refresh_mirrors);}
+	let support: Vec<Value> = [(&settings.terms_url, "Terms of service", "شرایط استفاده"), (&settings.privacy_url, "Privacy policy", "حریم خصوصی")].into_iter().filter(|(url, ..)| !url.is_empty()).map(|(url, label, persian)| json!({"label": {"default": label, "fa": persian}, "url": url})).collect();
+	if !support.is_empty() {payload["support"] = json!(support);}
 	Ok(sign(signer, &payload))
 }
 

@@ -72,6 +72,8 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 				{head("endpoint")}
 				<div className="p-form">
 					<TextField label={t("subs.provider")} hint={t("subs.providerHint")} value={draft.provider_name ?? ""} onChange={value => patch({provider_name: value})} maxLength={64}/>
+					<TextField label={t("subs.terms")} hint={t("subs.termsHint")} type="url" placeholder="https://" value={draft.terms_url ?? ""} onChange={value => patch({terms_url: value.trim()})} technical/>
+					<TextField label={t("subs.privacy")} hint={t("subs.privacyHint")} type="url" placeholder="https://" value={draft.privacy_url ?? ""} onChange={value => patch({privacy_url: value.trim()})} technical/>
 					<TextField label={t("subs.endpoint")} hint={t("subs.endpointHint")} type="url" placeholder="https://" value={draft.endpoint_url ?? ""} onChange={value => patch({endpoint_url: value.trim()})} technical/>
 					<TextField label={t("subs.nodeHost")} hint={t("subs.nodeHostHint")} placeholder="vpn.example.org" value={draft.node_host ?? ""} onChange={value => patch({node_host: value.trim()})} technical/>
 					<LinesField label={t("subs.pins")} hint={t("subs.pinsHint")} value={pins} onChange={value => set({pins: value})} rows={2}/>

@@ -1567,6 +1567,8 @@ export interface components {
              * @default 10.66.0.0/16
              */
             pool_v4: string;
+            /** @default  */
+            privacy_url: string;
             /**
              * @description Edits to the profiles derived from the node's inbounds, by inbound tag: an object whose members replace the derived ones.
              * @default {}
@@ -1597,12 +1599,19 @@ export interface components {
              */
             show_links_once: boolean;
             /**
+             * @description The provider's own terms and privacy policy, put in every document as two `support` links. An `https` URL, or empty for none.
+             * @default
+             */
+            terms_url: string;
+            /**
              * Format: uint32
              * @default 3600
              */
             update_interval: number;
         };
         Setup: {
+            /** @default false */
+            accepted_terms: boolean;
             password: string;
             token: string;
             username: string;

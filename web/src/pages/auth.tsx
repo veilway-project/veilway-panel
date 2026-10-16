@@ -1,21 +1,22 @@
-import {Button, SecretField, TextField} from "@veilway/ui";
+import {Button, Checkbox, SecretField, TextField} from "@veilway/ui";
 import {useState} from "react";
 import {api, flags, session, type Totp} from "../api.ts";
 import {ErrorNote, TotpShown, useGuard, useP} from "../kit.tsx";
 
 export const USERNAME = /^[a-z0-9._-]{3,32}$/;
+const TERMS = "https://veilway-project.github.io/veilway-docs/";
 
 export function Setup({onDone}: {onDone: () => void}) {
-	const {t} = useP(), [token, setToken] = useState(""), [username, setUsername] = useState(""), [password, setPassword] = useState(""), [again, setAgain] = useState("");
+	const {t, locale} = useP(), [token, setToken] = useState(""), [username, setUsername] = useState(""), [password, setPassword] = useState(""), [again, setAgain] = useState(""), [accepted, setAccepted] = useState(false);
 	const [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [totp, setTotp] = useState<Totp | null>(null), [tried, setTried] = useState(false);
-	const problems = {username: USERNAME.test(username) ? undefined : t("error.username"), password: password.length >= 12 && password.length <= 256 ? undefined : t("error.password"), again: again === password ? undefined : t("error.passwordMatch")};
+	const problems = {username: USERNAME.test(username) ? undefined : t("error.username"), password: password.length >= 12 && password.length <= 256 ? undefined : t("error.password"), again: again === password ? undefined : t("error.passwordMatch"), terms: accepted ? undefined : t("setup.termsRequired")};
 	const submit = async () => {
 		setTried(true);
-		if (problems.username || problems.password || problems.again) return;
+		if (problems.username || problems.password || problems.again || problems.terms) return;
 		setBusy(true);
 		setError(null);
 		try {
-			setTotp(await api("post", "/setup", {body: {token: token.trim(), username, password}}));
+			setTotp(await api("post", "/setup", {body: {token: token.trim(), username, password, accepted_terms: accepted}}));
 		} catch (failure) {
 			setError(failure);
 		} finally {
@@ -30,6 +31,9 @@ export function Setup({onDone}: {onDone: () => void}) {
 		<TextField label={t("setup.username")} autoComplete="username" value={username} onChange={value => setUsername(value.toLowerCase())} error={tried ? problems.username : undefined} technical required/>
 		<TextField label={t("setup.password")} type="password" autoComplete="new-password" hint={t("setup.passwordHint")} value={password} onChange={setPassword} error={tried ? problems.password : undefined} required/>
 		<TextField label={t("setup.confirm")} type="password" autoComplete="new-password" value={again} onChange={setAgain} error={tried ? problems.again : undefined} required/>
+		<p className="vw-small">{t("setup.termsLead")} <a href={`${TERMS}${locale === "fa" ? "fa/" : ""}legal/operator-terms/`} target="_blank" rel="noreferrer">{t("setup.termsLink")}</a></p>
+		<Checkbox label={t("setup.termsAccept")} checked={accepted} onChange={setAccepted}/>
+		{tried && problems.terms && <p className="vw-note" role="alert">{problems.terms}</p>}
 		<ErrorNote error={error}/>
 		<div><Button type="submit" variant="primary" disabled={busy}>{t("setup.submit")}</Button></div>
 	</form>;

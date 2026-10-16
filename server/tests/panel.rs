@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::{net::SocketAddr, path::PathBuf, sync::{atomic::Ordering, Arc, Mutex}};
 use tower::ServiceExt;
 use veilway_panel::{app::{bucket, App, Limiter, Signing}, build, config::{Config, TrustedMirror}, crypto, mirrors, openapi, router, upkeep_once, Upkeep};
-use veilway_proto::subscription::{envelope::{self, Kid}, link::Link, payload::{self, Payload, Reason}, BODY_MAX};
+use veilway_proto::subscription::{envelope::{self, Kid}, link::Link, payload::{self, Payload, Reason}, Tag, BODY_MAX};
 
 const PASSWORD: &str = "correct horse battery";
 
@@ -36,7 +36,7 @@ impl Harness {
 		let router = router(app.clone());
 		let mut harness = Self {app, router, totp: Vec::new(), dir};
 		let token = harness.app.setup_token.lock().unwrap().clone().unwrap();
-		let answer = harness.call(Method::POST, "/p/api/setup", None, Some(json!({"token": token, "username": "owner", "password": PASSWORD})), "10.0.0.1").await;
+		let answer = harness.call(Method::POST, "/p/api/setup", None, Some(json!({"token": token, "username": "owner", "password": PASSWORD, "accepted_terms": true})), "10.0.0.1").await;
 		assert_eq!(answer.status, StatusCode::OK, "{}", String::from_utf8_lossy(&answer.body));
 		harness.totp = data_encoding::BASE32_NOPAD.decode(answer.json()["totp_secret"].as_str().unwrap().as_bytes()).unwrap();
 		harness
@@ -406,6 +406,56 @@ async fn bulk_actions_and_setup_once() {
 	let second = h.call(Method::POST, "/p/api/setup", None, Some(json!({"token": "anything", "username": "other", "password": PASSWORD})), "10.0.0.1").await;
 	assert_eq!(second.status, StatusCode::FORBIDDEN);
 	assert_eq!(h.call(Method::POST, "/p/api/users", Some(&session), Some(json!({"name": "Bad Name"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn setup_needs_the_terms_and_records_the_acceptance() {
+	let dir = std::env::temp_dir().join(format!("vwpanel-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
+	std::fs::create_dir_all(&dir).unwrap();
+	let cfg = Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), node_socket: dir.join("none.sock"), ..Config::default()};
+	let app = build(cfg).unwrap();
+	let h = Harness {router: router(app.clone()), app, totp: Vec::new(), dir};
+	let token = h.app.setup_token.lock().unwrap().clone().unwrap();
+	let setup = json!({"token": token, "username": "owner", "password": PASSWORD});
+	assert_eq!(h.call(Method::POST, "/p/api/setup", None, Some(setup.clone()), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	assert_eq!(h.call(Method::POST, "/p/api/setup", None, Some(json!({"token": token, "username": "owner", "password": PASSWORD, "accepted_terms": false})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	assert_eq!(h.call(Method::GET, "/p/api/status", None, None, "10.0.0.1").await.json()["setup_needed"], true);
+	let mut accepted = setup;
+	accepted["accepted_terms"] = json!(true);
+	assert_eq!(h.call(Method::POST, "/p/api/setup", None, Some(accepted), "10.0.0.1").await.status, StatusCode::OK);
+	let detail: String = h.app.db.lock().query_row("select detail from audit where action = 'setup'", [], |row| row.get(0)).unwrap();
+	assert_eq!(detail, "first admin created, terms 2026-10-16 accepted");
+	let kept: String = h.app.db.lock().query_row("select value from settings where key = 'terms_accepted'", [], |row| row.get(0)).unwrap();
+	assert_eq!(serde_json::from_str::<Value>(&kept).unwrap()["version"], "2026-10-16");
+}
+
+#[tokio::test]
+async fn provider_terms_urls_are_https_and_checked_when_saved() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	let long = format!("https://terms.example.org/{}", "a".repeat(600));
+	for bad in ["http://terms.example.org/terms", "https://owner:secret@terms.example.org/", "https://", long.as_str()] {
+		let answer = h.call(Method::PUT, "/p/api/settings", Some(&session), Some(json!({"privacy_url": bad})), "10.0.0.1").await;
+		assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{bad}");
+	}
+	h.configure(&session, json!({"terms_url": "https://terms.example.org/terms", "privacy_url": "https://example.org/privacy"})).await;
+	let kept = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((kept["terms_url"].as_str(), kept["privacy_url"].as_str()), (Some("https://terms.example.org/terms"), Some("https://example.org/privacy")));
+}
+
+#[tokio::test]
+async fn signed_document_carries_the_provider_terms_and_privacy_links() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"terms_url": "https://terms.example.org/terms", "privacy_url": "https://example.org/privacy"})).await;
+	let (_, link) = h.user(&session, "ann", json!({})).await;
+	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
+	let Payload::Subscription(document) = opened(&h.fetch(&link, &kids, 1, "fetch", None).await, &[key]) else {panic!("a document")};
+	let urls: Vec<&str> = document.support.iter().map(|support| support.url.as_str()).collect();
+	assert_eq!(urls, ["https://terms.example.org/terms", "https://example.org/privacy"]);
+	let persian = Tag::read("fa").unwrap();
+	assert_eq!(document.support[0].label.pick(&[persian.clone()]), ("شرایط استفاده", Some(&persian)));
+	assert_eq!(document.support[1].label.as_str(), "Privacy policy");
 }
 
 #[tokio::test]
@@ -1374,8 +1424,8 @@ async fn with_the_code_off_short_passwords_are_refused_and_a_stored_short_one_mu
 	let app = build(Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), node_socket: dir.join("none.sock"), two_step: "off".into(), ..Config::default()}).unwrap();
 	let token = app.setup_token.lock().unwrap().clone().unwrap();
 	let h = Harness {router: router(app.clone()), app, totp: Vec::new(), dir};
-	assert_eq!(h.call(Method::POST, "/p/api/setup", None, Some(json!({"token": token, "username": "owner", "password": short})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
-	assert_eq!(h.call(Method::POST, "/p/api/setup", None, Some(json!({"token": token, "username": "owner", "password": PASSWORD})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::POST, "/p/api/setup", None, Some(json!({"token": token, "username": "owner", "password": short, "accepted_terms": true})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	assert_eq!(h.call(Method::POST, "/p/api/setup", None, Some(json!({"token": token, "username": "owner", "password": PASSWORD, "accepted_terms": true})), "10.0.0.1").await.status, StatusCode::OK);
 	async fn sign_in(h: &Harness, password: &str, source: &str) -> Answer {h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": password})), source).await}
 	let answer = sign_in(&h, PASSWORD, "10.0.0.2").await;
 	assert_eq!(answer.json()["password_change_required"], false);
