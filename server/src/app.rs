@@ -102,7 +102,7 @@ pub struct Endpoint {
 #[serde(deny_unknown_fields, default)]
 pub struct Settings {
 	pub provider_name: String,
-	/// The provider's own terms and privacy policy, put in every document as two `support` links. An `https` URL, or empty for none.
+	/// The provider's own terms and privacy policy, put in every document as its `agreement`, which the apps ask users to accept. An `https` URL, or empty for none.
 	pub terms_url: String,
 	pub privacy_url: String,
 	/// The named subscription endpoints, at most 16, each on its own host and port and each reached by its own path, the panel's `sub_path` and the endpoint's name. An account's links and documents use the endpoint resolved for it: its own, else the first of its groups that has one in `group_endpoints`, else the default.

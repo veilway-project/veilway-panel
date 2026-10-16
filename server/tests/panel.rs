@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::{future::Future, net::SocketAddr, path::PathBuf, sync::{atomic::Ordering, Arc, Mutex}};
 use tower::ServiceExt;
 use veilway_panel::{app::{bucket, App, Limiter, Signing}, build, config::{Config, TrustedMirror}, crypto, mirrors, openapi, router, upkeep_once, Upkeep};
-use veilway_proto::subscription::{envelope::{self, Kid}, exchange::{self, GatewayKey}, link::Link, payload::{self, Payload, Reason}, sealed_file, Tag, BODY_MAX};
+use veilway_proto::subscription::{envelope::{self, Kid}, exchange::{self, GatewayKey}, link::Link, payload::{self, Payload, Reason}, sealed_file, BODY_MAX};
 
 const PASSWORD: &str = "correct horse battery";
 
@@ -536,11 +536,8 @@ async fn signed_document_carries_the_provider_terms_and_privacy_links() {
 	let (_, link) = h.user(&session, "ann", json!({})).await;
 	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
 	let Payload::Subscription(document) = opened(&h.fetch(&link, &kids, 1, "fetch", None).await, &[key]) else {panic!("a document")};
-	let urls: Vec<&str> = document.support.iter().map(|support| support.url.as_str()).collect();
-	assert_eq!(urls, ["https://terms.example.org/terms", "https://example.org/privacy"]);
-	let persian = Tag::read("fa").unwrap();
-	assert_eq!(document.support[0].label.pick(&[persian.clone()]), ("شرایط استفاده", Some(&persian)));
-	assert_eq!(document.support[1].label.as_str(), "Privacy policy");
+	let agreement = document.agreement.clone().expect("an agreement");
+	assert_eq!((agreement.terms.as_ref().map(|url| url.as_str()), agreement.privacy.as_ref().map(|url| url.as_str()), document.support.len()), (Some("https://terms.example.org/terms"), Some("https://example.org/privacy"), 0));
 }
 
 #[tokio::test]

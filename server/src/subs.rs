@@ -106,8 +106,9 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 		}
 	}
 	if !settings.refresh_mirrors.is_empty() {payload["refresh_urls"] = json!(settings.refresh_mirrors);}
-	let support: Vec<Value> = [(&settings.terms_url, "Terms of service", "شرایط استفاده"), (&settings.privacy_url, "Privacy policy", "حریم خصوصی")].into_iter().filter(|(url, ..)| !url.is_empty()).map(|(url, label, persian)| json!({"label": {"default": label, "fa": persian}, "url": url})).collect();
-	if !support.is_empty() {payload["support"] = json!(support);}
+	// The apps ask the user to accept these before the first connection, and again when either changes.
+	let agreement: serde_json::Map<String, Value> = [("terms", &settings.terms_url), ("privacy", &settings.privacy_url)].into_iter().filter(|(_, url)| !url.is_empty()).map(|(name, url)| (name.into(), json!(url))).collect();
+	if !agreement.is_empty() {payload["agreement"] = Value::Object(agreement);}
 	if form != Form::Whole && !settings.static_mirrors.is_empty() {payload["static_mirrors"] = json!(settings.static_mirrors);}
 	Ok(sign(signer, &payload))
 }

@@ -2053,7 +2053,7 @@ export interface components {
              */
             static_mirrors: string[];
             /**
-             * @description The provider's own terms and privacy policy, put in every document as two `support` links. An `https` URL, or empty for none.
+             * @description The provider's own terms and privacy policy, put in every document as its `agreement`, which the apps ask users to accept. An `https` URL, or empty for none.
              * @default
              */
             terms_url: string;
