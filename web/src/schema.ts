@@ -999,6 +999,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users/{id}/subscription/sealed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** The user's link in a sealed subscription file, locked with a password (Argon2id and ChaCha20-Poly1305, as base64 in `file`). The panel keeps no copy of the password. `link` is the user's current link when the panel holds no copy of it. Needs a recent re-authentication and is audited without the password or the link. No API token can do this. */
+        post: operations["sealLink"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users/{id}/subscription/show": {
         parameters: {
             query?: never;
@@ -1562,6 +1579,17 @@ export interface components {
         Rotated: {
             node: components["schemas"]["NodeState"];
             ok: boolean;
+        };
+        Sealed: {
+            /** @description The sealed file, standard base64. */
+            file: string;
+            filename: string;
+        };
+        SealedIn: {
+            /** @description The user's current link in the `veilway` form, for a link the panel keeps no copy of: one just made, or any link when the panel shows links once. It has to be the user's current token. Left out, the panel opens its own sealed copy. */
+            link?: string | null;
+            /** @description At least 10 characters. It locks the file and the panel keeps no copy of it, so it cannot be recovered. Send it another way than the file. */
+            password: string;
         };
         SectionIn: {
             revision: string;
@@ -5769,6 +5797,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LinkReset"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    sealLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SealedIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Sealed"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */

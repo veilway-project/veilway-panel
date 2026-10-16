@@ -1,4 +1,4 @@
-import {Banner, Button, Checkbox, ConfirmDialog, DataTable, Dialog, Glass, Icon, IconButton, StatRow, StatTile, StateBlock, TextField, useToast} from "@veilway/ui";
+import {Banner, Button, Checkbox, ConfirmDialog, DataTable, Dialog, Glass, Icon, IconButton, SecretField, StatRow, StatTile, StateBlock, TextField, useToast} from "@veilway/ui";
 import {useEffect, useState} from "react";
 import {api, type Device, type LinkView, type NodeState, type NodeUser, type UserPatch, type XrayLink} from "../api.ts";
 import {Copyable, ErrorNote, Mark, NodeNote, Qr, useCopy, useGuard, useLoad, useP, useSay} from "../kit.tsx";
@@ -9,8 +9,8 @@ import {XrayLinksDialog} from "./xray.tsx";
 export function UserPage({id}: {id: number}) {
 	const {t, date, time, bytes, number, percent} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings(), copy = useCopy();
 	const page = useLoad(() => Promise.all([api("get", "/users/{id}", {params: {id}}), api("get", "/users/{id}/devices", {params: {id}}), api("get", "/users/{id}/subscription", {params: {id}})]), [id]);
-	const [editing, setEditing] = useState(false), [dialog, setDialog] = useState<"delete" | "usage" | "link" | "device" | "xray" | null>(null), [removing, setRemoving] = useState<Device | null>(null);
-	const [totals, setTotals] = useState(false), [removeOld, setRemoveOld] = useState(false), [deviceName, setDeviceName] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [linkError, setLinkError] = useState<unknown>(null);
+	const [editing, setEditing] = useState(false), [dialog, setDialog] = useState<"delete" | "usage" | "link" | "device" | "xray" | "sealed" | null>(null), [removing, setRemoving] = useState<Device | null>(null);
+	const [totals, setTotals] = useState(false), [removeOld, setRemoveOld] = useState(false), [deviceName, setDeviceName] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [linkError, setLinkError] = useState<unknown>(null), [sealPass, setSealPass] = useState(""), [sealAgain, setSealAgain] = useState(""), [sealTried, setSealTried] = useState(false);
 	// fresh is a link made just now, by adding the user or resetting the link; otherwise it is the panel's copy, opened after re-authentication.
 	const [shown, setShown] = useState<{link: LinkView, once: boolean, fresh: boolean} | null>(() => { const made = handoff.current?.id === id ? handoff.current : null; handoff.current = null; return made && {link: made.link, once: settings?.show_links_once ?? false, fresh: true}; });
 	const [exported, setExported] = useState<{name: string, file: string, link?: string | null} | null>(null), [node, setNode] = useState<NodeState | null>(null), [xray, setXray] = useState<XrayLink[] | null>(null);
@@ -36,6 +36,25 @@ export function UserPage({id}: {id: number}) {
 	};
 	const open = (next: typeof dialog) => { setError(null); setDialog(next); };
 	const showLink = async () => { setLinkError(null); try { setShown({link: await guard(() => api("post", "/users/{id}/subscription/show", {params: {id}})), once: false, fresh: false}); } catch (failure) { setLinkError(failure); } };
+	const sealProblem = [...sealPass].length < 10 ? t("sealed.length") : sealPass !== sealAgain ? t("sealed.match") : undefined;
+	const sealFile = () => {
+		setSealTried(true);
+		if (sealProblem) return;
+		// A link the panel keeps no copy of is sent back, and the server takes it only when it is this user's current one.
+		void act(async () => {
+			const made = await api("post", "/users/{id}/subscription/sealed", {params: {id}, body: {password: sealPass, link: shown?.fresh ? shown.link.veilway : undefined}});
+			const link = document.createElement("a");
+			link.href = URL.createObjectURL(new Blob([Uint8Array.from(atob(made.file), char => char.charCodeAt(0))], {type: "application/vnd.veilway.sealed-subscription"}));
+			link.download = made.filename;
+			link.click();
+			URL.revokeObjectURL(link.href);
+			setSealPass("");
+			setSealAgain("");
+			setSealTried(false);
+			toast({tone: "success", title: t("sealed.done")});
+		});
+	};
+	const openSealed = () => { setSealPass(""); setSealAgain(""); setSealTried(false); open("sealed"); };
 	const held = (exits ?? user.exits) as Exits, kept = keptExits(held, nodeExits.data), keptDefault = keptFallback(held, fallback === undefined ? user.exit : fallback, nodeExits.data), exitsChanged = JSON.stringify(kept) !== JSON.stringify(user.exits) || keptDefault !== (user.exit ?? null), exitsEdited = exits !== null || fallback !== undefined, exitsProblem = kept.length === 0 ? t("exits.pick") : undefined;
 	const saveExits = async () => {
 		setExitsTried(true);
@@ -124,12 +143,12 @@ export function UserPage({id}: {id: number}) {
 					<Qr svg={shown.link.qr_svg} label={t("link.qr")}/>
 					<Copyable label={t("link.native")} value={shown.link.veilway}/>
 					<Copyable label={t("link.https")} value={shown.link.https}/>
-					<div className="p-form-foot"><Button variant="quiet" onClick={() => setShown(null)}>{t(shown.fresh ? "user.linkDone" : "user.linkHide")}</Button><Button variant="primary" icon="copy" onClick={() => copy(shown.link.veilway)}>{t("user.copyNative")}</Button></div>
+					<div className="p-form-foot"><Button variant="quiet" onClick={() => setShown(null)}>{t(shown.fresh ? "user.linkDone" : "user.linkHide")}</Button><Button icon="download" onClick={openSealed}>{t("sealed.button")}</Button><Button variant="primary" icon="copy" onClick={() => copy(shown.link.veilway)}>{t("user.copyNative")}</Button></div>
 				</Glass> : <Glass className="p-panel">
 					<div className="p-sheet-head"><div><h2 className="vw-h2">{t("user.link")}</h2><p>{t("user.linkLead", {name: user.name})}</p></div></div>
 					<div className="vw-well p-hidden-link">
 						<div className="vw-input-group"><input className="vw-input vw-code" dir="ltr" readOnly value={(sub.endpoint_url || "https://") + "#" + "•".repeat(16)} aria-label={t("user.linkHidden")}/><span className="vw-unit">{t("user.hidden")}</span></div>
-						{sub.can_show ? <div className="p-cluster"><Button variant="primary" icon="eye" onClick={() => void showLink()}>{t("user.showLink")}</Button><span className="vw-small vw-muted">{t("user.showNote")}</span></div> : <p className="vw-small vw-muted">{t("user.noCopy")}</p>}
+						{sub.can_show ? <div className="p-cluster"><Button variant="primary" icon="eye" onClick={() => void showLink()}>{t("user.showLink")}</Button><Button icon="download" onClick={openSealed}>{t("sealed.button")}</Button><span className="vw-small vw-muted">{t("user.showNote")}</span></div> : <p className="vw-small vw-muted">{t("user.noCopy")}</p>}
 						<ErrorNote error={linkError}/>
 					</div>
 					<dl className="p-kv">
@@ -169,6 +188,16 @@ export function UserPage({id}: {id: number}) {
 				if (answer.link) setShown({link: answer.link, once: settings?.show_links_once ?? !sub.can_show, fresh: true});
 				if (answer.link_error) toast({tone: "warning", title: t("link.failed", {error: answer.link_error})});
 			})}>{t("user.resetLinkConfirm")}</Button></div>
+		</Dialog>
+		<Dialog open={dialog === "sealed"} onOpenChange={o => { if (!o) setDialog(null); }} title={t("sealed.title", {name: user.name})} description={t("sealed.lead")}>
+			<form className="p-stack" onSubmit={event => { event.preventDefault(); sealFile(); }}>
+				<Banner tone="warning" title={t("sealed.warn")}>{t("sealed.warnBody")}</Banner>
+				<SecretField label={t("sealed.password")} hint={t("sealed.hint")} value={sealPass} onChange={setSealPass} autoComplete="new-password"/>
+				<SecretField label={t("sealed.passwordAgain")} value={sealAgain} onChange={setSealAgain} autoComplete="new-password" error={sealTried ? sealProblem : undefined}/>
+				<p className="vw-small vw-muted">{t("sealed.audit")}</p>
+				<ErrorNote error={error}/>
+				<div className="vw-dialog-foot"><Button onClick={() => setDialog(null)}>{t("action.cancel")}</Button><Button type="submit" variant="primary" icon="download" disabled={busy}>{t("sealed.download")}</Button></div>
+			</form>
 		</Dialog>
 		<Dialog open={dialog === "device"} onOpenChange={o => { if (!o) setDialog(null); }} title={t("device.addTitle")}>
 			<form className="p-stack" onSubmit={event => { event.preventDefault(); void act(async () => { const answer = await api("post", "/users/{id}/devices", {params: {id}, body: {name: deviceName.trim()}}); setNode(answer.node); }); }}>

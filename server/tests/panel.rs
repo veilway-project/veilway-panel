@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::{net::SocketAddr, path::PathBuf, sync::{atomic::Ordering, Arc, Mutex}};
 use tower::ServiceExt;
 use veilway_panel::{app::{bucket, App, Limiter, Signing}, build, config::{Config, TrustedMirror}, crypto, mirrors, openapi, router, upkeep_once, Upkeep};
-use veilway_proto::subscription::{envelope::{self, Kid}, link::Link, payload::{self, Payload, Reason}, Tag, BODY_MAX};
+use veilway_proto::subscription::{envelope::{self, Kid}, link::Link, payload::{self, Payload, Reason}, sealed_file, Tag, BODY_MAX};
 
 const PASSWORD: &str = "correct horse battery";
 
@@ -177,7 +177,7 @@ async fn api_token_scopes() {
 	assert_eq!(h.bearer(Method::GET, "/p/api/audit", &full, None, src).await.status, StatusCode::OK);
 	// Never reachable by any token: tokens, signing keys, admin accounts, sessions, secrets and settings changes.
 	for token in [&read, &users, &full] {
-		for (method, path, body) in [(Method::POST, "/p/api/tokens", Some(json!({"name": "x", "scope": "full"}))), (Method::GET, "/p/api/tokens", None), (Method::GET, "/p/api/signing-keys", None), (Method::POST, "/p/api/signing-keys/rotate", None), (Method::GET, "/p/api/admins", None), (Method::GET, "/p/api/sessions", None), (Method::POST, "/p/api/users/1/subscription/show", None), (Method::POST, "/p/api/account/password", Some(json!({"new_password": "another long password"})))] {
+		for (method, path, body) in [(Method::POST, "/p/api/tokens", Some(json!({"name": "x", "scope": "full"}))), (Method::GET, "/p/api/tokens", None), (Method::GET, "/p/api/signing-keys", None), (Method::POST, "/p/api/signing-keys/rotate", None), (Method::GET, "/p/api/admins", None), (Method::GET, "/p/api/sessions", None), (Method::POST, "/p/api/users/1/subscription/show", None), (Method::POST, "/p/api/users/1/subscription/sealed", Some(json!({"password": "a long enough one"}))), (Method::POST, "/p/api/account/password", Some(json!({"new_password": "another long password"})))] {
 			assert_eq!(h.bearer(method.clone(), path, token, body, src).await.status, StatusCode::FORBIDDEN, "{method} {path}");
 		}
 	}
@@ -311,6 +311,40 @@ async fn link_reset_show_and_show_once() {
 	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await;
 	assert!(audit.body.windows(10).all(|window| window != b"veilway://"), "no link in the audit log");
 	assert!(std::fs::metadata(&h.app.cfg.keys).map(|meta| std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777 == 0o600).unwrap());
+}
+
+#[tokio::test]
+async fn a_sealed_file_of_the_link_needs_a_recent_reauth_a_password_and_the_current_token_and_logs_no_secret() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (id, old) = h.user(&session, "ann", json!({})).await;
+	let path = format!("/p/api/users/{id}/subscription/sealed");
+	let password = "an unguessable one";
+	let open = |made: &Answer, password: &str| sealed_file::open(password, &STANDARD.decode(made.json()["file"].as_str().unwrap()).unwrap());
+	assert_eq!(h.call(Method::POST, &path, Some(&session), Some(json!({"password": "too short"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	let made = h.call(Method::POST, &path, Some(&session), Some(json!({"password": password})), "10.0.0.1").await;
+	assert_eq!((made.status, made.json()["filename"].clone()), (StatusCode::OK, json!("veilway-ann.vwsealed")));
+	assert_eq!(made.headers.get("cache-control").unwrap(), "no-store");
+	assert_eq!(open(&made, password).unwrap(), old_text(&old), "the file holds the link the panel shows");
+	assert!(open(&made, "another unguessable one").is_err());
+	// A recent re-authentication, as for showing the link.
+	h.app.db.lock().execute("update sessions set reauth_at = 0", []).unwrap();
+	assert_eq!(h.call(Method::POST, &path, Some(&session), Some(json!({"password": password})), "10.0.0.1").await.json()["error"]["code"], "reauth_required");
+	h.app.db.lock().execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap();
+	// With no copy kept, only the user's current link is taken, and the file always has the panel's own endpoint and key.
+	h.configure(&session, json!({"show_links_once": true})).await;
+	assert_eq!(h.call(Method::POST, &path, Some(&session), Some(json!({"password": password})), "10.0.0.1").await.status, StatusCode::GONE);
+	let made = h.call(Method::POST, &path, Some(&session), Some(json!({"password": password, "link": old_text(&old)})), "10.0.0.1").await;
+	assert_eq!(open(&made, password).unwrap(), old_text(&old));
+	assert_eq!(h.call(Method::POST, &path, Some(&session), Some(json!({"password": password, "link": "veilway://sub/other.example/s#v1.0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc.VVVVVVVVVVVVVVVVVVVVVQ"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	let reset = h.call(Method::POST, &format!("/p/api/users/{id}/subscription/reset"), Some(&session), Some(json!({"remove_devices": false})), "10.0.0.1").await.json();
+	assert_eq!(h.call(Method::POST, &path, Some(&session), Some(json!({"password": password, "link": old_text(&old)})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "the old token is not taken");
+	let current = reset["link"]["veilway"].as_str().unwrap().to_owned();
+	assert_eq!(open(&h.call(Method::POST, &path, Some(&session), Some(json!({"password": password, "link": current})), "10.0.0.1").await, password).unwrap(), current);
+	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await;
+	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "link.sealed"));
+	assert!(audit.body.windows(10).all(|window| window != b"veilway://") && audit.body.windows(password.len()).all(|window| window != password.as_bytes()), "no link and no password in the audit log");
 }
 
 fn old_text(link: &Link) -> String {if let Link::Native(native) = link {native.veilway()} else {String::new()}}
