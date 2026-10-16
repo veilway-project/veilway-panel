@@ -903,3 +903,97 @@ async fn restore_memory_at_the_cap() {
 	assert_eq!(done.status, StatusCode::OK, "{}", String::from_utf8_lossy(&done.body));
 	println!("after restore: {}", peak());
 }
+
+#[tokio::test]
+async fn admins_are_listed_added_reset_and_removed_but_never_yourself() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	let code_of = |secret: &str| format!("{:06}", crypto::totp_at(&data_encoding::BASE32_NOPAD.decode(secret.as_bytes()).unwrap(), (crypto::now() / 30) as u64));
+	let made = h.call(Method::POST, "/p/api/admins", Some(&session), Some(json!({"username": "second", "password": "second long password"})), "10.0.0.1").await;
+	assert_eq!(made.status, StatusCode::OK, "{}", String::from_utf8_lossy(&made.body));
+	let secret = made.json()["totp_secret"].as_str().unwrap().to_string();
+	assert_eq!(h.call(Method::POST, "/p/api/admins", Some(&session), Some(json!({"username": "second", "password": "second long password"})), "10.0.0.1").await.status, StatusCode::CONFLICT, "a taken name");
+	let listed = h.call(Method::GET, "/p/api/admins", Some(&session), None, "10.0.0.1").await.json();
+	let (owner, second) = (listed["admins"][0].clone(), listed["admins"][1].clone());
+	assert_eq!((owner["you"].clone(), owner["totp_used"].clone(), owner["last_login"].is_i64(), second["you"].clone(), second["totp_used"].clone(), second["last_login"].clone()), (json!(true), json!(true), true, json!(false), json!(false), Value::Null));
+	let (owner_id, second_id) = (owner["id"].as_i64().unwrap(), second["id"].as_i64().unwrap());
+	let login = h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "second", "password": "second long password", "totp": code_of(&secret)})), "10.0.0.2").await;
+	assert_eq!(login.status, StatusCode::OK);
+	let theirs = Session {cookie: login.headers.get(SET_COOKIE).unwrap().to_str().unwrap().split(';').next().unwrap().to_string(), csrf: login.json()["csrf"].as_str().unwrap().to_string()};
+	assert_eq!(h.call(Method::GET, "/p/api/admins", Some(&session), None, "10.0.0.1").await.json()["admins"][1]["totp_used"], true);
+	assert_eq!(h.call(Method::DELETE, &format!("/p/api/admins/{owner_id}"), Some(&session), None, "10.0.0.1").await.status, StatusCode::CONFLICT, "not yourself");
+	assert_eq!(h.call(Method::DELETE, &format!("/p/api/admins/{second_id}"), Some(&theirs), None, "10.0.0.2").await.status, StatusCode::CONFLICT, "not yourself, as the other admin either");
+	assert_eq!(h.call(Method::POST, &format!("/p/api/admins/{owner_id}/reset"), Some(&session), Some(json!({"new_password": "a third long password"})), "10.0.0.1").await.status, StatusCode::CONFLICT, "your own goes through the account routes");
+	assert_eq!(h.call(Method::POST, &format!("/p/api/admins/{second_id}/reset"), Some(&session), Some(json!({"new_password": "short"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	h.app.db.lock().execute("update sessions set reauth_at = 0", []).unwrap();
+	let stale = h.call(Method::POST, &format!("/p/api/admins/{second_id}/reset"), Some(&session), Some(json!({"new_password": "a third long password"})), "10.0.0.1").await;
+	assert_eq!((stale.status, stale.json()["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("reauth_required")));
+	let token = {
+		h.app.db.lock().execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap();
+		h.token(&session, "full", json!({})).await
+	};
+	assert_eq!(h.bearer(Method::POST, &format!("/p/api/admins/{second_id}/reset"), &token, Some(json!({"new_password": "a third long password"})), "10.0.0.1").await.status, StatusCode::FORBIDDEN, "no API token resets an admin");
+	let reset = h.call(Method::POST, &format!("/p/api/admins/{second_id}/reset"), Some(&session), Some(json!({"new_password": "a third long password"})), "10.0.0.1").await;
+	assert_eq!(reset.status, StatusCode::OK, "{}", String::from_utf8_lossy(&reset.body));
+	let renewed = reset.json()["totp_secret"].as_str().unwrap().to_string();
+	assert!(renewed != secret);
+	assert_eq!(h.call(Method::GET, "/p/api/admins", Some(&theirs), None, "10.0.0.2").await.status, StatusCode::UNAUTHORIZED, "the reset ends their sessions");
+	assert_eq!(h.call(Method::GET, "/p/api/admins", Some(&session), None, "10.0.0.1").await.json()["admins"][1]["totp_used"], false);
+	assert_eq!(h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "second", "password": "second long password", "totp": code_of(&renewed)})), "10.0.0.3").await.status, StatusCode::UNAUTHORIZED, "the old password is gone");
+	assert_eq!(h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "second", "password": "a third long password", "totp": code_of(&renewed)})), "10.0.0.3").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::DELETE, &format!("/p/api/admins/{second_id}"), Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::DELETE, &format!("/p/api/admins/{second_id}"), Some(&session), None, "10.0.0.1").await.status, StatusCode::NOT_FOUND);
+	assert_eq!(h.app.db.lock().query_row("select count(*) from sessions where admin_id = ?", [second_id], |row| row.get::<_, i64>(0)).unwrap(), 0);
+	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await;
+	let entries = audit.json()["entries"].as_array().unwrap().clone();
+	assert!(entries.iter().any(|entry| entry["action"] == "admin.reset" && entry["target"] == "admin:second" && entry["detail"].as_str().unwrap().contains("1 sessions ended")));
+	assert!(entries.iter().any(|entry| entry["action"] == "admin.remove" && entry["target"] == "admin:second"));
+	assert!(!String::from_utf8_lossy(&audit.body).contains(&renewed) && !String::from_utf8_lossy(&audit.body).contains("a third long password"));
+}
+
+#[tokio::test]
+async fn an_xray_inbound_is_edited_and_every_user_keeps_their_credential() {
+	let mut document = node_document("10.66.0.1/24");
+	document["public_addresses"] = json!(["vpn.example.org"]);
+	let (fake, socket) = Fake::start(document).await;
+	*fake.status.lock().unwrap() = json!({"version": "0.0.0", "addons": {"xray": {"installed": true, "release": "v26.3.27"}}});
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (ann, _) = h.user(&session, "ann", json!({})).await;
+	assert_eq!(h.call(Method::POST, &format!("/p/api/users/{ann}/devices"), Some(&session), Some(json!({"name": "phone"})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(json!({"tag": "vless1", "protocol": "vless", "port": 8444, "listen": "192.0.2.5", "cert": "/etc/veilway/cert.pem", "key": "/etc/veilway/key.pem", "decoy": "http://127.0.0.1:8080"})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(json!({"tag": "ss", "protocol": "shadowsocks", "port": 8388})), "10.0.0.1").await.status, StatusCode::OK);
+	let applied = fake.applied.lock().unwrap().last().unwrap().clone();
+	let (uuid, password, server) = (applied["xray"]["inbounds"][0]["clients"][0]["secret"].clone(), applied["xray"]["inbounds"][1]["clients"][0]["secret"].clone(), applied["xray"]["inbounds"][1]["server_key"].clone());
+	assert_eq!(applied["xray"]["inbounds"][0]["listen"], "192.0.2.5:8444", "create takes a listen address");
+	let path = |tag: &str| format!("/p/api/xray/inbounds/{tag}");
+	for (body, why) in [(json!({"port": 0, "cert": "/a", "key": "/b"}), "port 0"), (json!({"port": 9443, "listen": "not an address", "cert": "/a", "key": "/b"}), "a listen that is no address"), (json!({"port": 9443}), "vless without certificate files"), (json!({"port": 9443, "cert": "/a", "key": "/b", "decoy": "https://x"}), "a decoy that is not http"), (json!({"port": 9443, "cert": "/a", "key": "/b", "new_server_key": true}), "vless has no server key"), (json!({"port": 9443, "cert": "/a", "key": "/b", "host": "bad host!"}), "a host with a space")] {
+		assert_eq!(h.call(Method::PATCH, &path("vless1"), Some(&session), Some(body), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "{why}");
+	}
+	assert_eq!(h.call(Method::PATCH, &path("ss"), Some(&session), Some(json!({"port": 8389, "cert": "/a", "key": "/b"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "shadowsocks takes no certificate");
+	assert_eq!(h.call(Method::PATCH, &path("nope"), Some(&session), Some(json!({"port": 8389})), "10.0.0.1").await.status, StatusCode::NOT_FOUND);
+	let edited = h.call(Method::PATCH, &path("vless1"), Some(&session), Some(json!({"port": 9443, "listen": "::", "cert": "/etc/veilway/new.pem", "key": "/etc/veilway/new.key", "host": "edge.example.org"})), "10.0.0.1").await;
+	assert_eq!(edited.status, StatusCode::OK, "{}", String::from_utf8_lossy(&edited.body));
+	let applied = fake.applied.lock().unwrap().last().unwrap().clone();
+	let vless = &applied["xray"]["inbounds"][0];
+	assert_eq!((vless["listen"].clone(), vless["tls"]["cert"].clone(), vless["decoy"].clone(), vless["clients"][0]["secret"].clone()), (json!("[::]:9443"), json!("/etc/veilway/new.pem"), json!("http://127.0.0.1:8080"), uuid.clone()), "the decoy stays when left out, and ann keeps her uuid");
+	let view = h.call(Method::GET, "/p/api/xray", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((view["inbounds"][0]["port"].clone(), view["inbounds"][0]["own_host"].clone(), view["inbounds"][0]["decoy"].clone(), view["inbounds"][1]["own_host"].clone()), (json!(9443), json!("edge.example.org"), json!("http://127.0.0.1:8080"), json!("")));
+	let links = h.call(Method::GET, &format!("/p/api/users/{ann}/xray"), Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(links["links"][1]["link"], json!(format!("vless://{}@edge.example.org:9443?encryption=none&security=tls&sni=edge.example.org&type=tcp#Test%20Net%20vless1", uuid.as_str().unwrap())));
+	assert_eq!(h.call(Method::PATCH, &path("ss"), Some(&session), Some(json!({"port": 8390})), "10.0.0.1").await.status, StatusCode::OK);
+	let applied = fake.applied.lock().unwrap().last().unwrap().clone();
+	assert_eq!((applied["xray"]["inbounds"][1]["listen"].clone(), applied["xray"]["inbounds"][1]["server_key"].clone(), applied["xray"]["inbounds"][1]["clients"][0]["secret"].clone()), (json!("0.0.0.0:8390"), server.clone(), password.clone()), "the server key stays unless asked");
+	assert_eq!(h.call(Method::PATCH, &path("ss"), Some(&session), Some(json!({"port": 8390, "new_server_key": true})), "10.0.0.1").await.status, StatusCode::OK);
+	let applied = fake.applied.lock().unwrap().last().unwrap().clone();
+	let renewed = applied["xray"]["inbounds"][1]["server_key"].clone();
+	assert!(renewed != server && renewed.as_str().unwrap().len() == 44 && applied["xray"]["inbounds"][1]["clients"][0]["secret"] == password, "a new server key, the same user key");
+	*fake.document.lock().unwrap() = {let mut document = applied.clone(); document["invalid"] = json!(true); document};
+	assert_eq!(h.call(Method::PATCH, &path("vless1"), Some(&session), Some(json!({"port": 9444, "cert": "/a", "key": "/b", "host": "other.example.org"})), "10.0.0.1").await.status, StatusCode::UNPROCESSABLE_ENTITY, "the node refuses");
+	assert_eq!(h.call(Method::GET, "/p/api/xray", Some(&session), None, "10.0.0.1").await.json()["inbounds"][0]["own_host"], "edge.example.org", "a refused edit leaves the host as it was");
+	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await;
+	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "xray.edit" && entry["target"] == "vless1" && entry["detail"] == "listen 192.0.2.5:8444 to [::]:9443"));
+	assert!(audit.json()["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "xray.edit" && entry["target"] == "ss" && entry["detail"].as_str().unwrap().ends_with("new server key")));
+	assert!(!String::from_utf8_lossy(&audit.body).contains(renewed.as_str().unwrap()) && !String::from_utf8_lossy(&audit.body).contains(uuid.as_str().unwrap()));
+}

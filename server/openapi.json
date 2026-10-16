@@ -11,14 +11,32 @@
             "format": "int64",
             "type": "integer"
           },
+          "last_login": {
+            "description": "The last login, from the audit log. None when the log holds none.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "totp_used": {
+            "description": "Whether a code from the current TOTP secret has been used, which says the admin set up their authenticator. False after a reset until the next login.",
+            "type": "boolean"
+          },
           "username": {
             "type": "string"
+          },
+          "you": {
+            "description": "The admin who asks.",
+            "type": "boolean"
           }
         },
         "required": [
           "id",
           "username",
-          "created"
+          "created",
+          "totp_used",
+          "you"
         ],
         "type": "object"
       },
@@ -498,6 +516,60 @@
           "tag",
           "kind",
           "public_key"
+        ],
+        "type": "object"
+      },
+      "InboundEdit": {
+        "additionalProperties": false,
+        "properties": {
+          "cert": {
+            "description": "As on create: needed for vless and trojan, refused for shadowsocks.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decoy": {
+            "description": "For vless and trojan. The inbound's own decoy stays when left out.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host": {
+            "description": "The host the links name. Empty or left out for the node's first public address.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "listen": {
+            "description": "The address Xray listens on. 0.0.0.0 when left out.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "new_server_key": {
+            "default": false,
+            "description": "For shadowsocks: a new server key. Every share link of the inbound holds the old one, so every user needs a new link.",
+            "type": "boolean"
+          },
+          "port": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "port"
         ],
         "type": "object"
       },
@@ -1842,6 +1914,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "decoy": {
+            "description": "The origin of the web server a stranger is handed to, for vless and trojan.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "host": {
             "description": "The host the links name.",
             "type": "string"
@@ -1858,6 +1937,10 @@
           "managed": {
             "description": "Whether the panel made this inbound and holds its credentials, which links need.",
             "type": "boolean"
+          },
+          "own_host": {
+            "description": "The host the panel was given for this inbound, empty when links name the node's address.",
+            "type": "string"
           },
           "port": {
             "format": "uint16",
@@ -1885,6 +1968,7 @@
           "security",
           "clients",
           "host",
+          "own_host",
           "managed",
           "certificate_missing"
         ],
@@ -2297,6 +2381,85 @@
           }
         },
         "summary": "Removes another admin.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/admins/{id}/reset": {
+      "post": {
+        "operationId": "resetAdmin",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewPassword"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TotpEnrolled"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Gives another admin a new password and a new TOTP secret, shown once, and ends their sessions. Audited. No API token can do this.",
         "x-access": "session-reauth"
       }
     },
@@ -6590,6 +6753,83 @@
           }
         },
         "summary": "Removes an Xray inbound from the node's config, and its credentials.",
+        "x-access": "full"
+      },
+      "patch": {
+        "operationId": "editXrayInbound",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tag",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InboundEdit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Changes an Xray inbound the panel made: port, listen address, certificate files, decoy, host, and for shadowsocks a new server key. Every user keeps their credential. Share links change when the port, the host or the server key do. Validated like createXrayInbound, applied on the node and audited.",
         "x-access": "full"
       }
     }

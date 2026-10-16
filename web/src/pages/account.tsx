@@ -1,12 +1,13 @@
 import {Button, DataTable, Glass, List, ListRow, Segmented, StateBlock, Tabs, TextField, useToast} from "@veilway/ui";
 import {useState} from "react";
 import {api, type AuditRow, type Totp} from "../api.ts";
+import {AdminsTab} from "./admins.tsx";
 import {BackupTab} from "./backup.tsx";
 import {ErrorNote, PageHead, TotpShown, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 
 export type Prefs = {locale: "en" | "fa", scheme: "system" | "dark" | "light"};
 
-const TABS = ["sessions", "security", "audit", "backup", "display"];
+const TABS = ["sessions", "security", "admins", "audit", "backup", "display"];
 
 export function AccountPage({tab, username, prefs, onPrefs, onLogout}: {tab: string, username: string, prefs: Prefs, onPrefs: (prefs: Prefs) => void, onLogout: () => void}) {
 	const {t} = useP();
@@ -15,6 +16,7 @@ export function AccountPage({tab, username, prefs, onPrefs, onLogout}: {tab: str
 		<Tabs label={t("account.title")} value={TABS.includes(tab) ? tab : "sessions"} onChange={id => { location.hash = "#/account/" + id; }} items={[
 			{id: "sessions", label: t("account.tab.sessions"), content: <Sessions/>},
 			{id: "security", label: t("account.tab.security"), content: <Security/>},
+			{id: "admins", label: t("account.tab.admins"), content: <AdminsTab/>},
 			{id: "audit", label: t("account.tab.audit"), content: <Audit/>},
 			{id: "backup", label: t("account.tab.backup"), content: <BackupTab/>},
 			{id: "display", label: t("account.tab.display"), content: <Glass className="p-panel p-form">

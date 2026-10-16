@@ -274,24 +274,47 @@ pub async fn create_admin(State(app): State<Arc<App>>, Extension(ctx): Extension
 }
 
 #[derive(Serialize, JsonSchema)]
-pub struct AdminRowOut {pub id: i64, pub username: String, pub created: i64}
+pub struct AdminRowOut {pub id: i64, pub username: String, pub created: i64,
+	/// The last login, from the audit log. None when the log holds none.
+	pub last_login: Option<i64>,
+	/// Whether a code from the current TOTP secret has been used, which says the admin set up their authenticator. False after a reset until the next login.
+	pub totp_used: bool,
+	/// The admin who asks.
+	pub you: bool}
 
 #[derive(Serialize, JsonSchema)]
 pub struct AdminsOut {pub admins: Vec<AdminRowOut>}
 
-pub async fn admins(State(app): State<Arc<App>>) -> Result<Response, Failure> {
+pub async fn admins(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {
 	let db = app.db.lock();
-	let mut statement = db.prepare("select id, username, created from admins order by id")?;
-	let admins = statement.query_map([], |row| Ok(AdminRowOut {id: row.get(0)?, username: row.get(1)?, created: row.get(2)?}))?.collect::<Result<_, _>>()?;
+	let mut statement = db.prepare("select a.id, a.username, a.created, (select max(at) from audit where action = 'login' and actor = 'admin:' || a.username), a.totp_last_step > 0 from admins a order by a.id")?;
+	let admins = statement.query_map([], |row| Ok(AdminRowOut {id: row.get(0)?, username: row.get(1)?, created: row.get(2)?, last_login: row.get(3)?, totp_used: row.get(4)?, you: row.get::<_, i64>(0)? == ctx.admin_id}))?.collect::<Result<_, _>>()?;
 	ok(&AdminsOut {admins})
 }
 
+/// Another admin's account. Yourself and the last admin are never removed, so the panel always keeps one admin who can sign in. Their sessions and API tokens go with the account.
 pub async fn remove_admin(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
 	if id == ctx.admin_id {return Err(Failure::conflict("An admin cannot remove themselves."))}
 	let db = app.db.lock();
-	if db.execute("delete from admins where id = ?", [id])? == 0 {return Err(Failure::missing("admin"))}
-	audit(&db, &ctx.actor, &ctx.source, "admin.remove", &format!("admin:{id}"), "");
+	let name: String = db.query_row("select username from admins where id = ?", [id], |row| row.get(0)).optional()?.ok_or_else(|| Failure::missing("admin"))?;
+	if db.query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0))? <= 1 {return Err(Failure::conflict("The last admin cannot be removed."))}
+	db.execute("delete from admins where id = ?", [id])?;
+	audit(&db, &ctx.actor, &ctx.source, "admin.remove", &format!("admin:{name}"), "");
 	ok(&Done {ok: true})
+}
+
+/// Gives another admin a new password and a new TOTP secret, shown once, and ends every session of theirs. For an admin who lost their authenticator or whose account is in doubt; an admin changes their own through the account routes.
+pub async fn reset_admin(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>, Body(input): Body<NewPassword>) -> Result<Response, Failure> {
+	if id == ctx.admin_id {return Err(Failure::conflict("Change your own password and code on the account page."))}
+	password_ok(&input.new_password)?;
+	let name: String = app.db.lock().query_row("select username from admins where id = ?", [id], |row| row.get(0)).optional()?.ok_or_else(|| Failure::missing("admin"))?;
+	let hash = hash_password(input.new_password.clone()).await?;
+	let (sealed, record, shown) = new_totp(&app, &name)?;
+	let db = app.db.lock();
+	if db.execute("update admins set password_hash = ?, totp_secret = ?, totp_record = ?, totp_last_step = 0 where id = ?", params![hash, sealed, record, id])? == 0 {return Err(Failure::missing("admin"))}
+	let ended = db.execute("delete from sessions where admin_id = ?", [id])?;
+	audit(&db, &ctx.actor, &ctx.source, "admin.reset", &format!("admin:{name}"), &format!("password and code replaced, {ended} sessions ended"));
+	ok(&shown)
 }
 
 #[derive(Deserialize, JsonSchema)]
