@@ -87,13 +87,15 @@ pub async fn offer(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	let mtu = input.mtu.unwrap_or(if found["transports"].as_array().into_iter().flatten().any(|transport| transport["type"] == "udp-obfs") {1390} else {1420});
 	let terms = Terms {direction, name: input.name, inbound_public_key: key32(&input.inbound_public_key, "inbound_public_key")?, transport_public_key: input.transport_public_key.as_deref().map(|key| key32(key, "transport_public_key")).transpose()?, dialler: input.dialler, listener: input.listener, mtu, transports};
 	let (at, lifetime) = (now() as u64, input.lifetime.unwrap_or(LIFETIME));
-	let mut pairing = app.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-	if pairing.meta.len() >= PENDING_MAX {return Err(Failure::conflict("Too many pairings are open. Wait for them to expire or drop them."))}
-	let code = pairing.offers.issue(&terms, at, lifetime, &mut random).map_err(code_error)?;
-	let parsed = Offer::parse(&code).map_err(code_error)?;
-	pairing.meta.insert(id_text(&parsed.id), Meta {tag: input.tag.clone(), inbound: Some(input.inbound), listener: true});
-	drop(pairing);
-	crate::db::audit(&app.db.lock(), &ctx.actor, &ctx.source, "link.offer", &input.tag, "");
+	let (code, parsed) = {
+		let mut pairing = app.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		if pairing.meta.len() >= PENDING_MAX {return Err(Failure::conflict("Too many pairings are open. Wait for them to expire or drop them."))}
+		let code = pairing.offers.issue(&terms, at, lifetime, &mut random).map_err(code_error)?;
+		let parsed = Offer::parse(&code).map_err(code_error)?;
+		pairing.meta.insert(id_text(&parsed.id), Meta {tag: input.tag.clone(), inbound: Some(input.inbound), listener: true});
+		(code, parsed)
+	};
+	app.db.audit(&ctx.actor, &ctx.source, "link.offer", &input.tag, "").await;
 	ok(&json!({"id": id_text(&parsed.id), "code": code, "expires_at": parsed.expires_at}))
 }
 
@@ -115,12 +117,14 @@ pub struct CodeIn {pub code: String}
 
 /// Step 3: the other node's answer to an open offer. The answer is spent whatever follows. The fingerprint to read to the other operator is in the answer; it is not the one to type.
 pub async fn take_answer(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<CodeIn>) -> Result<Response, Failure> {
-	let mut pairing = app.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-	let agreed = pairing.offers.answer(input.code.trim(), now() as u64).map_err(|error| if matches!(error, pairing::CodeError::Spent) {Failure::conflict("This answer is for no open offer: it expired, or belongs to another one.")} else {code_error(error)})?;
-	let (id, shown) = (id_text(&agreed.offer().id), agreed.shown());
-	pairing.pending.insert(id.clone(), (agreed, 0));
-	drop(pairing);
-	crate::db::audit(&app.db.lock(), &ctx.actor, &ctx.source, "link.answer", &id, "");
+	let (id, shown) = {
+		let mut pairing = app.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		let agreed = pairing.offers.answer(input.code.trim(), now() as u64).map_err(|error| if matches!(error, pairing::CodeError::Spent) {Failure::conflict("This answer is for no open offer: it expired, or belongs to another one.")} else {code_error(error)})?;
+		let (id, shown) = (id_text(&agreed.offer().id), agreed.shown());
+		pairing.pending.insert(id.clone(), (agreed, 0));
+		(id, shown)
+	};
+	app.db.audit(&ctx.actor, &ctx.source, "link.answer", &id, "").await;
 	ok(&json!({"id": id, "fingerprint": shown}))
 }
 
@@ -155,14 +159,16 @@ pub async fn paste_answer(State(app): State<Arc<App>>, Extension(ctx): Extension
 	let (_, _, document) = nodecfg::running(&app).await?;
 	if overlaps(&offer, &document) {return Err(Failure::conflict("An address of this link lies inside an inbound pool of this node. The other operator has to take the link's addresses from a pool this node does not use."))}
 	if input.tag.is_empty() || input.tag.len() > 64 || document["links"].as_array().into_iter().flatten().any(|link| link["tag"] == input.tag.as_str()) {return Err(Failure::conflict("The link tag is empty, too long, or already in the config."))}
-	let mut pairing = app.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-	if pairing.meta.len() >= PENDING_MAX {return Err(Failure::conflict("Too many pairings are open. Wait for them to expire or drop them."))}
-	let (code, agreed) = pairing.pastes.answer(&offer, now() as u64, &mut random).map_err(code_error)?;
-	let (id, shown) = (id_text(&offer.id), agreed.shown());
-	pairing.meta.insert(id.clone(), Meta {tag: input.tag.clone(), inbound: None, listener: false});
-	pairing.pending.insert(id.clone(), (agreed, 0));
-	drop(pairing);
-	crate::db::audit(&app.db.lock(), &ctx.actor, &ctx.source, "link.paste", &input.tag, "");
+	let (code, id, shown) = {
+		let mut pairing = app.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		if pairing.meta.len() >= PENDING_MAX {return Err(Failure::conflict("Too many pairings are open. Wait for them to expire or drop them."))}
+		let (code, agreed) = pairing.pastes.answer(&offer, now() as u64, &mut random).map_err(code_error)?;
+		let (id, shown) = (id_text(&offer.id), agreed.shown());
+		pairing.meta.insert(id.clone(), Meta {tag: input.tag.clone(), inbound: None, listener: false});
+		pairing.pending.insert(id.clone(), (agreed, 0));
+		(code, id, shown)
+	};
+	app.db.audit(&ctx.actor, &ctx.source, "link.paste", &input.tag, "").await;
 	ok(&json!({"id": id, "answer": code, "fingerprint": shown}))
 }
 
@@ -189,8 +195,8 @@ pub async fn confirm(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 			return Err(Failure::new(StatusCode::GONE, "expired", "The offer expired, so the pairing is discarded. Start again with a new offer."));
 		}
 		Err(Unconfirmed::Mismatch(kept)) => {
+			app.db.audit(&ctx.actor, &ctx.source, "link.mismatch", &meta.tag, &format!("try {}", tries + 1)).await;
 			let mut pairing = app.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-			crate::db::audit(&app.db.lock(), &ctx.actor, &ctx.source, "link.mismatch", &meta.tag, &format!("try {}", tries + 1));
 			if tries + 1 >= TRIES {pairing.meta.remove(&id);} else {pairing.pending.insert(id, (*kept, tries + 1));}
 			return Err(Failure::new(StatusCode::FORBIDDEN, "fingerprint_mismatch", "These are not the groups this pairing has for the other side. If they were read and typed right, somebody changed a code on its way: stop and pair again over another channel."));
 		}
@@ -214,15 +220,16 @@ pub async fn confirm(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 	let links = document.as_object_mut().map(|document| document.entry("links").or_insert_with(|| json!([])));
 	if let Some(Value::Array(links)) = links {links.push(entry)}
 	let applied = nodecfg::apply(&app, &ctx, document, &input.revision, &meta.tag).await?;
-	crate::db::audit(&app.db.lock(), &ctx.actor, &ctx.source, "link.paired", &meta.tag, "");
+	app.db.audit(&ctx.actor, &ctx.source, "link.paired", &meta.tag, "").await;
 	ok(&json!({"tag": meta.tag, "applied": applied}))
 }
 
 pub async fn drop_pairing(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<String>) -> Result<Response, Failure> {
-	let mut pairing = app.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-	if pairing.meta.remove(&id).is_none() && pairing.pending.remove(&id).is_none() {return Err(Failure::missing("pairing"))}
-	pairing.pending.remove(&id);
-	drop(pairing);
-	crate::db::audit(&app.db.lock(), &ctx.actor, &ctx.source, "link.drop", &id, "");
+	{
+		let mut pairing = app.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		if pairing.meta.remove(&id).is_none() && pairing.pending.remove(&id).is_none() {return Err(Failure::missing("pairing"))}
+		pairing.pending.remove(&id);
+	}
+	app.db.audit(&ctx.actor, &ctx.source, "link.drop", &id, "").await;
 	ok(&crate::admin::Done {ok: true})
 }

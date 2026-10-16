@@ -160,8 +160,8 @@ pub struct App {
 }
 
 impl App {
-	pub fn settings(&self) -> Settings {self.db.lock().query_row("select value from settings where key = 'settings'", [], |row| row.get::<_, String>(0)).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()}
-	pub fn save_settings(&self, settings: &Settings) {let _ = self.db.lock().execute("insert into settings (key, value) values ('settings', ?) on conflict (key) do update set value = excluded.value", [serde_json::to_string(settings).unwrap_or_default()]);}
+	pub async fn settings(&self) -> Settings {self.db.call(|db| db.query_row("select value from settings where key = 'settings'", [], |row| row.get::<_, String>(0)).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()).await}
+	pub async fn save_settings(&self, settings: &Settings) {let text = serde_json::to_string(settings).unwrap_or_default(); self.db.call(move |db| {let _ = db.execute("insert into settings (key, value) values ('settings', ?) on conflict (key) do update set value = excluded.value", [text]);}).await}
 	/// The one answer for everything the panel does not serve: what the operator's web server says for a path it does not know.
 	pub fn not_found(&self) -> Response {
 		let page = self.not_found_page.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone().unwrap_or_else(|| self.cfg.not_found.clone());

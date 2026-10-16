@@ -30,9 +30,9 @@ async fn addon(app: &App) -> (bool, Option<String>) {
 }
 
 /// The address links name: the inbound's own, else the node's first public address, else the panel's node host.
-fn host_of(app: &App, document: &Value, own: &str) -> String {
+async fn host_of(app: &App, document: &Value, own: &str) -> String {
 	if !own.is_empty() {return own.to_string()}
-	document["public_addresses"].get(0).and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| app.settings().node_host)
+	match document["public_addresses"].get(0).and_then(Value::as_str) {Some(host) => host.to_string(), None => app.settings().await.node_host}
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -62,16 +62,16 @@ pub struct XrayOut {pub installed: bool, pub release: Option<String>, pub inboun
 
 pub async fn get(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let ((installed, release), (_, _, document)) = (addon(&app).await, nodecfg::running(&app).await?);
-	let made: Vec<(String, String)> = {
-		let db = app.db.lock();
+	let made = app.db.call(|db| -> rusqlite::Result<Vec<(String, String)>> {
 		let mut statement = db.prepare("select tag, host from xray_inbounds")?;
-		let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?;
+		let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect();
 		rows
-	};
+	}).await?;
+	let node_host = host_of(&app, &document, "").await;
 	let inbounds = document["xray"]["inbounds"].as_array().into_iter().flatten().map(|inbound| {
 		let (tag, listen) = (inbound["tag"].as_str().unwrap_or_default().to_string(), inbound["listen"].as_str().unwrap_or_default().to_string());
 		let own = made.iter().find(|(made, _)| *made == tag);
-		XrayInboundOut {protocol: inbound["protocol"].as_str().unwrap_or_default().to_string(), port: listen.rsplit_once(':').and_then(|(_, port)| port.parse().ok()).unwrap_or(0), security: if inbound.get("tls").is_some() {"tls"} else {"none"}.into(), clients: inbound["clients"].as_array().map_or(0, Vec::len), host: host_of(&app, &document, own.map_or("", |(_, host)| host.as_str())), own_host: own.map_or(String::new(), |(_, host)| host.clone()), managed: own.is_some(), certificate_missing: inbound["protocol"] != "shadowsocks" && inbound.get("tls").is_none(), cert: inbound["tls"]["cert"].as_str().map(str::to_string), key: inbound["tls"]["key"].as_str().map(str::to_string), decoy: inbound["decoy"].as_str().map(str::to_string), tag, listen}
+		XrayInboundOut {protocol: inbound["protocol"].as_str().unwrap_or_default().to_string(), port: listen.rsplit_once(':').and_then(|(_, port)| port.parse().ok()).unwrap_or(0), security: if inbound.get("tls").is_some() {"tls"} else {"none"}.into(), clients: inbound["clients"].as_array().map_or(0, Vec::len), host: own.map(|(_, host)| host.clone()).filter(|host| !host.is_empty()).unwrap_or_else(|| node_host.clone()), own_host: own.map_or(String::new(), |(_, host)| host.clone()), managed: own.is_some(), certificate_missing: inbound["protocol"] != "shadowsocks" && inbound.get("tls").is_none(), cert: inbound["tls"]["cert"].as_str().map(str::to_string), key: inbound["tls"]["key"].as_str().map(str::to_string), decoy: inbound["decoy"].as_str().map(str::to_string), tag, listen}
 	}).collect();
 	ok(&XrayOut {installed, release, inbounds})
 }
@@ -143,20 +143,23 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	}
 	inbounds.push(inbound);
 	document["xray"] = json!({"inbounds": inbounds});
-	{
-		let db = app.db.lock();
-		db.execute("delete from xray_inbounds where tag = ?", [&input.tag])?;
-		db.execute("insert into xray_inbounds (tag, protocol, host, created, server_key) values (?, ?, ?, ?, ?)", params![input.tag, input.protocol, host, now(), server_key.as_ref().and_then(|key| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&input.tag), key.as_bytes())))])?;
-	}
+	let sealed = server_key.as_ref().and_then(|key| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&input.tag), key.as_bytes())));
+	let (tag, protocol) = (input.tag.clone(), input.protocol.clone());
+	app.db.call(move |db| -> rusqlite::Result<()> {
+		db.execute("delete from xray_inbounds where tag = ?", [&tag])?;
+		db.execute("insert into xray_inbounds (tag, protocol, host, created, server_key) values (?, ?, ?, ?, ?)", params![tag, protocol, host, now(), sealed])?;
+		Ok(())
+	}).await?;
 	if let Err(error) = nodecfg::apply(&app, &ctx, document, &revision, &format!("xray:{}", input.tag)).await {
-		app.db.lock().execute("delete from xray_inbounds where tag = ?", [&input.tag])?;
+		let tag = input.tag.clone();
+		app.db.call(move |db| db.execute("delete from xray_inbounds where tag = ?", [&tag])).await?;
 		return Err(error)
 	}
 	// The profiles share this address with the inbound, so none of them may claim more than Detectable. Publishing the profiles again derives the same cap, and removing the last inbound lifts it there.
-	let mut settings = app.settings();
+	let mut settings = app.settings().await;
 	for profile in settings.profiles.iter_mut().filter(|profile| profile["type"] == "veilway" && profile["rating_cap"] != "unsafe") {profile["rating_cap"] = json!("detectable");}
-	app.save_settings(&settings);
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "xray.create", &input.tag, &format!("{} on port {}, profiles capped at detectable", input.protocol, input.port));
+	app.save_settings(&settings).await;
+	app.db.audit(&ctx.actor, &ctx.source, "xray.create", &input.tag, &format!("{} on port {}, profiles capped at detectable", input.protocol, input.port)).await;
 	ok(&Done {ok: true})
 }
 
@@ -178,11 +181,12 @@ pub struct InboundEdit {
 
 /// Changes where an inbound the panel made listens, its certificate files, its decoy, its host and, for Shadowsocks, its server key. Every user keeps their credential, which `node::fill` puts back in from the panel's database. Share links change when the port, the host or the server key do.
 pub async fn edit(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(tag): Path<String>, Body(input): Body<InboundEdit>) -> Result<Response, Failure> {
-	let (protocol, old_host): (String, String) = app.db.lock().query_row("select protocol, host from xray_inbounds where tag = ?", [&tag], |row| Ok((row.get(0)?, row.get(1)?))).optional()?.ok_or_else(|| Failure::missing("Xray inbound the panel made"))?;
+	let lookup = tag.clone();
+	let (protocol, old_host) = app.db.call(move |db| -> rusqlite::Result<Option<(String, String)>> {db.query_row("select protocol, host from xray_inbounds where tag = ?", [&lookup], |row| Ok((row.get(0)?, row.get(1)?))).optional()}).await?.ok_or_else(|| Failure::missing("Xray inbound the panel made"))?;
 	let (listen, tls, host) = checked(&protocol, input.port, input.listen.as_deref(), &input.cert, &input.key, input.host)?;
 	if input.new_server_key && protocol != "shadowsocks" {return Err(Failure::bad("Only a shadowsocks inbound has a server key."))}
 	if input.new_server_key && app.keys.is_none() {return Err(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))}
-	if input.new_server_key {reauthed(&app, &ctx)?}
+	if input.new_server_key {reauthed(&app, &ctx).await?}
 	let _turn = app.node_lock.lock().await;
 	let (revision, _, mut document) = nodecfg::running(&app).await?;
 	let mut inbounds = document["xray"]["inbounds"].as_array().cloned().unwrap_or_default();
@@ -208,12 +212,15 @@ pub async fn edit(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, P
 	document["xray"]["inbounds"] = Value::Array(inbounds);
 	let sealed = new_key.as_ref().and_then(|key| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&tag), key.as_bytes())));
 	nodecfg::apply(&app, &ctx, document, &revision, &format!("xray:{tag}")).await?;
-	{
-		let db = app.db.lock();
-		db.execute("update xray_inbounds set host = ? where tag = ?", params![host, tag])?;
-		if let Some(sealed) = &sealed {db.execute("update xray_inbounds set server_key = ? where tag = ?", params![sealed, tag])?;}
-	}
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "xray.edit", &tag, &changed.join(", "));
+	app.db.call({
+		let tag = tag.clone();
+		move |db| -> rusqlite::Result<()> {
+			db.execute("update xray_inbounds set host = ? where tag = ?", params![host, tag])?;
+			if let Some(sealed) = &sealed {db.execute("update xray_inbounds set server_key = ? where tag = ?", params![sealed, tag])?;}
+			Ok(())
+		}
+	}).await?;
+	app.db.audit(&ctx.actor, &ctx.source, "xray.edit", &tag, &changed.join(", ")).await;
 	ok(&Done {ok: true})
 }
 
@@ -229,9 +236,9 @@ pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 		if inbounds.is_empty() {document.as_object_mut().map(|document| document.remove("xray"));} else {document["xray"]["inbounds"] = Value::Array(inbounds);}
 		nodecfg::apply(&app, &ctx, document, &revision, &format!("xray:{tag}")).await?;
 	}
-	let db = app.db.lock();
-	if db.execute("delete from xray_inbounds where tag = ?", [&tag])? == 0 && !found {return Err(Failure::missing("Xray inbound"))}
-	audit(&db, &ctx.actor, &ctx.source, "xray.delete", &tag, "");
+	let lookup = tag.clone();
+	if app.db.call(move |db| db.execute("delete from xray_inbounds where tag = ?", [&lookup])).await? == 0 && !found {return Err(Failure::missing("Xray inbound"))}
+	app.db.audit(&ctx.actor, &ctx.source, "xray.delete", &tag, "").await;
 	ok(&Done {ok: true})
 }
 
@@ -250,20 +257,19 @@ pub struct XrayLinks {pub links: Vec<XrayLink>}
 /// The user's share link for each Xray inbound the panel made. A user with no device is not on the node, so they have none.
 pub async fn links(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
-	let (user, held) = {
-		let db = app.db.lock();
-		let user = UserRow::load(&db, id)?;
+	let (user, held) = app.db.call(move |db| -> rusqlite::Result<_> {
+		let user = UserRow::load(db, id)?;
 		let mut statement = db.prepare("select i.tag, i.protocol, i.host, c.secret, i.server_key from xray_clients c join xray_inbounds i on i.tag = c.tag where c.user_id = ? order by i.tag")?;
 		let held: Vec<(String, String, String, Vec<u8>, Option<Vec<u8>>)> = statement.query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?.collect::<Result<_, _>>()?;
-		(user, held)
-	};
+		Ok((user, held))
+	}).await?;
 	let (_, _, document) = nodecfg::running(&app).await?;
-	let provider = app.settings().provider_name;
+	let provider = app.settings().await.provider_name;
 	let mut links = Vec::new();
 	for (tag, protocol, own, sealed, server) in held {
 		let Some(port) = document["xray"]["inbounds"].as_array().into_iter().flatten().find(|inbound| inbound["tag"] == tag.as_str()).and_then(|inbound| inbound["listen"].as_str()?.rsplit_once(':').map(|(_, port)| port.to_string())) else {continue};
 		let secret = keys.open_secret(&user.record_id, &format!("xray:{tag}"), &sealed).and_then(|plain| String::from_utf8(plain).ok()).ok_or_else(|| Failure::internal("an Xray secret does not open"))?;
-		let host = host_of(&app, &document, &own);
+		let host = host_of(&app, &document, &own).await;
 		if host.is_empty() {return Err(Failure::conflict("No host to put in links: set the node's public_addresses, the panel's node host or the inbound's host."))}
 		let address = if host.contains(':') {format!("[{host}]:{port}")} else {format!("{host}:{port}")};
 		let escape = |text: &str| -> String {text.bytes().map(|byte| if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {(byte as char).to_string()} else {format!("%{byte:02X}")}).collect()};
@@ -280,7 +286,7 @@ pub async fn links(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 		let qr_svg = qrcode::QrCode::new(link.as_bytes()).map_err(Failure::internal)?.render::<qrcode::render::svg::Color>().min_dimensions(240, 240).build();
 		links.push(XrayLink {tag, protocol, link, qr_svg});
 	}
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "xray.links.show", &format!("user:{id}"), "");
+	app.db.audit(&ctx.actor, &ctx.source, "xray.links.show", &format!("user:{id}"), "").await;
 	ok(&XrayLinks {links})
 }
 
@@ -289,11 +295,12 @@ pub struct Rotated {pub ok: bool, pub node: NodeState}
 
 /// Gives the user new credentials in every Xray inbound, which ends the old ones as the node takes the change. A share link the user holds stops working. Subscription links do not change.
 pub async fn rotate(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
-	{
-		let db = app.db.lock();
-		UserRow::load(&db, id)?;
+	let (actor, source) = (ctx.actor.clone(), ctx.source.clone());
+	app.db.call(move |db| -> rusqlite::Result<()> {
+		UserRow::load(db, id)?;
 		db.execute("delete from xray_clients where user_id = ?", [id])?;
-		audit(&db, &ctx.actor, &ctx.source, "xray.rotate", &format!("user:{id}"), "");
-	}
+		audit(db, &actor, &source, "xray.rotate", &format!("user:{id}"), "");
+		Ok(())
+	}).await?;
 	ok(&Rotated {ok: true, node: users::push(&app).await})
 }

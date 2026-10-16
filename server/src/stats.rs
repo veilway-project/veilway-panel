@@ -46,7 +46,7 @@ pub async fn poll(app: &Arc<App>) {
 	online.dedup();
 	let status = status.unwrap_or(Value::Null);
 	let live = Live {at, reachable: true, health: json!({"version": status["version"], "uptime_secs": status["uptime_secs"], "generation": status["generation"], "flows": stats["flows"], "state_write_failures": stats["state_write_failures"], "send_failed": stats["send_failed"], "drops": stats["drops"], "dns": stats["dns"], "replay_ready": stats["replay"]["ready"]}), rates: json!({"users": stats["users"], "inbounds": stats["inbounds"], "exits": stats["exits"], "outbounds": stats["outbounds"]}), exits: exits.and_then(|value| value.get("exits").cloned()).unwrap_or(Value::Null), sessions: sessions.len(), online_users: online};
-	if let Err(error) = record(&app.db.lock(), at, &stats) {tracing::warn!("the stats could not be recorded: {error}")}
+	if let Err(error) = app.db.call(move |db| record(db, at, &stats)).await {tracing::warn!("the stats could not be recorded: {error}")}
 	*app.live.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(live);
 }
 
@@ -104,9 +104,12 @@ pub async fn usage(State(app): State<Arc<App>>, Query(query): Query<UsageQuery>)
 	let period = query.period.unwrap_or_else(|| "day".into());
 	let (size, span) = match period.as_str() {"day" => (60, 86_400), "week" => (3600, 7 * 86_400), "month" => (3600, 30 * 86_400), "year" => (86_400, 365 * 86_400), _ => return Err(Failure::bad("period is day, week, month or year."))};
 	let since = now() - span;
-	let db = app.db.lock();
-	let mut statement = db.prepare("select name, sum(up), sum(down) from usage_buckets where res = ? and at >= ? and kind = ? and (? is null or name = ?) group by name order by sum(up) + sum(down) desc limit 1000")?;
-	let entries = statement.query_map(params![size, since, query.kind, query.name, query.name], |row| Ok(UsageEntry {name: row.get(0)?, up_bytes: row.get(1)?, down_bytes: row.get(2)?}))?.collect::<Result<_, _>>()?;
+	let (kind, name) = (query.kind.clone(), query.name.clone());
+	let entries = app.db.call(move |db| -> rusqlite::Result<Vec<UsageEntry>> {
+		let mut statement = db.prepare("select name, sum(up), sum(down) from usage_buckets where res = ? and at >= ? and kind = ? and (? is null or name = ?) group by name order by sum(up) + sum(down) desc limit 1000")?;
+		let rows = statement.query_map(params![size, since, kind, name, name], |row| Ok(UsageEntry {name: row.get(0)?, up_bytes: row.get(1)?, down_bytes: row.get(2)?}))?.collect();
+		rows
+	}).await?;
 	ok(&UsageOut {kind: query.kind, period, since, entries})
 }
 
@@ -130,8 +133,11 @@ pub async fn history(State(app): State<Arc<App>>, Query(query): Query<HistoryQue
 	kind_ok(&query.kind)?;
 	let resolution = query.resolution.unwrap_or_else(|| "hour".into());
 	let (size, kept, _) = *RESOLUTIONS.iter().find(|(_, _, name)| *name == resolution).ok_or_else(|| Failure::bad("resolution is minute, hour or day."))?;
-	let db = app.db.lock();
-	let mut statement = db.prepare("select at, up, down, peak_up, peak_down from usage_buckets where res = ? and at >= ? and kind = ? and name = ? order by at limit 2000")?;
-	let points = statement.query_map(params![size, query.since.unwrap_or(0).max(now() - kept), query.kind, query.name], |row| Ok(Point {at: row.get(0)?, up_bytes: row.get(1)?, down_bytes: row.get(2)?, peak_up_bytes_per_sec: row.get(3)?, peak_down_bytes_per_sec: row.get(4)?}))?.collect::<Result<_, _>>()?;
+	let (since, kind, name) = (query.since.unwrap_or(0).max(now() - kept), query.kind.clone(), query.name.clone());
+	let points = app.db.call(move |db| -> rusqlite::Result<Vec<Point>> {
+		let mut statement = db.prepare("select at, up, down, peak_up, peak_down from usage_buckets where res = ? and at >= ? and kind = ? and name = ? order by at limit 2000")?;
+		let rows = statement.query_map(params![size, since, kind, name], |row| Ok(Point {at: row.get(0)?, up_bytes: row.get(1)?, down_bytes: row.get(2)?, peak_up_bytes_per_sec: row.get(3)?, peak_down_bytes_per_sec: row.get(4)?}))?.collect();
+		rows
+	}).await?;
 	ok(&HistoryOut {kind: query.kind, name: query.name, resolution, points})
 }

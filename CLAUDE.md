@@ -8,7 +8,7 @@ Rust server (`server/`, crate `veilway-panel`) and React app (`web/`, built into
 - `auth.rs` is the guard in front of every admin route: host and origin, rate limits, API tokens, sessions, CSRF, re-authentication. A route's `Access` decides who may call it; tokens never reach `Admin` or `AdminReauth` routes.
 - `subs.rs` is the subscription endpoint, the link and the signed document. Use `veilway-proto` for links and the envelope, never reimplement them. `crypto.rs` holds the sealed-secret keys and TOTP.
 - `node.rs` talks to the node's control API on its unix socket; `users.rs` and `admin.rs` hold the handlers.
-- Never hold the database lock across an await, and never call `app.settings()` while holding it.
+- The database is one connection owned by a thread (`db.rs`). Async code reaches it only through `db.call(...)` or `db.audit(...)`, and never calls `app.settings()` inside a call. `db.blocking(...)` is for start-up and blocking tasks only. Schema changes are numbered `MIGRATIONS` steps in `db.rs`.
 
 ## Commands
 

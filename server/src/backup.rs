@@ -143,7 +143,8 @@ pub async fn download(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx
 		let snapshot = cfg.database.with_extension("snapshot");
 		let _ = fs::remove_file(&snapshot);
 		crypto::write_private(&snapshot, &[], false).map_err(Failure::internal)?;
-		let made = db.lock().execute("vacuum into ?", [snapshot.to_string_lossy().to_string()]);
+		let target = snapshot.to_string_lossy().to_string();
+		let made = db.blocking(move |connection| connection.execute("vacuum into ?", [target]));
 		let database = fs::read(&snapshot);
 		let _ = fs::remove_file(&snapshot);
 		made.map_err(Failure::internal)?;
@@ -151,7 +152,7 @@ pub async fn download(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx
 		if content.len() + HEADER + 16 > FILE_MAX {return Err(Failure::conflict("The database is larger than a backup can hold."))}
 		seal(&input.passphrase, &content).map_err(Failure::internal)
 	}).await.map_err(Failure::internal)??;
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "backup.download", "panel", &format!("{} bytes", file.len()));
+	app.db.audit(&ctx.actor, &ctx.source, "backup.download", "panel", &format!("{} bytes", file.len())).await;
 	let at = OffsetDateTime::from_unix_timestamp(now()).map_err(Failure::internal)?;
 	ok(&Downloaded {filename: format!("veilway-panel-{:04}{:02}{:02}T{:02}{:02}{:02}Z.vwbackup", at.year(), u8::from(at.month()), at.day(), at.hour(), at.minute(), at.second()), file: STANDARD.encode(file)})
 }
@@ -211,9 +212,11 @@ pub async fn restore(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 		fs::create_dir(&saved).map_err(Failure::internal)?;
 		fs::set_permissions(&saved, fs::Permissions::from_mode(0o700)).map_err(Failure::internal)?;
 		crypto::write_private(&saved.join("panel.db"), &[], false).map_err(Failure::internal)?;
-		let live = db.lock();
-		audit(&live, &ctx.actor, &ctx.source, "backup.restore", "panel", &format!("restore started; the previous files are in {folder}"));
-		live.execute("vacuum into ?", [saved.join("panel.db").to_string_lossy().to_string()]).map_err(Failure::internal)?;
+		let (target, detail) = (saved.join("panel.db").to_string_lossy().to_string(), format!("restore started; the previous files are in {folder}"));
+		db.blocking(move |live| {
+			audit(live, &ctx.actor, &ctx.source, "backup.restore", "panel", &detail);
+			live.execute("vacuum into ?", [target])
+		}).map_err(Failure::internal)?;
 		fs::copy(&cfg.keys, saved.join("panel.keys")).map_err(Failure::internal)?;
 		fs::copy(&cfg.signing, saved.join("signing.keys")).map_err(Failure::internal)?;
 		crypto::write_private(&marker(&cfg), b"", false).map_err(Failure::internal)?;

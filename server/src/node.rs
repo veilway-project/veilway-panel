@@ -41,73 +41,78 @@ fn default_holds(document: &Value, exits: &str, exit: &str) -> bool {
 }
 
 /// After the node took a document, forgets the default exits it left out, so the panel shows what the node runs.
-pub(crate) fn clear_defaults(app: &App, document: &Value) {
-	let db = app.db.lock();
-	let stale: Vec<(i64, String, String)> = db.prepare("select id, name, exits, default_exit from users where default_exit is not null").and_then(|mut statement| statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?.collect::<Result<Vec<_>, _>>()).unwrap_or_default().into_iter().filter(|(_, _, exits, exit)| !default_holds(document, exits, exit)).map(|(id, name, _, exit)| (id, name, exit)).collect();
-	for (id, name, exit) in stale {
-		if let Err(error) = db.execute("update users set default_exit = null where id = ?", [id]) {tracing::error!("the default exit of {name} could not be cleared: {error}"); continue}
-		tracing::info!("user {name} no longer has default exit {exit}: the node has no such exit or the user may not use it");
-	}
+pub(crate) async fn clear_defaults(app: &App, document: &Value) {
+	let document = document.clone();
+	app.db.call(move |db| {
+		let stale: Vec<(i64, String, String)> = db.prepare("select id, name, exits, default_exit from users where default_exit is not null").and_then(|mut statement| statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?.collect::<Result<Vec<_>, _>>()).unwrap_or_default().into_iter().filter(|(_, _, exits, exit)| !default_holds(&document, exits, exit)).map(|(id, name, _, exit)| (id, name, exit)).collect();
+		for (id, name, exit) in stale {
+			if let Err(error) = db.execute("update users set default_exit = null where id = ?", [id]) {tracing::error!("the default exit of {name} could not be cleared: {error}"); continue}
+			tracing::info!("user {name} no longer has default exit {exit}: the node has no such exit or the user may not use it");
+		}
+	}).await
 }
 
 /// Puts the panel's users into the document's `users`, and the panel's credentials into the `clients` of the Xray inbounds it made, making one for a user who has none yet. A user with no device is left out, since the node needs one. An Xray inbound the panel did not make keeps its clients, less those whose user is gone.
-pub(crate) fn fill(app: &App, document: &mut Value) -> Result<(), String> {
-	let keys = app.keys.as_ref().ok_or("the key file is missing, so no secret can be opened")?;
-	let db = app.db.lock();
-	subs::expire_pending(&db, now()).map_err(|error| error.to_string())?;
-	let mut statement = db.prepare("select id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, record_id, default_exit from users order by id").map_err(|error| error.to_string())?;
-	let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<i64>>(7)?, row.get::<_, Vec<u8>>(8)?, row.get::<_, Option<String>>(9)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-	let (mut out, mut present) = (Vec::new(), Vec::new());
-	for (id, name, enabled, groups, exits, quota, period, expires, record, exit) in rows {
-		let record: [u8; 16] = record.try_into().map_err(|_| "a user record id is not 16 bytes")?;
-		let mut devices = db.prepare("select id, public_key, address, transport_secret from devices where user_id = ? and state = 'enrolled' order by id").map_err(|error| error.to_string())?;
-		let devices = devices.query_map([id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-		if devices.is_empty() {continue}
-		let devices: Vec<Value> = devices.into_iter().map(|(device, public_key, address, sealed)| {
-			let secret = keys.open_secret(&record, &format!("transport_secret:{public_key}"), &sealed).ok_or("a transport secret does not open")?;
-			Ok::<_, String>(json!({"name": format!("d{device}"), "public_key": public_key, "transport_secrets": [App::standard(&secret)], "addresses": [address]}))
-		}).collect::<Result<_, _>>()?;
-		let mut user = json!({"name": name, "enabled": enabled, "groups": serde_json::from_str::<Value>(&groups).unwrap_or(json!([])), "devices": devices, "exits": serde_json::from_str::<Value>(&exits).unwrap_or(json!("all"))});
-		// A default the document no longer allows is left out here, and cleared once the node takes the document.
-		if let Some(exit) = exit.filter(|exit| default_holds(document, &exits, exit)) {user["exit"] = json!(exit);}
-		if let Some(quota) = quota {user["quota_bytes"] = json!(quota);}
-		if let (Some(_), Some(period)) = (quota, period) {user["quota_period"] = json!(period);}
-		if let Some(expires) = expires {user["expires_at"] = json!(OffsetDateTime::from_unix_timestamp(expires).map_err(|error| error.to_string())?.format(&Rfc3339).map_err(|error| error.to_string())?);}
-		out.push(user);
-		present.push((id, name, record));
-	}
-	document["users"] = Value::Array(out);
-	let made: HashMap<String, String> = db.prepare("select tag, protocol from xray_inbounds").and_then(|mut statement| statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect()).map_err(|error| error.to_string())?;
-	for inbound in document.get_mut("xray").and_then(|xray| xray.get_mut("inbounds")).and_then(Value::as_array_mut).into_iter().flatten() {
-		let tag = inbound["tag"].as_str().unwrap_or_default().to_string();
-		let Some(protocol) = made.get(&tag) else {
-			if let Some(clients) = inbound["clients"].as_array_mut() {clients.retain(|client| present.iter().any(|(_, name, _)| client["user"] == name.as_str()));}
-			continue
-		};
-		if protocol == "shadowsocks" {
-			let sealed: Option<Vec<u8>> = db.query_row("select server_key from xray_inbounds where tag = ?", [&tag], |row| row.get(0)).optional().map_err(|error| error.to_string())?.flatten();
-			// A key the document already carries is the one being applied, and the panel's copy follows once the node accepts it.
-			let marked = inbound["server_key"].as_str().is_none_or(|sent| sent.starts_with("<redacted"));
-			if let Some(key) = sealed.and_then(|sealed| keys.open_secret(&[0; 16], &server_label(&tag), &sealed)).filter(|_| marked) {inbound["server_key"] = json!(String::from_utf8(key).map_err(|error| error.to_string())?);}
+pub(crate) async fn fill(app: &Arc<App>, document: &mut Value) -> Result<(), String> {
+	let (handle, app, mut copy) = (app.db.clone(), app.clone(), document.clone());
+	*document = handle.call(move |db| -> Result<Value, String> {
+		let (document, keys) = (&mut copy, app.keys.as_ref().ok_or("the key file is missing, so no secret can be opened")?);
+		subs::expire_pending(db, now()).map_err(|error| error.to_string())?;
+		let mut statement = db.prepare("select id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, record_id, default_exit from users order by id").map_err(|error| error.to_string())?;
+		let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<i64>>(7)?, row.get::<_, Vec<u8>>(8)?, row.get::<_, Option<String>>(9)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+		let (mut out, mut present) = (Vec::new(), Vec::new());
+		for (id, name, enabled, groups, exits, quota, period, expires, record, exit) in rows {
+			let record: [u8; 16] = record.try_into().map_err(|_| "a user record id is not 16 bytes")?;
+			let mut devices = db.prepare("select id, public_key, address, transport_secret from devices where user_id = ? and state = 'enrolled' order by id").map_err(|error| error.to_string())?;
+			let devices = devices.query_map([id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+			if devices.is_empty() {continue}
+			let devices: Vec<Value> = devices.into_iter().map(|(device, public_key, address, sealed)| {
+				let secret = keys.open_secret(&record, &format!("transport_secret:{public_key}"), &sealed).ok_or("a transport secret does not open")?;
+				Ok::<_, String>(json!({"name": format!("d{device}"), "public_key": public_key, "transport_secrets": [App::standard(&secret)], "addresses": [address]}))
+			}).collect::<Result<_, _>>()?;
+			let mut user = json!({"name": name, "enabled": enabled, "groups": serde_json::from_str::<Value>(&groups).unwrap_or(json!([])), "devices": devices, "exits": serde_json::from_str::<Value>(&exits).unwrap_or(json!("all"))});
+			// A default the document no longer allows is left out here, and cleared once the node takes the document.
+			if let Some(exit) = exit.filter(|exit| default_holds(document, &exits, exit)) {user["exit"] = json!(exit);}
+			if let Some(quota) = quota {user["quota_bytes"] = json!(quota);}
+			if let (Some(_), Some(period)) = (quota, period) {user["quota_period"] = json!(period);}
+			if let Some(expires) = expires {user["expires_at"] = json!(OffsetDateTime::from_unix_timestamp(expires).map_err(|error| error.to_string())?.format(&Rfc3339).map_err(|error| error.to_string())?);}
+			out.push(user);
+			present.push((id, name, record));
 		}
-		let clients = present.iter().map(|(id, name, record)| {
-			let sealed: Option<Vec<u8>> = db.query_row("select secret from xray_clients where tag = ? and user_id = ?", params![tag, id], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
-			let secret = match sealed {
-				Some(sealed) => String::from_utf8(keys.open_secret(record, &format!("xray:{tag}"), &sealed).ok_or("an Xray secret does not open")?).map_err(|error| error.to_string())?,
-				None => {
-					let bytes = crypto::random::<16>();
-					let secret = if protocol == "vless" {
-						let hex: String = bytes.iter().enumerate().map(|(at, byte)| format!("{:02x}", match at {6 => byte & 0x0f | 0x40, 8 => byte & 0x3f | 0x80, _ => *byte})).collect();
-						format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
-					} else if protocol == "shadowsocks" {key32()} else {URL_SAFE_NO_PAD.encode([bytes.as_slice(), &crypto::random::<8>()].concat())};
-					db.execute("insert into xray_clients (tag, user_id, secret) values (?, ?, ?)", params![tag, id, keys.seal_secret(record, &format!("xray:{tag}"), secret.as_bytes())]).map_err(|error| error.to_string())?;
-					secret
-				}
+		document["users"] = Value::Array(out);
+		let made: HashMap<String, String> = db.prepare("select tag, protocol from xray_inbounds").and_then(|mut statement| statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect()).map_err(|error| error.to_string())?;
+		for inbound in document.get_mut("xray").and_then(|xray| xray.get_mut("inbounds")).and_then(Value::as_array_mut).into_iter().flatten() {
+			let tag = inbound["tag"].as_str().unwrap_or_default().to_string();
+			let Some(protocol) = made.get(&tag) else {
+				if let Some(clients) = inbound["clients"].as_array_mut() {clients.retain(|client| present.iter().any(|(_, name, _)| client["user"] == name.as_str()));}
+				continue
 			};
-			Ok(json!({"user": name, "secret": secret}))
-		}).collect::<Result<Vec<_>, String>>()?;
-		inbound["clients"] = Value::Array(clients);
-	}
+			if protocol == "shadowsocks" {
+				let sealed: Option<Vec<u8>> = db.query_row("select server_key from xray_inbounds where tag = ?", [&tag], |row| row.get(0)).optional().map_err(|error| error.to_string())?.flatten();
+				// A key the document already carries is the one being applied, and the panel's copy follows once the node accepts it.
+				let marked = inbound["server_key"].as_str().is_none_or(|sent| sent.starts_with("<redacted"));
+				if let Some(key) = sealed.and_then(|sealed| keys.open_secret(&[0; 16], &server_label(&tag), &sealed)).filter(|_| marked) {inbound["server_key"] = json!(String::from_utf8(key).map_err(|error| error.to_string())?);}
+			}
+			let clients = present.iter().map(|(id, name, record)| {
+				let sealed: Option<Vec<u8>> = db.query_row("select secret from xray_clients where tag = ? and user_id = ?", params![tag, id], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
+				let secret = match sealed {
+					Some(sealed) => String::from_utf8(keys.open_secret(record, &format!("xray:{tag}"), &sealed).ok_or("an Xray secret does not open")?).map_err(|error| error.to_string())?,
+					None => {
+						let bytes = crypto::random::<16>();
+						let secret = if protocol == "vless" {
+							let hex: String = bytes.iter().enumerate().map(|(at, byte)| format!("{:02x}", match at {6 => byte & 0x0f | 0x40, 8 => byte & 0x3f | 0x80, _ => *byte})).collect();
+							format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
+						} else if protocol == "shadowsocks" {key32()} else {URL_SAFE_NO_PAD.encode([bytes.as_slice(), &crypto::random::<8>()].concat())};
+						db.execute("insert into xray_clients (tag, user_id, secret) values (?, ?, ?)", params![tag, id, keys.seal_secret(record, &format!("xray:{tag}"), secret.as_bytes())]).map_err(|error| error.to_string())?;
+						secret
+					}
+				};
+				Ok(json!({"user": name, "secret": secret}))
+			}).collect::<Result<Vec<_>, String>>()?;
+			inbound["clients"] = Value::Array(clients);
+		}
+		Ok(copy)
+	}).await?;
 	Ok(())
 }
 
@@ -120,11 +125,11 @@ pub async fn sync(app: &Arc<App>) -> Result<(), String> {
 			if status != 200 {return Err(format!("the node answered {status} to the config"))}
 			let running: Value = serde_json::from_slice(&body).map_err(|error| error.to_string())?;
 			let (Some(revision), Some(mut document)) = (running.get("revision").and_then(Value::as_str).map(str::to_string), running.get("document").cloned()) else {return Err("the node's config answer has no revision or document".into())};
-			fill(app, &mut document)?;
+			fill(app, &mut document).await?;
 			let (status, body) = request(&app.cfg.node_socket, "PUT", "/v1/config", Some(&revision), Some(&document)).await?;
 			match status {
 				200 => {
-					clear_defaults(app, &document);
+					clear_defaults(app, &document).await;
 					return Ok(())
 				}
 				409 => continue,

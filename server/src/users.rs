@@ -45,8 +45,8 @@ fn out(user: &UserRow, devices: i64, pending: i64, node: Option<Value>) -> UserO
 	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, node}
 }
 
-fn counts(app: &App, id: i64) -> (i64, i64) {
-	app.db.lock().query_row("select count(*), coalesce(sum(state = 'pending'), 0) from devices where user_id = ?", [id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap_or((0, 0))
+async fn counts(app: &App, id: i64) -> (i64, i64) {
+	app.db.call(move |db| db.query_row("select count(*), coalesce(sum(state = 'pending'), 0) from devices where user_id = ?", [id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap_or((0, 0))).await
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -56,23 +56,23 @@ pub struct UserQuery {pub q: Option<String>, pub group: Option<String>, pub enab
 pub struct UsersOut {pub users: Vec<UserOut>}
 
 pub async fn list(State(app): State<Arc<App>>, Query(query): Query<UserQuery>) -> Result<Response, Failure> {
-	let rows: Vec<UserRow> = {
-		let db = app.db.lock();
+	let rows: Vec<UserRow> = app.db.call(|db| -> rusqlite::Result<Vec<UserRow>> {
 		let mut statement = db.prepare(&format!("select {USER_COLUMNS} from users order by name"))?;
 		let rows = statement.query_map([], UserRow::read)?.collect::<Result<_, _>>()?;
-		rows
-	};
+		Ok(rows)
+	}).await?;
 	let nodes = node::usage(&app).await;
-	let users = rows.iter().filter(|user| query.q.as_ref().is_none_or(|q| user.name.contains(q.as_str())) && query.enabled.is_none_or(|enabled| user.enabled == enabled) && query.group.as_ref().is_none_or(|group| serde_json::from_str::<Vec<String>>(&user.groups).unwrap_or_default().contains(group))).map(|user| {
-		let (devices, pending) = counts(&app, user.id);
-		out(user, devices, pending, nodes.get(&user.name).cloned())
-	}).collect();
+	let mut users = Vec::new();
+	for user in rows.iter().filter(|user| query.q.as_ref().is_none_or(|q| user.name.contains(q.as_str())) && query.enabled.is_none_or(|enabled| user.enabled == enabled) && query.group.as_ref().is_none_or(|group| serde_json::from_str::<Vec<String>>(&user.groups).unwrap_or_default().contains(group))) {
+		let (devices, pending) = counts(&app, user.id).await;
+		users.push(out(user, devices, pending, nodes.get(&user.name).cloned()));
+	}
 	ok(&UsersOut {users})
 }
 
 pub async fn get(State(app): State<Arc<App>>, Path(id): Path<i64>) -> Result<Response, Failure> {
-	let user = UserRow::load(&app.db.lock(), id)?;
-	let (devices, pending) = counts(&app, id);
+	let user = app.db.call(move |db| UserRow::load(db, id)).await?;
+	let (devices, pending) = counts(&app, id).await;
 	ok(&out(&user, devices, pending, node::usage(&app).await.remove(&user.name)))
 }
 
@@ -138,17 +138,17 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	check(input.groups.as_ref(), input.exits.as_ref(), input.quota_bytes, input.quota_period.as_deref())?;
 	if input.exit.as_deref().is_some_and(|exit| !default_ok(input.exits.as_ref().unwrap_or(&json!("all")), exit)) {return Err(Failure::bad(DEFAULT_REFUSED))}
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing, so no account can be made."))?;
-	let settings = app.settings();
+	let settings = app.settings().await;
 	let (token, record, sub_id) = (crypto::random::<16>(), crypto::random::<16>(), URL_SAFE_NO_PAD.encode(crypto::random::<16>()));
 	let copy = (!settings.show_links_once).then(|| keys.seal_copy(&record, &token));
-	let id = {
-		let db = app.db.lock();
-		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created, default_exit) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(settings.default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, keys.token_lookup(&token).as_slice(), copy, now(), input.exit])?;
+	let lookup = keys.token_lookup(&token);
+	let id = app.db.call(move |db| -> rusqlite::Result<i64> {
+		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created, default_exit) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(settings.default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, lookup.as_slice(), copy, now(), input.exit])?;
 		let id = db.last_insert_rowid();
-		audit(&db, &ctx.actor, &ctx.source, "user.create", &format!("user:{id}"), &input.name);
-		id
-	};
-	let user = UserRow::load(&app.db.lock(), id)?;
+		audit(db, &ctx.actor, &ctx.source, "user.create", &format!("user:{id}"), &input.name);
+		Ok(id)
+	}).await?;
+	let user = app.db.call(move |db| UserRow::load(db, id)).await?;
 	let (link, link_error) = match view(&settings, &app, &token) {Ok(link) => (Some(link), None), Err(error) => (None, Some(error))};
 	ok(&Created {user: out(&user, 0, 0, None), link, link_error})
 }
@@ -157,7 +157,7 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 pub struct Changed {pub user: UserOut, pub node: NodeState}
 
 pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>, Body(input): Body<UserPatch>) -> Result<Response, Failure> {
-	let user = UserRow::load(&app.db.lock(), id)?;
+	let user = app.db.call(move |db| UserRow::load(db, id)).await?;
 	let quota = input.quota_bytes.unwrap_or(user.quota_bytes.map(|quota| quota as u64));
 	let period = input.quota_period.unwrap_or(user.quota_period.clone());
 	check(input.groups.as_ref(), input.exits.as_ref(), quota, period.as_deref())?;
@@ -165,14 +165,14 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	if input.exit.as_ref().is_some_and(|exit| exit.as_deref().is_some_and(|exit| !default_ok(&exits, exit))) {return Err(Failure::bad(DEFAULT_REFUSED))}
 	let exit = input.exit.clone().unwrap_or(user.default_exit.clone()).filter(|exit| default_ok(&exits, exit));
 	if input.name.as_ref().is_some_and(|name| !name_ok(name, true)) {return Err(Failure::bad("name is 1 to 64 characters of a-z, 0-9, dot, dash and underscore, starting with a letter or digit."))}
-	{
-		let db = app.db.lock();
+	app.db.call(move |db| -> rusqlite::Result<()> {
 		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ?, default_exit = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), serde_json::to_string(&exits).unwrap_or_default(), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), exit, id])?;
-		audit(&db, &ctx.actor, &ctx.source, "user.update", &format!("user:{id}"), &user.name);
-	}
+		audit(db, &ctx.actor, &ctx.source, "user.update", &format!("user:{id}"), &user.name);
+		Ok(())
+	}).await?;
 	let node = push(&app).await;
-	let user = UserRow::load(&app.db.lock(), id)?;
-	let (devices, pending) = counts(&app, id);
+	let user = app.db.call(move |db| UserRow::load(db, id)).await?;
+	let (devices, pending) = counts(&app, id).await;
 	ok(&Changed {user: out(&user, devices, pending, None), node})
 }
 
@@ -180,12 +180,12 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 pub struct Deleted {pub node: NodeState}
 
 pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
-	{
-		let db = app.db.lock();
+	app.db.call(move |db| -> rusqlite::Result<()> {
 		let name: String = db.query_row("select name from users where id = ?", [id], |row| row.get(0))?;
 		db.execute("delete from users where id = ?", [id])?;
-		audit(&db, &ctx.actor, &ctx.source, "user.delete", &format!("user:{id}"), &name);
-	}
+		audit(db, &ctx.actor, &ctx.source, "user.delete", &format!("user:{id}"), &name);
+		Ok(())
+	}).await?;
 	ok(&Deleted {node: push(&app).await})
 }
 
@@ -210,11 +210,12 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 	let (mut done, mut failed) = (0, Vec::new());
 	for id in &input.ids {
 		let result: Result<(), String> = async {
-			let user = UserRow::load(&app.db.lock(), *id).map_err(|_| "no such user".to_string())?;
+			let id = *id;
+			let user = app.db.call(move |db| UserRow::load(db, id)).await.map_err(|_| "no such user".to_string())?;
 			let value = input.value.clone();
 			match input.action.as_str() {
-				"enable" | "disable" => {app.db.lock().execute("update users set enabled = ? where id = ?", params![input.action == "enable", id]).map_err(|error| error.to_string())?;}
-				"delete" => {app.db.lock().execute("delete from users where id = ?", [id]).map_err(|error| error.to_string())?;}
+				"enable" | "disable" => {let enable = input.action == "enable"; app.db.call(move |db| db.execute("update users set enabled = ? where id = ?", params![enable, id])).await.map_err(|error| error.to_string())?;}
+				"delete" => {app.db.call(move |db| db.execute("delete from users where id = ?", [id])).await.map_err(|error| error.to_string())?;}
 				"reset_usage" => {let (status, _) = node::request(&app.cfg.node_socket, "POST", &format!("/v1/users/{}/usage/reset", user.name), None, Some(&json!({"totals": false}))).await?; if status != 200 {return Err(format!("the node answered {status}"))}}
 				"add_group" | "remove_group" => {
 					let group = value.as_ref().and_then(Value::as_str).filter(|group| name_ok(group, true)).ok_or("value is a group name")?;
@@ -222,20 +223,23 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 					groups.retain(|held| held != group);
 					if input.action == "add_group" {groups.push(group.to_string());}
 					check(Some(&groups), None, None, None).map_err(|error| error.message)?;
-					app.db.lock().execute("update users set groups = ? where id = ?", params![serde_json::to_string(&groups).unwrap_or_default(), id]).map_err(|error| error.to_string())?;
+					let groups = serde_json::to_string(&groups).unwrap_or_default();
+					app.db.call(move |db| db.execute("update users set groups = ? where id = ?", params![groups, id])).await.map_err(|error| error.to_string())?;
 				}
 				"set_quota" => {
 					let quota = value.as_ref().and_then(|value| value.get("quota_bytes")).and_then(Value::as_u64);
 					let period = value.as_ref().and_then(|value| value.get("quota_period")).and_then(Value::as_str);
 					check(None, None, quota, period).map_err(|error| error.message)?;
-					app.db.lock().execute("update users set quota_bytes = ?, quota_period = ? where id = ?", params![quota.map(|quota| quota as i64), period.filter(|_| quota.is_some()), id]).map_err(|error| error.to_string())?;
+					let period = period.filter(|_| quota.is_some()).map(str::to_owned);
+					app.db.call(move |db| db.execute("update users set quota_bytes = ?, quota_period = ? where id = ?", params![quota.map(|quota| quota as i64), period, id])).await.map_err(|error| error.to_string())?;
 				}
-				"set_expiry" => {app.db.lock().execute("update users set expires_at = ? where id = ?", params![value.as_ref().and_then(Value::as_i64), id]).map_err(|error| error.to_string())?;}
-				"set_device_limit" => {app.db.lock().execute("update users set device_limit = ? where id = ?", params![value.as_ref().and_then(Value::as_u64).filter(|limit| *limit <= 65535).ok_or("value is a number from 0 to 65535")?, id]).map_err(|error| error.to_string())?;}
+				"set_expiry" => {let expiry = value.as_ref().and_then(Value::as_i64); app.db.call(move |db| db.execute("update users set expires_at = ? where id = ?", params![expiry, id])).await.map_err(|error| error.to_string())?;}
+				"set_device_limit" => {let limit = value.as_ref().and_then(Value::as_u64).filter(|limit| *limit <= 65535).ok_or("value is a number from 0 to 65535")?; app.db.call(move |db| db.execute("update users set device_limit = ? where id = ?", params![limit, id])).await.map_err(|error| error.to_string())?;}
 				"set_exits" => {
 					let exits = value.ok_or("value is \"all\" or a list of exit tags")?;
 					check(None, Some(&exits), None, None).map_err(|error| error.message)?;
-					app.db.lock().execute("update users set exits = ?, default_exit = ? where id = ?", params![serde_json::to_string(&exits).unwrap_or_default(), user.default_exit.filter(|exit| default_ok(&exits, exit)), id]).map_err(|error| error.to_string())?;
+					let (stored, default_exit) = (serde_json::to_string(&exits).unwrap_or_default(), user.default_exit.filter(|exit| default_ok(&exits, exit)));
+					app.db.call(move |db| db.execute("update users set exits = ?, default_exit = ? where id = ?", params![stored, default_exit, id])).await.map_err(|error| error.to_string())?;
 				}
 				other => return Err(format!("unknown action {other}")),
 			}
@@ -243,7 +247,7 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 		}.await;
 		match result {Ok(()) => done += 1, Err(error) => failed.push(BulkFailure {id: *id, error})}
 	}
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "user.bulk", &input.action, &format!("{} users, {} failed", input.ids.len(), failed.len()));
+	app.db.audit(&ctx.actor, &ctx.source, "user.bulk", &input.action, &format!("{} users, {} failed", input.ids.len(), failed.len())).await;
 	ok(&BulkResult {done, failed, node: push(&app).await})
 }
 
@@ -252,10 +256,10 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 pub struct ResetUsage {#[serde(default)] pub totals: bool}
 
 pub async fn reset_usage(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>, Body(input): Body<ResetUsage>) -> Result<Response, Failure> {
-	let user = UserRow::load(&app.db.lock(), id)?;
+	let user = app.db.call(move |db| UserRow::load(db, id)).await?;
 	let (status, body) = node::request(&app.cfg.node_socket, "POST", &format!("/v1/users/{}/usage/reset", user.name), None, Some(&json!({"totals": input.totals}))).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
 	if status != 200 {return Err(Failure::new(StatusCode::BAD_GATEWAY, "node_refused", format!("The node answered {status}.")))}
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "user.usage_reset", &format!("user:{id}"), if input.totals {"with totals"} else {"quota count"});
+	app.db.audit(&ctx.actor, &ctx.source, "user.usage_reset", &format!("user:{id}"), if input.totals {"with totals"} else {"quota count"}).await;
 	ok(&serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null))
 }
 
@@ -278,9 +282,11 @@ fn device_out(device: &DeviceRow) -> DeviceOut {
 pub struct DevicesOut {pub devices: Vec<DeviceOut>}
 
 pub async fn devices(State(app): State<Arc<App>>, Path(id): Path<i64>) -> Result<Response, Failure> {
-	let db = app.db.lock();
-	UserRow::load(&db, id)?;
-	ok(&DevicesOut {devices: DeviceRow::for_user(&db, id)?.iter().map(device_out).collect()})
+	let devices = app.db.call(move |db| -> rusqlite::Result<Vec<DeviceRow>> {
+		UserRow::load(db, id)?;
+		DeviceRow::for_user(db, id)
+	}).await?;
+	ok(&DevicesOut {devices: devices.iter().map(device_out).collect()})
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -292,32 +298,32 @@ pub struct DeviceCreated {pub device: DeviceOut, pub weaker: bool, pub node: Nod
 
 /// A device whose key the panel makes. The default is that the device enrolls itself through the endpoint, which needs nothing here.
 pub async fn make_device(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>, Body(input): Body<DeviceIn>) -> Result<Response, Failure> {
-	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
+	app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
 	if input.name.chars().count() > 32 {return Err(Failure::bad("A device name is at most 32 characters."))}
 	let (secret, public) = {
 		let secret = x25519_dalek::StaticSecret::from(crypto::random::<32>());
 		(secret.to_bytes(), x25519_dalek::PublicKey::from(&secret).to_bytes())
 	};
-	let (public_key, pool) = (STANDARD.encode(public), app.settings().pool_v4);
-	let device = {
-		let db = app.db.lock();
-		let user = UserRow::load(&db, id)?;
+	let (public_key, pool, held) = (STANDARD.encode(public), app.settings().await.pool_v4, app.clone());
+	let device = app.db.call(move |db| -> Result<DeviceRow, Failure> {
+		let keys = held.keys.as_ref().expect("checked before the lookup");
+		let user = UserRow::load(db, id)?;
 		let total: i64 = db.query_row("select count(*) from devices where user_id = ?", [id], |row| row.get(0))?;
 		if total >= if user.device_limit == 0 {16} else {user.device_limit.min(16)} {return Err(Failure::conflict("Every device place of this account is taken."))}
-		let address = subs::allocate(&db, &pool).ok_or_else(|| Failure::conflict("The address pool is full."))?;
+		let address = subs::allocate(db, &pool).ok_or_else(|| Failure::conflict("The address pool is full."))?;
 		db.execute("insert into devices (user_id, name, public_key, secret_hash, address, transport_secret, private_key, state, token_gen, created, confirmed_at) values (?, ?, ?, ?, ?, ?, ?, 'enrolled', ?, ?, ?)", params![id, veilway_proto::control::display(&input.name, 32, 128), public_key, keys.device_secret_hash(&crypto::random::<16>()).as_slice(), address, keys.seal_secret(&user.record_id, &format!("transport_secret:{public_key}"), &crypto::random::<32>()), keys.seal_secret(&user.record_id, &format!("private_key:{public_key}"), &secret), user.token_gen, now(), now()])?;
-		audit(&db, &ctx.actor, &ctx.source, "device.create", &format!("user:{id}"), "key made by the panel");
-		DeviceRow::for_user(&db, id)?.into_iter().find(|device| device.public_key == public_key).ok_or_else(|| Failure::internal("the new device is gone"))?
-	};
+		audit(db, &ctx.actor, &ctx.source, "device.create", &format!("user:{id}"), "key made by the panel");
+		DeviceRow::for_user(db, id)?.into_iter().find(|device| device.public_key == public_key).ok_or_else(|| Failure::internal("the new device is gone"))
+	}).await?;
 	ok(&DeviceCreated {device: device_out(&device), weaker: true, node: push(&app).await})
 }
 
 pub async fn remove_device(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path((id, device)): Path<(i64, i64)>) -> Result<Response, Failure> {
-	{
-		let db = app.db.lock();
+	app.db.call(move |db| -> Result<(), Failure> {
 		if db.execute("delete from devices where id = ? and user_id = ?", params![device, id])? == 0 {return Err(Failure::missing("device"))}
-		audit(&db, &ctx.actor, &ctx.source, "device.remove", &format!("user:{id}"), &format!("device:{device}"));
-	}
+		audit(db, &ctx.actor, &ctx.source, "device.remove", &format!("user:{id}"), &format!("device:{device}"));
+		Ok(())
+	}).await?;
 	ok(&Deleted {node: push(&app).await})
 }
 
@@ -331,19 +337,18 @@ pub struct Exported {
 
 /// The signed document of a device whose key the panel made, for a client that has no endpoint to enroll with. It holds the private key.
 pub async fn export_device(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path((id, device)): Path<(i64, i64)>) -> Result<Response, Failure> {
-	let (user, row) = {
-		let db = app.db.lock();
-		(UserRow::load(&db, id)?, DeviceRow::for_user(&db, id)?.into_iter().find(|row| row.id == device).ok_or_else(|| Failure::missing("device"))?)
-	};
+	let (user, row) = app.db.call(move |db| -> Result<(UserRow, DeviceRow), Failure> {
+		Ok((UserRow::load(db, id)?, DeviceRow::for_user(db, id)?.into_iter().find(|row| row.id == device).ok_or_else(|| Failure::missing("device"))?))
+	}).await?;
 	if row.private_key.is_none() {return Err(Failure::bad("This device made its own key, so there is no private key to export."))}
 	let (signing, signer) = {
 		let held = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		let signing: Vec<_> = held.current().into_iter().cloned().collect();
 		(signing.clone(), signing.last().cloned().ok_or_else(|| Failure::internal("no signing key"))?)
 	};
-	let document = subs::document(&app, &user, &row, &signing, &signer, subs::Form::Whole, node::usage(&app).await.get(&user.name)).map_err(Failure::bad)?;
+	let document = subs::document(&app, &user, &row, &signing, &signer, subs::Form::Whole, node::usage(&app).await.get(&user.name)).await.map_err(Failure::bad)?;
 	let carried = Carried::file(format!("v1.{}.{}", URL_SAFE_NO_PAD.encode(signer.public()), document).as_bytes()).map_err(|error| Failure::bad(error.to_string()))?;
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "device.export", &format!("user:{id}"), &format!("device:{device}"));
+	app.db.audit(&ctx.actor, &ctx.source, "device.export", &format!("user:{id}"), &format!("device:{device}")).await;
 	ok(&Exported {link: carried.veilway(), file: carried.file_content()})
 }
 
@@ -357,18 +362,18 @@ pub struct SubscriptionInfo {
 }
 
 pub async fn sub_info(State(app): State<Arc<App>>, Path(id): Path<i64>) -> Result<Response, Failure> {
-	let user = UserRow::load(&app.db.lock(), id)?;
+	let user = app.db.call(move |db| UserRow::load(db, id)).await?;
 	let fingerprints = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).current().iter().map(|entry| entry.proto().fingerprint().to_string()).collect();
-	ok(&SubscriptionInfo {subscription_id: user.sub_id, endpoint_url: app.settings().endpoint_url, token_generation: user.token_gen, token_created: user.token_created, can_show: user.token_copy.is_some() && app.keys.is_some(), key_fingerprints: fingerprints})
+	ok(&SubscriptionInfo {subscription_id: user.sub_id, endpoint_url: app.settings().await.endpoint_url, token_generation: user.token_gen, token_created: user.token_created, can_show: user.token_copy.is_some() && app.keys.is_some(), key_fingerprints: fingerprints})
 }
 
 /// Opening the sealed copy is an export of a secret: the route needs a recent re-authentication, and the audit log says that a link was shown, not what it was.
 pub async fn sub_show(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
-	let user = UserRow::load(&app.db.lock(), id)?;
+	let user = app.db.call(move |db| UserRow::load(db, id)).await?;
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
 	let token = user.token_copy.as_deref().and_then(|copy| keys.open_copy(&user.record_id, copy)).ok_or_else(|| Failure::new(StatusCode::GONE, "no_copy", "No copy of this link is kept. Reset the link to get a new one."))?;
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "link.show", &format!("user:{id}"), "");
-	ok(&view(&app.settings(), &app, &token).map_err(Failure::bad)?)
+	app.db.audit(&ctx.actor, &ctx.source, "link.show", &format!("user:{id}"), "").await;
+	ok(&view(&app.settings().await, &app, &token).map_err(Failure::bad)?)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -394,10 +399,9 @@ static SEALING: Semaphore = Semaphore::const_new(1);
 pub async fn sub_sealed(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>, Body(input): Body<SealedIn>) -> Result<Response, Failure> {
 	if input.password.chars().count() < sealed_file::PASSWORD_MIN || input.password.len() > sealed_file::PASSWORD_MAX {return Err(Failure::bad(format!("The password needs at least {} characters and at most {} bytes.", sealed_file::PASSWORD_MIN, sealed_file::PASSWORD_MAX)))}
 	let _turn = SEALING.try_acquire().map_err(|_| Failure::conflict("Another sealed file is being made."))?;
-	let (user, lookup) = {
-		let db = app.db.lock();
-		(UserRow::load(&db, id)?, db.query_row("select token_lookup from users where id = ?", [id], |row| row.get::<_, Vec<u8>>(0))?)
-	};
+	let (user, lookup) = app.db.call(move |db| -> rusqlite::Result<(UserRow, Vec<u8>)> {
+		Ok((UserRow::load(db, id)?, db.query_row("select token_lookup from users where id = ?", [id], |row| row.get::<_, Vec<u8>>(0))?))
+	}).await?;
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
 	// Only the token is taken from a link the browser sends, and only when it is this user's current one. The endpoint, key and pin of the file are always the panel's own.
 	let token = match input.link {
@@ -408,10 +412,10 @@ pub async fn sub_sealed(State(app): State<Arc<App>>, Extension(ctx): Extension<C
 		None => user.token_copy.as_deref().and_then(|copy| keys.open_copy(&user.record_id, copy)).ok_or_else(|| Failure::new(StatusCode::GONE, "no_copy", "No copy of this link is kept. Reset the link to get a new one, or send the link you just made."))?,
 	};
 	let key = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).current().last().cloned().cloned().ok_or_else(|| Failure::bad("no signing key"))?;
-	let link = subs::link(&app.settings(), &key, &token).map_err(Failure::bad)?.veilway;
+	let link = subs::link(&app.settings().await, &key, &token).map_err(Failure::bad)?.veilway;
 	let (salt, nonce) = (crypto::random::<16>(), crypto::random::<12>());
 	let file = tokio::task::spawn_blocking(move || sealed_file::seal(&input.password, &link, salt, nonce)).await.map_err(Failure::internal)?.map_err(Failure::internal)?;
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "link.sealed", &format!("user:{id}"), "");
+	app.db.audit(&ctx.actor, &ctx.source, "link.sealed", &format!("user:{id}"), "").await;
 	ok(&Sealed {filename: format!("veilway-{}.vwsealed", user.name), file: STANDARD.encode(file)})
 }
 
@@ -427,19 +431,20 @@ pub struct LinkReset {pub link: Option<LinkView>, pub link_error: Option<String>
 
 pub async fn sub_reset(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>, Body(input): Body<ResetLink>) -> Result<Response, Failure> {
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
-	let (settings, token) = (app.settings(), crypto::random::<16>());
-	let old = {
-		let db = app.db.lock();
-		let user = UserRow::load(&db, id)?;
-		let copy = (!settings.show_links_once).then(|| keys.seal_copy(&user.record_id, &token));
-		let old: Vec<DeviceRow> = DeviceRow::for_user(&db, id)?.into_iter().filter(|device| device.token_gen == user.token_gen).collect();
-		db.execute("update users set token_lookup = ?, token_copy = ?, token_gen = token_gen + 1, token_created = ? where id = ?", params![keys.token_lookup(&token).as_slice(), copy, now(), id])?;
-		if input.remove_devices {db.execute("delete from devices where user_id = ? and token_gen = ?", params![id, user.token_gen])?;}
+	let (settings, token, held) = (app.settings().await, crypto::random::<16>(), app.clone());
+	let (lookup, show_once, remove_devices) = (keys.token_lookup(&token), settings.show_links_once, input.remove_devices);
+	let old = app.db.call(move |db| -> Result<Vec<DeviceRow>, Failure> {
+		let keys = held.keys.as_ref().expect("checked before the lookup");
+		let user = UserRow::load(db, id)?;
+		let copy = (!show_once).then(|| keys.seal_copy(&user.record_id, &token));
+		let old: Vec<DeviceRow> = DeviceRow::for_user(db, id)?.into_iter().filter(|device| device.token_gen == user.token_gen).collect();
+		db.execute("update users set token_lookup = ?, token_copy = ?, token_gen = token_gen + 1, token_created = ? where id = ?", params![lookup.as_slice(), copy, now(), id])?;
+		if remove_devices {db.execute("delete from devices where user_id = ? and token_gen = ?", params![id, user.token_gen])?;}
 		// A link that was reset is a link that may have leaked, and the Xray share links are the same user's, so they are made new with it and the push below carries them to the node.
 		db.execute("delete from xray_clients where user_id = ?", [id])?;
-		audit(&db, &ctx.actor, &ctx.source, "link.reset", &format!("user:{id}"), &format!("{} devices of the old link, removed: {}, Xray credentials made new", old.len(), input.remove_devices));
-		old
-	};
+		audit(db, &ctx.actor, &ctx.source, "link.reset", &format!("user:{id}"), &format!("{} devices of the old link, removed: {}, Xray credentials made new", old.len(), remove_devices));
+		Ok(old)
+	}).await?;
 	let (link, link_error) = match view(&settings, &app, &token) {Ok(link) => (Some(link), None), Err(error) => (None, Some(error))};
 	ok(&LinkReset {link, link_error, old_devices: old.iter().map(device_out).collect(), removed: input.remove_devices, node: push(&app).await})
 }

@@ -71,17 +71,19 @@ pub fn refusal(entry: &SigningEntry, subscription_id: &str, reason: &str) -> Str
 pub enum Form {Answer, Static, Whole}
 
 /// A signed subscription for one device of one account. Its serial comes from the device's own counter, which the endpoint and the publisher share: the larger of the time and the last serial plus one, so no serial is signed for two bodies.
-pub fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[SigningEntry], signer: &SigningEntry, form: Form, used: Option<&Value>) -> Result<String, String> {
+pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[SigningEntry], signer: &SigningEntry, form: Form, used: Option<&Value>) -> Result<String, String> {
 	let keys = app.keys.as_ref().ok_or("no key file")?;
-	let settings = app.settings();
+	let settings = app.settings().await;
 	if settings.profiles.is_empty() {return Err("no profile is configured".into())}
-	let devices = DeviceRow::for_user(&app.db.lock(), user.id).map_err(|error| error.to_string())?;
+	let user_id = user.id;
+	let devices = app.db.call(move |db| DeviceRow::for_user(db, user_id)).await.map_err(|error| error.to_string())?;
 	let secret = keys.open_secret(&user.record_id, &format!("transport_secret:{}", this.public_key), &this.transport_secret).ok_or("a transport secret does not open")?;
 	let mut device = json!({"public_key": this.public_key, "addresses": [this.address], "transport_secrets": [STANDARD.encode(secret)]});
 	if let Some(sealed) = &this.private_key {device["private_key"] = json!(STANDARD.encode(keys.open_secret(&user.record_id, &format!("private_key:{}", this.public_key), sealed).ok_or("a private key does not open")?));}
 	let profiles: Vec<Value> = settings.profiles.iter().cloned().map(|mut profile| {profile["device"] = device.clone(); profile}).collect();
 	let at = now();
-	let serial: i64 = app.db.lock().query_row("update devices set last_serial = max(?, last_serial + 1) where id = ? returning last_serial", params![at * 1000 + (crypto::random::<2>()[0] as i64 % 250), this.id], |row| row.get(0)).map_err(|error| error.to_string())?;
+	let (floor, device_id) = (at * 1000 + (crypto::random::<2>()[0] as i64 % 250), this.id);
+	let serial: i64 = app.db.call(move |db| db.query_row("update devices set last_serial = max(?, last_serial + 1) where id = ? returning last_serial", params![floor, device_id], |row| row.get::<_, i64>(0))).await.map_err(|error| error.to_string())?;
 	let mut payload = json!({
 		"v": 1, "subscription_id": user.sub_id, "serial": serial, "issued_at": at, "expires_at": at + i64::from(settings.document_days) * 86_400,
 		"signing_keys": signing.iter().map(|entry| STANDARD.encode(entry.public())).collect::<Vec<_>>(),
@@ -149,7 +151,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	let Some(keys) = app.keys.as_ref() else {return app.not_found()};
 	// One HMAC, one lookup and one comparison, against a dummy value when nothing was found.
 	let lookup = keys.token_lookup(&token.unwrap_or([0; 16]));
-	let found = app.db.lock().query_row(&format!("select {USER_COLUMNS}, token_lookup from users where token_lookup = ?"), [lookup.as_slice()], |row| Ok((UserRow::read(row)?, row.get::<_, Vec<u8>>(17)?))).optional().unwrap_or(None);
+	let found = app.db.call(move |db| db.query_row(&format!("select {USER_COLUMNS}, token_lookup from users where token_lookup = ?"), [lookup.as_slice()], |row| Ok((UserRow::read(row)?, row.get::<_, Vec<u8>>(17)?))).optional().unwrap_or(None)).await;
 	let stored = found.as_ref().map_or(vec![0u8; 32], |(_, stored)| stored.clone());
 	let Some((user, _)) = found.filter(|_| post && admitted && token.is_some() && crypto::equal(&stored, &lookup)) else {return app.not_found()};
 	let Some(map) = map else {return app.not_found()};
@@ -168,39 +170,43 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	let refuse = |reason: &str| signed_response(refusal(&signer, &user.sub_id, reason));
 	if !user.enabled {return refuse("disabled")}
 	if user.expires_at.is_some_and(|expires| expires <= at) {return refuse("expired")}
-	let (mut changed, pool) = (false, app.settings().pool_v4);
+	let pool = app.settings().await.pool_v4;
 	let hash = keys.device_secret_hash(&ask.secret);
-	let outcome: Result<Option<DeviceRow>, &str> = {
-		let db = app.db.lock();
-		changed |= db.execute("delete from devices where user_id = ? and state = 'pending' and created < ?", params![user.id, at - PENDING_LAPSE]).unwrap_or(0) > 0;
-		let device = db.query_row(&format!("select {DEVICE_COLUMNS} from devices where user_id = ? and public_key = ?"), params![user.id, ask.public_key], DeviceRow::read).optional().unwrap_or(None);
-		match device {
-			Some(device) if !crypto::equal(&device.secret_hash, &hash) => Err("device_mismatch"),
-			Some(device) => match ask.op.as_str() {
-				"release" if device.state == "pending" => {changed |= db.execute("delete from devices where id = ?", [device.id]).unwrap_or(0) > 0; Ok(None)}
-				"confirm" => {
-					let _ = db.execute("update devices set state = 'enrolled', confirmed_at = coalesce(confirmed_at, ?), name = coalesce(?, name), last_seen = ? where id = ?", params![at, ask.name, at, device.id]);
-					changed |= device.state == "pending";
-					Ok(db.query_row(&format!("select {DEVICE_COLUMNS} from devices where id = ?"), [device.id], DeviceRow::read).ok())
+	let (changed, outcome) = {
+		let (handle, app, user, public_key, op, name) = (app.db.clone(), app.clone(), user.clone(), ask.public_key.clone(), ask.op.clone(), ask.name.clone());
+		handle.call(move |db| -> (bool, Result<Option<DeviceRow>, &'static str>) {
+			let (keys, mut changed) = (app.keys.as_ref().expect("checked before the lookup"), false);
+			changed |= db.execute("delete from devices where user_id = ? and state = 'pending' and created < ?", params![user.id, at - PENDING_LAPSE]).unwrap_or(0) > 0;
+			let device = db.query_row(&format!("select {DEVICE_COLUMNS} from devices where user_id = ? and public_key = ?"), params![user.id, public_key], DeviceRow::read).optional().unwrap_or(None);
+			let outcome = match device {
+				Some(device) if !crypto::equal(&device.secret_hash, &hash) => Err("device_mismatch"),
+				Some(device) => match op.as_str() {
+					"release" if device.state == "pending" => {changed |= db.execute("delete from devices where id = ?", [device.id]).unwrap_or(0) > 0; Ok(None)}
+					"confirm" => {
+						let _ = db.execute("update devices set state = 'enrolled', confirmed_at = coalesce(confirmed_at, ?), name = coalesce(?, name), last_seen = ? where id = ?", params![at, name, at, device.id]);
+						changed |= device.state == "pending";
+						Ok(db.query_row(&format!("select {DEVICE_COLUMNS} from devices where id = ?"), [device.id], DeviceRow::read).ok())
+					}
+					"fetch" if device.state == "enrolled" && !app.limits.hit(&format!("dev:{}:{}", user.id, public_key), 1, 60) => Err("rate_limited"),
+					_ => {let _ = db.execute("update devices set last_seen = ? where id = ?", params![at, device.id]); Ok(Some(device))}
+				},
+				None if op == "release" => Ok(None),
+				None => {
+					let (total, pending): (i64, i64) = db.query_row("select count(*), coalesce(sum(state = 'pending'), 0) from devices where user_id = ?", [user.id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap_or((0, 0));
+					let limit = if user.device_limit == 0 {NODE_DEVICES_MAX} else {user.device_limit.min(NODE_DEVICES_MAX)};
+					let (address, enroll) = (allocate(db, &pool), op == "confirm");
+					if total >= limit || (!enroll && pending >= PENDING_PLACES) || address.is_none() {Err("device_limit")}
+					else if !app.limits.hit(&format!("new:{}:{}", user.id, user.token_gen), 1, 600) {Err("rate_limited")}
+					else {
+						let secret = keys.seal_secret(&user.record_id, &format!("transport_secret:{}", public_key), &crypto::random::<32>());
+						let _ = db.execute("insert into devices (user_id, name, public_key, secret_hash, address, transport_secret, state, token_gen, created, confirmed_at, last_seen) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![user.id, name.clone().unwrap_or_default(), public_key, hash.as_slice(), address, secret, if enroll {"enrolled"} else {"pending"}, user.token_gen, at, enroll.then_some(at), at]);
+						changed = true;
+						Ok(db.query_row(&format!("select {DEVICE_COLUMNS} from devices where user_id = ? and public_key = ?"), params![user.id, public_key], DeviceRow::read).ok())
+					}
 				}
-				"fetch" if device.state == "enrolled" && !app.limits.hit(&format!("dev:{}:{}", user.id, ask.public_key), 1, 60) => Err("rate_limited"),
-				_ => {let _ = db.execute("update devices set last_seen = ? where id = ?", params![at, device.id]); Ok(Some(device))}
-			},
-			None if ask.op == "release" => Ok(None),
-			None => {
-				let (total, pending): (i64, i64) = db.query_row("select count(*), coalesce(sum(state = 'pending'), 0) from devices where user_id = ?", [user.id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap_or((0, 0));
-				let limit = if user.device_limit == 0 {NODE_DEVICES_MAX} else {user.device_limit.min(NODE_DEVICES_MAX)};
-				let (address, enroll) = (allocate(&db, &pool), ask.op == "confirm");
-				if total >= limit || (!enroll && pending >= PENDING_PLACES) || address.is_none() {Err("device_limit")}
-				else if !app.limits.hit(&format!("new:{}:{}", user.id, user.token_gen), 1, 600) {Err("rate_limited")}
-				else {
-					let secret = keys.seal_secret(&user.record_id, &format!("transport_secret:{}", ask.public_key), &crypto::random::<32>());
-					let _ = db.execute("insert into devices (user_id, name, public_key, secret_hash, address, transport_secret, state, token_gen, created, confirmed_at, last_seen) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![user.id, ask.name.clone().unwrap_or_default(), ask.public_key, hash.as_slice(), address, secret, if enroll {"enrolled"} else {"pending"}, user.token_gen, at, enroll.then_some(at), at]);
-					changed = true;
-					Ok(db.query_row(&format!("select {DEVICE_COLUMNS} from devices where user_id = ? and public_key = ?"), params![user.id, ask.public_key], DeviceRow::read).ok())
-				}
-			}
-		}
+			};
+			(changed, outcome)
+		}).await
 	};
 	if changed {
 		let app = app.clone();
@@ -212,10 +218,10 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 		Ok(Some(device)) => device,
 	};
 	if device.state == "enrolled" {
-		if let Some(token) = token {statics::remember(&app, &user, &device, &token, &ask.secret)}
+		if let Some(token) = token {statics::remember(&app, &user, &device, &token, &ask.secret).await}
 	}
 	let used = crate::node::usage(&app).await.remove(&user.name);
-	match document(&app, &user, &device, &signing, &signer, Form::Answer, used.as_ref()) {
+	match document(&app, &user, &device, &signing, &signer, Form::Answer, used.as_ref()).await {
 		Ok(text) => signed_response(text),
 		Err(error) => {
 			tracing::error!("a subscription document could not be built: {error}");

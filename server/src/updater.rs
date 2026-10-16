@@ -1,5 +1,5 @@
 //! Finding out that a newer panel exists, and asking for it. The panel runs unprivileged and never updates itself: a request is a file with the word `panel` in a folder only the panel and root can write, which a root service on the host answers (see `veilway.sh`). Everything GitHub sends is untrusted.
-use crate::{app::App, crypto::now, db::audit, http::{ok, Ctx, Failure}};
+use crate::{app::App, crypto::now, http::{ok, Ctx, Failure}};
 use axum::{extract::State, http::StatusCode, response::Response, Extension};
 use http_body_util::{BodyExt, Empty, Limited};
 use hyper::{body::Bytes, Request};
@@ -145,22 +145,25 @@ pub struct Requested {pub ok: bool, pub version: String}
 
 /// Writes the request. Nothing in it names a version, path or argument: the host script updates to the release it finds and verifies itself.
 pub async fn request(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {
-	// Held to the end, so two requests cannot both pass the checks. Nothing here awaits.
-	let mut state = app.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-	let found = state.found.as_ref().ok_or_else(|| Failure::conflict("There is no newer release."))?;
-	if state.requested_at.is_some_and(|at| now() - at < UPDATING) {return Err(Failure::conflict("An update was requested a moment ago."))}
-	let version = found.version.clone();
-	if app.cfg.update_request.exists() {return Err(Failure::conflict("An update is already requested."))}
-	// Written whole under another name and renamed, so the path unit only ever sees a complete file. The root side reads `request` alone and ignores this name.
-	let temporary = app.cfg.update_request.with_extension("tmp");
-	let _ = std::fs::remove_file(&temporary);
-	let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary).map_err(|error| match error.kind() {
-		ErrorKind::NotFound | ErrorKind::PermissionDenied => Failure::conflict("This server has no update service. Run `sudo bash veilway.sh update panel` on it once."),
-		_ => Failure::internal(error),
-	})?;
-	file.write_all(b"panel").and_then(|()| file.sync_all()).and_then(|()| std::fs::rename(&temporary, &app.cfg.update_request)).map_err(Failure::internal)?;
-	state.requested_at = Some(now());
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "update.request", "panel", &format!("from {CURRENT} to {version}"));
+	// Held until the request is written, so two requests cannot both pass the checks. Nothing awaits while it is held.
+	let version = {
+		let mut state = app.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		let found = state.found.as_ref().ok_or_else(|| Failure::conflict("There is no newer release."))?;
+		if state.requested_at.is_some_and(|at| now() - at < UPDATING) {return Err(Failure::conflict("An update was requested a moment ago."))}
+		let version = found.version.clone();
+		if app.cfg.update_request.exists() {return Err(Failure::conflict("An update is already requested."))}
+		// Written whole under another name and renamed, so the path unit only ever sees a complete file. The root side reads `request` alone and ignores this name.
+		let temporary = app.cfg.update_request.with_extension("tmp");
+		let _ = std::fs::remove_file(&temporary);
+		let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary).map_err(|error| match error.kind() {
+			ErrorKind::NotFound | ErrorKind::PermissionDenied => Failure::conflict("This server has no update service. Run `sudo bash veilway.sh update panel` on it once."),
+			_ => Failure::internal(error),
+		})?;
+		file.write_all(b"panel").and_then(|()| file.sync_all()).and_then(|()| std::fs::rename(&temporary, &app.cfg.update_request)).map_err(Failure::internal)?;
+		state.requested_at = Some(now());
+		version
+	};
+	app.db.audit(&ctx.actor, &ctx.source, "update.request", "panel", &format!("from {CURRENT} to {version}")).await;
 	ok(&Requested {ok: true, version})
 }
 

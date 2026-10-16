@@ -1,5 +1,5 @@
 //! The node's config through its control API: the schema, the document as a whole and by section, dry runs, the one path that applies a change, and the profile templates derived from the inbounds.
-use crate::{app::{App, Settings}, auth::reauthed, crypto::now, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
+use crate::{app::{App, Settings}, auth::reauthed, crypto::now, http::{json, ok, Body, Ctx, Failure}, node};
 use axum::{extract::{Path, State}, http::{header::CONTENT_TYPE, HeaderValue, StatusCode}, response::{IntoResponse, Response}, Extension};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -90,9 +90,9 @@ pub async fn get_section(State(app): State<Arc<App>>, Path(section): Path<String
 }
 
 /// The document with the panel's users in it, and their Xray credentials, since the node's `users` is what the panel owns.
-fn with_users(app: &App, mut document: Value) -> Result<Value, Failure> {
+async fn with_users(app: &Arc<App>, mut document: Value) -> Result<Value, Failure> {
 	if !document.is_object() {return Err(Failure::bad("The document is a JSON object."))}
-	node::fill(app, &mut document).map_err(|error| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "users_unavailable", error))?;
+	node::fill(app, &mut document).await.map_err(|error| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "users_unavailable", error))?;
 	Ok(document)
 }
 
@@ -102,7 +102,7 @@ pub struct DocumentIn {pub document: Value}
 
 /// Asks the node whether the document is valid, or what applying it would change. Nothing changes.
 pub async fn dry_run(app: Arc<App>, document: Value, path: &str) -> Result<Response, Failure> {
-	let (status, body) = call(&app, "POST", path, None, Some(&with_users(&app, document)?)).await?;
+	let (status, body) = call(&app, "POST", path, None, Some(&with_users(&app, document).await?)).await?;
 	Ok(json(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), &body))
 }
 
@@ -112,17 +112,17 @@ pub async fn diff(State(app): State<Arc<App>>, Body(input): Body<DocumentIn>) ->
 
 /// Validates the document on the node, then puts it in force with If-Match. The caller holds the panel's one turn at the node's config. A document the node refuses, or a revision that moved, changes nothing. The audit line names what changed, never a secret. The Xray inbounds are left out: their own audit lines name their changes, and the node shows their credentials as markers.
 pub(crate) async fn apply(app: &Arc<App>, ctx: &Ctx, document: Value, revision: &str, target: &str) -> Result<Value, Failure> {
-	let document = with_users(app, document)?;
+	let document = with_users(app, document).await?;
 	let (_, _, before) = running(app).await?;
 	let (status, checked) = call(app, "POST", "/v1/config/validate", None, Some(&document)).await?;
 	if status != 200 || checked.get("valid") != Some(&Value::Bool(true)) {return Err(Failure::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", checked.to_string().chars().take(4000).collect::<String>()))}
 	let (status, applied) = call(app, "PUT", "/v1/config", Some(revision), Some(&document)).await?;
 	match status {
 		200 => {
-			node::clear_defaults(app, &document);
+			node::clear_defaults(app, &document).await;
 			let mut changed = vec![format!("generation {}", applied.get("generation").and_then(Value::as_u64).unwrap_or(0))];
 			for key in before.as_object().into_iter().chain(document.as_object()).flat_map(|object| object.keys()).filter(|key| !["users", "xray"].contains(&key.as_str())).collect::<BTreeSet<_>>() {changes(key, &before[key.as_str()], &document[key.as_str()], &mut changed)}
-			audit(&app.db.lock(), &ctx.actor, &ctx.source, "config.apply", target, &changed.join(", "));
+			app.db.audit(&ctx.actor, &ctx.source, "config.apply", target, &changed.join(", ")).await;
 			Ok(applied)
 		}
 		409 | 428 => Err(Failure::conflict("The node's config is not the revision this change was made on. Read it again.")),
@@ -167,7 +167,7 @@ pub async fn put_config(State(app): State<Arc<App>>, Extension(ctx): Extension<C
 	let (_, _, live) = running(&app).await?;
 	let changed = |sections: &[&str]| sections.iter().any(|section| live[*section] != input.document[*section]);
 	if ctx.token_id.is_some() && changed(&["exits", "outbounds", "links", "log", "dns", "notices"]) {return Err(Failure::new(StatusCode::FORBIDDEN, "forbidden", "An API token cannot change exits, outbounds, links, log, dns or notices through the whole config."))}
-	if changed(&GUARDED) {reauthed(&app, &ctx)?}
+	if changed(&GUARDED) {reauthed(&app, &ctx).await?}
 	ok(&apply(&app, &ctx, input.document, &input.revision, "config").await?)
 }
 
@@ -183,7 +183,7 @@ pub async fn put_section(State(app): State<Arc<App>>, Extension(ctx): Extension<
 	if !SECTIONS.contains(&section.as_str()) {return Err(Failure::missing("section"))}
 	if input.value.is_null() && !OPTIONAL.contains(&section.as_str()) {return Err(Failure::bad("This section is required, so it cannot be null."))}
 	if !input.value.is_null() && (input.value.is_object() != OBJECTS.contains(&section.as_str()) || !(input.value.is_object() || input.value.is_array())) {return Err(Failure::bad(if OBJECTS.contains(&section.as_str()) {"This section is an object."} else {"This section is a list."}))}
-	if GUARDED.contains(&section.as_str()) {reauthed(&app, &ctx)?}
+	if GUARDED.contains(&section.as_str()) {reauthed(&app, &ctx).await?}
 	let _turn = app.node_lock.lock().await;
 	let (_, _, mut document) = running(&app).await?;
 	if input.value.is_null() {document.as_object_mut().map(|document| document.remove(&section));} else {document[&section] = input.value;}
@@ -240,7 +240,7 @@ fn derive(settings: &Settings, document: &Value) -> Vec<Value> {
 
 pub async fn derived_profiles(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let (revision, _, document) = running(&app).await?;
-	ok(&json!({"revision": revision, "templates": derive(&app.settings(), &document)}))
+	ok(&json!({"revision": revision, "templates": derive(&app.settings().await, &document)}))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -253,7 +253,7 @@ pub struct PreviewIn {
 /// The templates as they would be with these relays instead of the saved ones. Nothing is saved.
 pub async fn preview_profiles(State(app): State<Arc<App>>, Body(input): Body<PreviewIn>) -> Result<Response, Failure> {
 	let (revision, _, document) = running(&app).await?;
-	ok(&json!({"revision": revision, "templates": derive(&Settings {relays: input.relays, ..app.settings()}, &document)}))
+	ok(&json!({"revision": revision, "templates": derive(&Settings {relays: input.relays, ..app.settings().await}, &document)}))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -265,24 +265,24 @@ pub struct OverrideIn {
 
 pub async fn put_override(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(inbound): Path<String>, Body(input): Body<OverrideIn>) -> Result<Response, Failure> {
 	if inbound.is_empty() || inbound.len() > 64 || input.set.contains_key("device") || input.set.contains_key("id") || input.set.len() > 32 {return Err(Failure::bad("An override has at most 32 members and none of them is `id` or `device`."))}
-	let mut settings = app.settings();
+	let mut settings = app.settings().await;
 	if input.set.is_empty() {settings.profile_overrides.remove(&inbound);} else {settings.profile_overrides.insert(inbound.clone(), Value::Object(input.set));}
-	app.save_settings(&settings);
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "profile.override", &inbound, "");
+	app.save_settings(&settings).await;
+	app.db.audit(&ctx.actor, &ctx.source, "profile.override", &inbound, "").await;
 	ok(&json!({"overrides": settings.profile_overrides}))
 }
 
 /// Writes the derived templates into the settings' `profiles`, which is what the subscription endpoint serves. A profile that is not derived from an inbound stays. A template with something missing stops the publish.
 pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {
 	let (_, _, document) = running(&app).await?;
-	let mut settings = app.settings();
+	let mut settings = app.settings().await;
 	let templates = derive(&settings, &document);
 	if let Some(bad) = templates.iter().find(|template| !template["missing"].as_array().is_some_and(Vec::is_empty)) {return Err(Failure::bad(format!("The profile of inbound {} still needs: {}.", bad["inbound"].as_str().unwrap_or_default(), bad["missing"])))}
 	let ids: Vec<Value> = templates.iter().map(|template| template["profile"]["id"].clone()).collect();
 	settings.profiles.retain(|profile| !ids.contains(&profile["id"]));
 	settings.profiles.extend(templates.iter().map(|template| template["profile"].clone()));
-	app.save_settings(&settings);
-	audit(&app.db.lock(), &ctx.actor, &ctx.source, "settings.update", "settings", &format!("profiles changed at {}", now()));
+	app.save_settings(&settings).await;
+	app.db.audit(&ctx.actor, &ctx.source, "settings.update", "settings", &format!("profiles changed at {}", now())).await;
 	ok(&json!({"profiles": settings.profiles}))
 }
 
