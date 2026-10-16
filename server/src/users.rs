@@ -7,7 +7,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
-use veilway_proto::subscription::link::Carried;
+use subtle::ConstantTimeEq;
+use tokio::sync::Semaphore;
+use veilway_proto::subscription::{link::{Carried, Link}, sealed_file};
 
 /// Whether the node took the change. The panel's database is changed either way and the next successful push brings the node up to date.
 #[derive(Serialize, JsonSchema)]
@@ -367,6 +369,50 @@ pub async fn sub_show(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx
 	let token = user.token_copy.as_deref().and_then(|copy| keys.open_copy(&user.record_id, copy)).ok_or_else(|| Failure::new(StatusCode::GONE, "no_copy", "No copy of this link is kept. Reset the link to get a new one."))?;
 	audit(&app.db.lock(), &ctx.actor, &ctx.source, "link.show", &format!("user:{id}"), "");
 	ok(&view(&app.settings(), &app, &token).map_err(Failure::bad)?)
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SealedIn {
+	/// At least 10 characters. It locks the file and the panel keeps no copy of it, so it cannot be recovered. Send it another way than the file.
+	pub password: String,
+	/// The user's current link in the `veilway` form, for a link the panel keeps no copy of: one just made, or any link when the panel shows links once. It has to be the user's current token. Left out, the panel opens its own sealed copy.
+	pub link: Option<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct Sealed {
+	pub filename: String,
+	/// The sealed file, standard base64.
+	pub file: String,
+}
+
+/// Each file runs a memory-hard hash of 64 MiB, so one at a time.
+static SEALING: Semaphore = Semaphore::const_new(1);
+
+/// A sealed subscription file of the user's link (subscription format page, "Sealed subscription file"). It is an export of a secret like `sub_show`: the route needs a recent re-authentication, and the audit log says that a file was made, never the password or the link.
+pub async fn sub_sealed(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>, Body(input): Body<SealedIn>) -> Result<Response, Failure> {
+	if input.password.chars().count() < sealed_file::PASSWORD_MIN || input.password.len() > sealed_file::PASSWORD_MAX {return Err(Failure::bad(format!("The password needs at least {} characters and at most {} bytes.", sealed_file::PASSWORD_MIN, sealed_file::PASSWORD_MAX)))}
+	let _turn = SEALING.try_acquire().map_err(|_| Failure::conflict("Another sealed file is being made."))?;
+	let (user, lookup) = {
+		let db = app.db.lock();
+		(UserRow::load(&db, id)?, db.query_row("select token_lookup from users where id = ?", [id], |row| row.get::<_, Vec<u8>>(0))?)
+	};
+	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
+	// Only the token is taken from a link the browser sends, and only when it is this user's current one. The endpoint, key and pin of the file are always the panel's own.
+	let token = match input.link {
+		Some(text) => match Link::parse(text.trim()) {
+			Ok(Link::Native(native)) if bool::from(keys.token_lookup(native.token().expose()).as_slice().ct_eq(&lookup)) => *native.token().expose(),
+			_ => return Err(Failure::bad("That is not this user's current link.")),
+		},
+		None => user.token_copy.as_deref().and_then(|copy| keys.open_copy(&user.record_id, copy)).ok_or_else(|| Failure::new(StatusCode::GONE, "no_copy", "No copy of this link is kept. Reset the link to get a new one, or send the link you just made."))?,
+	};
+	let key = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).current().last().cloned().cloned().ok_or_else(|| Failure::bad("no signing key"))?;
+	let link = subs::link(&app.settings(), &key, &token).map_err(Failure::bad)?.veilway;
+	let (salt, nonce) = (crypto::random::<16>(), crypto::random::<12>());
+	let file = tokio::task::spawn_blocking(move || sealed_file::seal(&input.password, &link, salt, nonce)).await.map_err(Failure::internal)?.map_err(Failure::internal)?;
+	audit(&app.db.lock(), &ctx.actor, &ctx.source, "link.sealed", &format!("user:{id}"), "");
+	ok(&Sealed {filename: format!("veilway-{}.vwsealed", user.name), file: STANDARD.encode(file)})
 }
 
 #[derive(Deserialize, JsonSchema)]

@@ -1469,7 +1469,20 @@ export const en = {
 	"static.download": "Download as zip",
 	"static.downloaded": "Folder downloaded",
 	"banner.clock.title": "This server's clock is not synchronized",
-	"banner.clock.body": "Static mirrors name each file by the week it belongs to, and a clock that is more than a day off writes names that no app asks for. Documents are judged by time too. Turn on time synchronization (NTP) on this server."
+	"banner.clock.body": "Static mirrors name each file by the week it belongs to, and a clock that is more than a day off writes names that no app asks for. Documents are judged by time too. Turn on time synchronization (NTP) on this server.",
+	"sealed.button": "Download sealed file",
+	"sealed.title": "Sealed file for {name}",
+	"sealed.lead": "A file with this user's link, locked with a password. The app asks for the password when it opens the file, then goes on as with any link.",
+	"sealed.warn": "Send the password another way than the file",
+	"sealed.warnBody": "Use a different app or a call. Anyone who has the file and guesses the password gets the link, and the link is the account.",
+	"sealed.password": "Password",
+	"sealed.hint": "At least 10 characters. A few unrelated words work well. The panel keeps no copy of it.",
+	"sealed.passwordAgain": "Password again",
+	"sealed.length": "The password needs at least 10 characters.",
+	"sealed.match": "The two passwords differ.",
+	"sealed.audit": "Asks for your password and code again. The audit log records that a file was made, not the password or the link.",
+	"sealed.download": "Download",
+	"sealed.done": "Sealed file downloaded"
 };
 
 export type PanelKey = keyof typeof en;

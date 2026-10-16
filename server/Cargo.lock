@@ -1459,6 +1459,7 @@ dependencies = [
 name = "veilway-proto"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "base64",
  "hpke",
  "ring",

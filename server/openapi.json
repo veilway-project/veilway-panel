@@ -1359,6 +1359,42 @@
         ],
         "type": "object"
       },
+      "Sealed": {
+        "properties": {
+          "file": {
+            "description": "The sealed file, standard base64.",
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename",
+          "file"
+        ],
+        "type": "object"
+      },
+      "SealedIn": {
+        "additionalProperties": false,
+        "properties": {
+          "link": {
+            "description": "The user's current link in the `veilway` form, for a link the panel keeps no copy of: one just made, or any link when the panel shows links once. It has to be the user's current token. Left out, the panel opens its own sealed copy.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password": {
+            "description": "At least 10 characters. It locks the file and the panel keeps no copy of it, so it cannot be recovered. Send it another way than the file.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "type": "object"
+      },
       "SectionIn": {
         "additionalProperties": false,
         "properties": {
@@ -6748,6 +6784,85 @@
         },
         "summary": "Makes a new token. The old one stops working. The answer lists the devices enrolled with the old link and removes them when asked.",
         "x-access": "users"
+      }
+    },
+    "/users/{id}/subscription/sealed": {
+      "post": {
+        "operationId": "sealLink",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SealedIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Sealed"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The user's link in a sealed subscription file, locked with a password (Argon2id and ChaCha20-Poly1305, as base64 in `file`). The panel keeps no copy of the password. `link` is the user's current link when the panel holds no copy of it. Needs a recent re-authentication and is audited without the password or the link. No API token can do this.",
+        "x-access": "session-reauth"
       }
     },
     "/users/{id}/subscription/show": {
