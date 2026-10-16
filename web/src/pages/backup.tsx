@@ -7,7 +7,7 @@ const FILE_MAX = 64 * 1024 * 1024, PASSPHRASE_MIN = 12;
 
 export function BackupTab() {
 	const {t} = useP(), guard = useGuard(), toast = useToast(), [passphrase, setPassphrase] = useState(""), [again, setAgain] = useState(""), [tried, setTried] = useState(false), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
-	const [file, setFile] = useState<File | null>(null), [restorePass, setRestorePass] = useState(""), [asking, setAsking] = useState(false), [restoreError, setRestoreError] = useState<unknown>(null), [restoring, setRestoring] = useState(false), [restored, setRestored] = useState(false), [triedRestore, setTriedRestore] = useState(false);
+	const [file, setFile] = useState<File | null>(null), [restorePass, setRestorePass] = useState(""), [asking, setAsking] = useState(false), [restoreError, setRestoreError] = useState<unknown>(null), [restoring, setRestoring] = useState(false), [restored, setRestored] = useState(false), [warnings, setWarnings] = useState<string[]>([]), [triedRestore, setTriedRestore] = useState(false);
 	const problems = {passphrase: passphrase.length >= PASSPHRASE_MIN ? undefined : t("backup.error.length"), again: again === passphrase ? undefined : t("backup.error.match")};
 	const fileProblem = !file ? t("backup.error.noFile") : file.size > FILE_MAX ? t("backup.error.size") : undefined;
 	const download = async () => {
@@ -41,7 +41,7 @@ export function BackupTab() {
 			let binary = "";
 			for (let at = 0; at < bytes.length; at += 0x8000) binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
 			const before = (await api("get", "/status")).start_id;
-			await guard(() => api("post", "/backup/restore", {body: {file: btoa(binary), passphrase: restorePass}}));
+			const done = await guard(() => api("post", "/backup/restore", {body: {file: btoa(binary), passphrase: restorePass}}));
 			setRestored(true);
 			// The panel stops and starts again on the restored files. The page reloads once the server answers with another start id; the old sessions are gone, so it lands on the sign-in page.
 			for (let tries = 0; tries < 120; tries++) {
@@ -49,6 +49,8 @@ export function BackupTab() {
 				const now = await api("get", "/status").then(status => status.start_id, () => null);
 				if (now !== null && now !== before) break;
 			}
+			// What the restore found about the gateway keys is read before the page goes on, since the reload lands on the sign-in page.
+			if (done.warnings.length > 0) { setWarnings(done.warnings); return; }
 			location.reload();
 		} catch (failure) {
 			setRestoreError(failure);
@@ -73,6 +75,7 @@ export function BackupTab() {
 				<TextField label={t("backup.passphrase")} type="password" autoComplete="off" value={restorePass} onChange={setRestorePass} error={triedRestore && !restorePass ? t("backup.error.passphrase") : undefined}/>
 				<ErrorNote error={restoreError}/>
 				{restored && <Banner tone="info" title={t("backup.restore.done")}/>}
+				{warnings.length > 0 && <Banner tone="warning" title={t("backup.restore.warnTitle")} action={<Button size="sm" onClick={() => location.reload()}>{t("backup.restore.continue")}</Button>}>{warnings.join(" ")}</Banner>}
 				<div><Button type="submit" variant="danger" disabled={restoring}>{t("backup.restore.button")}</Button></div>
 			</form>
 		</Glass>

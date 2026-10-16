@@ -2,7 +2,7 @@ use axum::{body::Body, extract::{ConnectInfo, State}, http::{header::{CONTENT_TY
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use std::{net::SocketAddr, path::PathBuf, sync::{atomic::Ordering, Arc, Mutex}};
+use std::{future::Future, net::SocketAddr, path::PathBuf, sync::{atomic::Ordering, Arc, Mutex}};
 use tower::ServiceExt;
 use veilway_panel::{app::{bucket, App, Limiter, Signing}, build, config::{Config, TrustedMirror}, crypto, mirrors, openapi, router, upkeep_once, Upkeep};
 use veilway_proto::subscription::{envelope::{self, Kid}, exchange::{self, GatewayKey}, link::Link, payload::{self, Payload, Reason}, sealed_file, Tag, BODY_MAX};
@@ -95,16 +95,16 @@ impl Harness {
 		(created["user"]["id"].as_i64().unwrap(), Link::parse(created["link"]["veilway"].as_str().unwrap_or_else(|| panic!("no link: {created}"))).unwrap())
 	}
 	/// A request sealed to `key` with `body` as its JSON, `t` added when the body has none. Gives the answer, opened to its envelope when it was a sealed one, and what opens it.
-	async fn sealed(&self, key: &GatewayKey, mut body: Value, host: &str, source: &str, edit: impl FnOnce(axum::http::request::Builder) -> axum::http::request::Builder) -> (Answer, exchange::Sealed) {
+	async fn sealed(&self, key: &GatewayKey, mut body: Value, path: &str, source: &str, edit: impl FnOnce(axum::http::request::Builder) -> axum::http::request::Builder) -> (Answer, exchange::Sealed) {
 		if body.get("t").is_none() {body["t"] = json!(crypto::now());}
 		let sealed = exchange::seal(key, body.to_string().as_bytes(), &mut crypto::fill).unwrap();
-		let mut answer = self.send_bytes(edit(Request::builder().method(Method::POST).uri("/s").header(CONTENT_TYPE, "application/octet-stream").header(HOST, host)), sealed.bytes().to_vec(), source).await;
+		let mut answer = self.send_bytes(edit(Request::builder().method(Method::POST).uri(path).header(CONTENT_TYPE, "application/octet-stream").header(HOST, "panel.example.org")), sealed.bytes().to_vec(), source).await;
 		if answer.status == StatusCode::OK {answer.body = sealed.open(&answer.body).expect("the answer opens");}
 		(answer, sealed)
 	}
 	async fn sub(&self, link: &Link, body: Value, source: &str) -> Answer {
 		let Link::Native(native) = link else {panic!("not native")};
-		self.sealed(&native.gateway(), body, "panel.example.org", source, |request| request).await.0
+		self.sealed(&native.gateway(), body, "/s", source, |request| request).await.0
 	}
 	async fn fetch(&self, link: &Link, kids: &[Kid], device: u8, op: &str, name: Option<&str>) -> Answer {
 		let Link::Native(native) = link else {panic!("not native")};
@@ -294,7 +294,7 @@ async fn signed_documents_and_refusals_verify() {
 		h.sub(&link, body, "198.51.100.7").await
 	};
 	assert_eq!(refusal_of(&mismatch, &[key]), Reason::DeviceMismatch);
-	h.app.limits.clear(&format!("new:{id}:1"));
+	h.app.sub_limits.clear(&format!("new:{id}:1"));
 	// A second device fits, a third does not, and a pending place can be released.
 	assert!(matches!(opened(&h.fetch(&link, &kids, 2, "fetch", None).await, &[key]), Payload::Subscription(_)));
 	assert_eq!(refusal_of(&h.fetch(&link, &kids, 3, "fetch", None).await, &[key]), Reason::DeviceLimit);
@@ -621,9 +621,9 @@ fn config_refuses_what_the_panel_cannot_serve_safely() {
 
 #[test]
 fn ipv6_hosts_share_a_limit_and_the_limiter_stays_bounded() {
-	assert_eq!(bucket("2001:db8:1:2::1"), bucket("2001:db8:1:2:ffff::9"));
-	assert_ne!(bucket("2001:db8:1:2::1"), bucket("2001:db8:1:3::1"));
-	assert_eq!(bucket("192.0.2.7"), "192.0.2.7");
+	assert_eq!(bucket("2001:db8:1:2::1", 64), bucket("2001:db8:1:2:ffff::9", 64));
+	assert_ne!(bucket("2001:db8:1:2::1", 64), bucket("2001:db8:1:3::1", 64));
+	assert_eq!(bucket("192.0.2.7", 64), "192.0.2.7");
 	let limiter = Limiter::default();
 	for index in 0..100_000 {limiter.hit(&index.to_string(), 1, 3600);}
 	assert!(!limiter.hit("one more", 1, 3600));
@@ -1041,6 +1041,11 @@ async fn a_backup_is_downloaded_and_restored_with_the_panel_restarting_on_the_ol
 	assert!(answer.json()["filename"].as_str().unwrap().ends_with(".vwbackup"));
 	assert!(!STANDARD.decode(&file).unwrap().windows(5).any(|window| window == b"alice"));
 	h.user(&session, "late", json!({})).await;
+	// The backup holds the gateway key file as it was: a switch since then makes the host's file differ from it.
+	let (backed_up, old_next) = (std::fs::read(&h.app.cfg.gateway).unwrap(), std::fs::read_to_string(&h.app.cfg.gateway_next).unwrap());
+	assert_eq!(h.call(Method::POST, "/p/api/gateway-keys/rotate", Some(&session), Some(json!({})), "10.0.0.1").await.status, StatusCode::OK);
+	let switched = std::fs::read(&h.app.cfg.gateway).unwrap();
+	assert_ne!(backed_up, switched);
 	let restore = |file: String, passphrase: &'static str| json!({"file": file, "passphrase": passphrase});
 	let wrong = h.call(Method::POST, "/p/api/backup/restore", Some(&session), Some(restore(file.clone(), "another long passphrase")), "10.0.0.1").await;
 	assert_eq!(wrong.status, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&wrong.body));
@@ -1050,7 +1055,7 @@ async fn a_backup_is_downloaded_and_restored_with_the_panel_restarting_on_the_ol
 	let newer_path = newer.to_string_lossy().to_string();
 	h.app.db.call(move |db| db.execute("vacuum into ?", [newer_path]).unwrap()).await.unwrap();
 	rusqlite::Connection::open(&newer).unwrap().pragma_update(None, "user_version", 99).unwrap();
-	let content = veilway_panel::backup::pack([&std::fs::read(&newer).unwrap(), &std::fs::read(&h.app.cfg.keys).unwrap(), &std::fs::read(&h.app.cfg.signing).unwrap()]);
+	let content = veilway_panel::backup::pack([&std::fs::read(&newer).unwrap(), &std::fs::read(&h.app.cfg.keys).unwrap(), &std::fs::read(&h.app.cfg.signing).unwrap(), &std::fs::read(&h.app.cfg.gateway).unwrap()]);
 	let refused = h.call(Method::POST, "/p/api/backup/restore", Some(&session), Some(restore(STANDARD.encode(veilway_panel::backup::seal("a long enough passphrase", &content).unwrap()), "a long enough passphrase")), "10.0.0.1").await;
 	assert_eq!(refused.status, StatusCode::BAD_REQUEST);
 	assert!(refused.json()["error"]["message"].as_str().unwrap().contains("newer"));
@@ -1063,6 +1068,11 @@ async fn a_backup_is_downloaded_and_restored_with_the_panel_restarting_on_the_ol
 	assert_eq!(h.call(Method::GET, "/p/api/status", None, None, "10.0.0.1").await.status, StatusCode::OK);
 	let saved = h.dir.join(done.json()["saved_as"].as_str().unwrap());
 	assert!(saved.join("panel.db").exists() && saved.join("panel.keys").exists() && saved.join("signing.keys").exists());
+	assert_eq!(std::fs::read(saved.join("gateway.keys")).unwrap(), switched, "the file the restore replaced is kept");
+	assert_eq!(std::fs::read(&h.app.cfg.gateway).unwrap(), backed_up, "the backup's gateway keys are back");
+	let warnings = done.json()["warnings"].as_array().unwrap().clone();
+	assert!(warnings.len() == 1 && warnings[0].as_str().unwrap().contains("not the ones in the backup"), "{warnings:?}");
+	assert!(!String::from_utf8_lossy(&backed_up).contains(old_next.trim()), "the next key's private half is in no backup");
 	let reopened = build(h.app.cfg.clone()).unwrap();
 	let names: Vec<String> = reopened.db.call(|db| db.prepare("select name from users").unwrap().query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect()).await.unwrap();
 	assert_eq!(names, ["alice"]);
@@ -1327,8 +1337,8 @@ async fn a_mirror_header_names_the_source_and_anything_else_is_unknown() {
 	assert!([9_413, 36_979, 140_867, 538_201, 1_089_437].contains(&answer.body.len()));
 	let opened_body = Answer {body: sealed.open(&answer.body).unwrap(), ..answer};
 	assert!(matches!(opened(&opened_body, &[key]), Payload::Subscription(_)));
-	assert_eq!(h.app.limits.count("sub:203.0.113.9", 60), 1, "the forwarded address is the source");
-	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 0);
+	assert_eq!(h.app.sub_limits.count("sub:203.0.113.9", 60), 1, "the forwarded address is the source");
+	assert_eq!(h.app.sub_limits.count("sub:198.51.100.7", 60), 0);
 	assert_eq!(refused(send(Some((valid, Vec::new())), bytes.clone()).await), mirrored_unknown, "a replayed request with a valid header is 599");
 	let (bytes, _) = make(1);
 	for (what, value) in [
@@ -1344,15 +1354,15 @@ async fn a_mirror_header_names_the_source_and_anything_else_is_unknown() {
 	tampered[100] ^= 1;
 	assert_eq!(refused(send(Some((header("relay", "203.0.113.9", now, &nonce(10), &secret, &tampered), Vec::new())), tampered).await), mirrored_unknown, "a request that does not open, with a valid header, is 599");
 	let (over, _) = make(1);
-	for _ in 0..120 {h.app.limits.hit("sub:203.0.113.9", 120, 60);}
+	for _ in 0..120 {h.app.sub_limits.hit("sub:203.0.113.9", 120, 60);}
 	assert_eq!(refused(send(Some((header("relay", "203.0.113.9", now, &nonce(8), &secret, &over), Vec::new())), over.clone()).await), mirrored_unknown, "a source over its limit");
-	h.app.limits.clear("sub:203.0.113.9");
+	h.app.sub_limits.clear("sub:203.0.113.9");
 	let answer = send(Some((header("relay", "203.0.113.9", now, &nonce(8), &secret, &over), Vec::new())), over).await;
 	assert_eq!(answer.status, StatusCode::OK, "a refused request takes no nonce and spends nothing but its own");
 	let (plain, sealed) = make(1);
 	let answer = send(None, plain).await;
 	assert!(matches!(opened(&Answer {body: sealed.open(&answer.body).unwrap(), ..answer}, &[key]), Payload::Subscription(_)), "no header is an ordinary request");
-	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 1, "only a request that opened and was new is charged to its source");
+	assert_eq!(h.app.sub_limits.count("sub:198.51.100.7", 60), 1, "only a request that opened and was new is charged to its source");
 }
 
 #[tokio::test]
@@ -1556,10 +1566,10 @@ async fn with_the_code_off_short_passwords_are_refused_and_a_stored_short_one_mu
 
 fn gateway_of(link: &Link) -> GatewayKey {if let Link::Native(native) = link {native.gateway()} else {panic!("not native")}}
 
-async fn envelope_on(h: &Harness, link: &Link, host: &str, device: u8) -> Answer {
+async fn envelope_on(h: &Harness, link: &Link, path: &str, device: u8) -> Answer {
 	let Link::Native(native) = link else {panic!("not native")};
 	let body = json!({"v": 1, "token": URL_SAFE_NO_PAD.encode(native.token().expose()), "kids": [native.key().kid().text()], "device_public_key": STANDARD.encode([device; 32]), "device_secret": URL_SAFE_NO_PAD.encode([device; 16]), "op": "confirm"});
-	h.sealed(&native.gateway(), body, host, "198.51.100.7", |request| request).await.0
+	h.sealed(&native.gateway(), body, path, "198.51.100.7", |request| request).await.0
 }
 
 #[tokio::test]
@@ -1695,14 +1705,14 @@ async fn only_a_new_valid_request_is_charged_to_its_source_and_a_restart_refuses
 	cut[40] ^= 1;
 	let unknown_token = seal(json!({"v": 1, "t": now, "token": URL_SAFE_NO_PAD.encode([5u8; 16]), "kids": [native.key().kid().text()], "device_public_key": STANDARD.encode([1u8; 32]), "device_secret": URL_SAFE_NO_PAD.encode([1u8; 16]), "op": "fetch"}));
 	for bytes in [cut, vec![0; 1073], seal(body(now - 1000)), vec![1; 10]] {send(bytes).await;}
-	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 0, "nothing that failed to open or was outside the window is charged");
+	assert_eq!(h.app.sub_limits.count("sub:198.51.100.7", 60), 0, "nothing that failed to open or was outside the window is charged");
 	send(unknown_token).await;
-	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 1, "a request that opened is charged, whoever it is for");
+	assert_eq!(h.app.sub_limits.count("sub:198.51.100.7", 60), 1, "a request that opened is charged, whoever it is for");
 	let valid = seal(body(now));
 	assert_eq!(send(valid.clone()).await.status, StatusCode::OK);
-	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 2);
+	assert_eq!(h.app.sub_limits.count("sub:198.51.100.7", 60), 2);
 	send(valid.clone()).await;
-	assert_eq!(h.app.limits.count("sub:198.51.100.7", 60), 2, "a replay is not charged");
+	assert_eq!(h.app.sub_limits.count("sub:198.51.100.7", 60), 2, "a replay is not charged");
 	// A request from before a restart is refused after it, whatever its window.
 	tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
 	let restarted = rebuilt(&h, "on").await;
@@ -1718,9 +1728,10 @@ async fn a_clock_that_steps_back_does_not_reopen_the_window() {
 	std::fs::create_dir_all(&dir).unwrap();
 	let mut hold = veilway_panel::gateway::Hold::load(&dir.join("gateway.keys"), &dir.join("gateway.next"), true).unwrap();
 	let at = crypto::now();
-	assert!(hold.open(&[0; 1073], at + 1000, || true).unwrap().is_err());
+	let open = |hold: &mut veilway_panel::gateway::Hold, at: i64| {let unsealed = hold.keyring().unwrap().unseal(&[0; 1073]); hold.admit(unsealed, at, || true).unwrap()};
+	assert!(open(&mut hold, at + 1000).is_err());
 	assert_eq!(hold.steps_back(), 0);
-	assert!(hold.open(&[0; 1073], at, || true).unwrap().is_err());
+	assert!(open(&mut hold, at).is_err());
 	assert_eq!(hold.steps_back(), 1, "the step back is counted, and logged at warning level");
 	assert_eq!(hold.counts.size + hold.counts.open + hold.counts.key, 2);
 	let _ = std::fs::remove_dir_all(dir);
@@ -1762,17 +1773,17 @@ async fn endpoints_resolve_user_then_group_then_default_and_moves_are_signed_wit
 	assert_eq!((dry["applied"].clone(), dry["moving"].clone(), dry["staying"].clone()), (json!(false), json!(1), json!(1)));
 	assert_eq!(resolved(ann_id).await["resolved"], "main");
 	// Before the move: a document on the old endpoint names the endpoint ann is to use, which is the one she reached.
-	let Payload::Subscription(before) = opened(&envelope_on(&h, &ann, "panel.example.org", 1).await, &[key_of(&ann)]) else {panic!("a document")};
+	let Payload::Subscription(before) = opened(&envelope_on(&h, &ann, "/s/main", 1).await, &[key_of(&ann)]) else {panic!("a document")};
 	let named = before.main_endpoint.clone().unwrap();
 	assert_eq!(named.url.as_str(), "https://panel.example.org/s");
 	let moved = h.call(Method::POST, "/p/api/endpoints/move", Some(&session), Some(json!({"group": "vip", "endpoint": "blue"})), "10.0.0.1").await.json();
 	assert_eq!((moved["applied"].clone(), moved["moving"].clone()), (json!(true), json!(1)));
 	assert_eq!((resolved(ann_id).await["resolved"].clone(), resolved(ann_id).await["source"].clone(), resolved(cy_id).await["resolved"].clone()), (json!("blue"), json!("group"), json!("main")));
 	// The old endpoint keeps answering and its document asks for the move. The new endpoint answers a fresh document with a higher serial that names itself.
-	let Payload::Subscription(asks) = opened(&envelope_on(&h, &ann, "panel.example.org", 1).await, &[key_of(&ann)]) else {panic!("a document")};
+	let Payload::Subscription(asks) = opened(&envelope_on(&h, &ann, "/s/main", 1).await, &[key_of(&ann)]) else {panic!("a document")};
 	let asked = asks.main_endpoint.clone().unwrap();
 	assert_eq!((asked.url.as_str(), asked.gateway_keys.clone()), ("https://blue.example.net/s", asks.gateway_keys.clone()));
-	let Payload::Subscription(there) = opened(&envelope_on(&h, &ann, "blue.example.net", 1).await, &[key_of(&ann)]) else {panic!("a document")};
+	let Payload::Subscription(there) = opened(&envelope_on(&h, &ann, "/s/blue", 1).await, &[key_of(&ann)]) else {panic!("a document")};
 	assert!(there.serial > asks.serial, "{} is above {}", there.serial, asks.serial);
 	assert_eq!(there.main_endpoint.as_ref().unwrap().url.as_str(), asked.url.as_str(), "the document of the new endpoint names that endpoint, as the move check needs");
 	assert_eq!(there.id, asks.id);
@@ -1828,12 +1839,377 @@ async fn endpoint_rules_pins_http_and_one_host_one_endpoint() {
 	let Link::Native(native) = &plain else {panic!()};
 	assert_eq!((native.pin().is_none(), native.veilway().starts_with("veilway://sub-plain/203.0.113.8:8080/s#v1.")), (true, true));
 	let key = key_of(&plain);
-	// The plain endpoint answers by its host and its document names it, with no pins.
-	let answer = envelope_on(&h, &plain, "203.0.113.8:8080", 1).await;
+	// The plain endpoint answers by its path and its document names it, with no pins.
+	let answer = envelope_on(&h, &plain, "/s/plain", 2).await;
 	let Payload::Subscription(document) = opened(&answer, &[key]) else {panic!("a document")};
 	assert_eq!(document.main_endpoint.as_ref().unwrap().url.as_str(), "http://203.0.113.8:8080/s");
 	assert!(document.endpoint_pins.is_empty());
 	// The pinned endpoint's document lists its pin.
-	let Payload::Subscription(pinned_document) = opened(&envelope_on(&h, &pinned, "203.0.113.7:8443", 1).await, &[key_of(&pinned)]) else {panic!("a document")};
+	let Payload::Subscription(pinned_document) = opened(&envelope_on(&h, &pinned, "/s/pinned", 1).await, &[key_of(&pinned)]) else {panic!("a document")};
 	assert_eq!(pinned_document.endpoint_pins, vec![[4u8; 32]]);
+}
+
+fn pins_of(numbers: [u8; 2]) -> Vec<String> {numbers.iter().map(|number| STANDARD.encode([*number; 32])).collect()}
+
+fn pinned_endpoints() -> Value {json!({"endpoints": [{"name": "old", "url": "https://203.0.113.7:8443/s", "pins": pins_of([1, 2])}, {"name": "new", "url": "https://203.0.113.9:8443/s", "pins": pins_of([3, 4])}], "default_endpoint": "old"})}
+
+fn host_is(host: &'static str) -> impl FnOnce(axum::http::request::Builder) -> axum::http::request::Builder {
+	move |mut request| {
+		request.headers_mut().unwrap().insert(HOST, host.parse().unwrap());
+		request
+	}
+}
+
+fn fetch_body(link: &Link, device: u8) -> Value {
+	let Link::Native(native) = link else {panic!("not native")};
+	json!({"v": 1, "token": URL_SAFE_NO_PAD.encode(native.token().expose()), "kids": [native.key().kid().text()], "device_public_key": STANDARD.encode([device; 32]), "device_secret": URL_SAFE_NO_PAD.encode([device; 16]), "op": "confirm"})
+}
+
+#[tokio::test]
+async fn an_endpoint_is_told_by_its_path_alone_and_its_pins_follow_the_endpoint_the_request_reached() {
+	let secret = [9u8; 32];
+	let h = Harness::with_config(None, |cfg| cfg.trusted_mirrors = vec![TrustedMirror {name: "relay".into(), secret: URL_SAFE_NO_PAD.encode(secret)}]).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, pinned_endpoints()).await;
+	let (ann_id, ann) = h.user(&session, "ann", json!({})).await;
+	let key = key_of(&ann);
+	let forget = || h.app.sub_limits.clear(&format!("dev:{ann_id}:{}", STANDARD.encode([1u8; 32])));
+	let Payload::Subscription(settled) = opened(&envelope_on(&h, &ann, "/s/old", 1).await, &[key]) else {panic!("a document")};
+	assert_eq!((settled.endpoint_pins.clone(), settled.main_endpoint.as_ref().unwrap().url.as_str()), (vec![[1u8; 32], [2u8; 32]], "https://203.0.113.7:8443/s"));
+	// The move: ann is to use the new endpoint. The old endpoint still answers her, and lists its own pins.
+	assert_eq!(h.call(Method::POST, "/p/api/endpoints/move", Some(&session), Some(json!({"users": [ann_id], "endpoint": "new"})), "10.0.0.1").await.status, StatusCode::OK);
+	forget();
+	let Payload::Subscription(by_old) = opened(&envelope_on(&h, &ann, "/s/old", 1).await, &[key]) else {panic!("a document")};
+	assert_eq!(by_old.endpoint_pins, vec![[1u8; 32], [2u8; 32]], "the pins of the endpoint reached, which the client holds");
+	let asked = by_old.main_endpoint.as_ref().unwrap();
+	assert_eq!((asked.url.as_str(), asked.pins.clone()), ("https://203.0.113.9:8443/s", vec![[3u8; 32], [4u8; 32]]), "the move names the endpoint she is to use");
+	forget();
+	let Payload::Subscription(by_new) = opened(&envelope_on(&h, &ann, "/s/new", 1).await, &[key]) else {panic!("a document")};
+	assert_eq!(by_new.endpoint_pins, vec![[3u8; 32], [4u8; 32]]);
+	// The Host header, whatever it says, decides nothing: the path does.
+	forget();
+	let (answer, _) = h.sealed(&gateway_of(&ann), fetch_body(&ann, 1), "/s/old", "198.51.100.7", host_is("203.0.113.9:8443")).await;
+	let Payload::Subscription(lying) = opened(&answer, &[key]) else {panic!("a document")};
+	assert_eq!(lying.endpoint_pins, vec![[1u8; 32], [2u8; 32]], "a Host of the new endpoint on the old path is still the old endpoint");
+	// The bare path reaches no named endpoint: no pins, and never the resolved endpoint's in place of the one reached. A path no endpoint has is an unknown path.
+	forget();
+	let Payload::Subscription(bare) = opened(&envelope_on(&h, &ann, "/s", 1).await, &[key]) else {panic!("a document")};
+	assert!(bare.endpoint_pins.is_empty() && bare.main_endpoint.is_some());
+	let unknown = h.call(Method::GET, "/nothing-here", None, None, "198.51.100.7").await.shape();
+	assert_eq!(envelope_on(&h, &ann, "/s/nowhere", 1).await.shape(), unknown);
+	assert_eq!(h.call(Method::POST, "/s/", None, None, "198.51.100.7").await.shape().0, 404);
+	// The endpoints she reached are what the page counts.
+	let reached: Vec<String> = h.app.db.call(move |db| db.prepare("select endpoint from endpoint_use where user_id = ? order by endpoint").unwrap().query_map([ann_id], |row| row.get(0)).unwrap().map(Result::unwrap).collect()).await.unwrap();
+	assert_eq!(reached, ["new", "old"]);
+	// A relay mirror forwards to the path of the endpoint its link names, and the document it carries lists that endpoint's pins.
+	let Link::Native(native) = &ann else {panic!()};
+	let mut body = fetch_body(&ann, 1);
+	body["op"] = json!("fetch");
+	body["t"] = json!(crypto::now());
+	let sealed = exchange::seal(&native.gateway(), body.to_string().as_bytes(), &mut crypto::fill).unwrap();
+	forget();
+	let (at, nonce) = (crypto::now(), URL_SAFE_NO_PAD.encode([5u8; 16]));
+	let header = format!("v1;relay;203.0.113.50;{at};{nonce};{}", URL_SAFE_NO_PAD.encode(mirrors::mac(&secret, "relay", "203.0.113.50", at, &nonce, sealed.bytes())));
+	let mut relayed = h.send_bytes(Request::builder().method(Method::POST).uri("/s/old").header(CONTENT_TYPE, "application/octet-stream").header(HOST, "relay.example.net").header(mirrors::HEADER, header), sealed.bytes().to_vec(), "198.51.100.7").await;
+	relayed.body = sealed.open(&relayed.body).unwrap();
+	let Payload::Subscription(through) = opened(&relayed, &[key]) else {panic!("a document")};
+	assert_eq!(through.endpoint_pins, vec![[1u8; 32], [2u8; 32]], "the path of the mirror's upstream names the endpoint");
+}
+
+#[tokio::test]
+async fn a_static_file_carries_pins_only_for_an_account_with_no_move_pending() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	let base = "https://files.example.net/vw/";
+	h.configure(&session, json!({"static_mirrors": [base], "endpoints": pinned_endpoints()["endpoints"].clone(), "default_endpoint": "old"})).await;
+	let (ann_id, ann) = h.user(&session, "ann", json!({})).await;
+	let (_, bob) = h.user(&session, "bob", json!({})).await;
+	for (link, device) in [(&ann, 1), (&bob, 2)] {assert_eq!(envelope_on(&h, link, "/s/old", device).await.status, StatusCode::OK);}
+	assert_eq!(h.call(Method::POST, "/p/api/endpoints/move", Some(&session), Some(json!({"users": [ann_id], "endpoint": "new"})), "10.0.0.1").await.status, StatusCode::OK);
+	let at = crypto::now();
+	veilway_panel::statics::round(&h.app, at).await.unwrap();
+	let directory = h.dir.join("static").join(veilway_panel::statics::label(base)).join("current");
+	let read = |link: &Link, device: u8| {
+		let Link::Native(native) = link else {panic!()};
+		let keys = veilway_proto::keys::MirrorKeys::derive(&<[u8; 16]>::try_from(native.token().expose().as_ref()).unwrap(), &[device; 16], &[device; 32]);
+		let epoch = veilway_proto::subscription::mirror::epoch(at as u64);
+		let body = std::fs::read(directory.join(veilway_proto::subscription::mirror::file_name(&keys, base, epoch))).unwrap();
+		let found = veilway_proto::subscription::mirror::open(&keys, base, epoch, &body).unwrap();
+		let Payload::Subscription(document) = payload::parse(&envelope::verify(&found, &[native.key()], BODY_MAX).unwrap()).unwrap() else {panic!("a document")};
+		document
+	};
+	let (moving, settled) = (read(&ann, 1), read(&bob, 2));
+	assert!(moving.endpoint_pins.is_empty() && moving.main_endpoint.as_ref().unwrap().url.as_str() == "https://203.0.113.9:8443/s", "ann is moving: her file names the move and lists no pins, which a client that holds the old ones would refuse");
+	assert_eq!(settled.endpoint_pins, vec![[1u8; 32], [2u8; 32]], "bob has not moved: his file lists the pins of his endpoint");
+}
+
+#[tokio::test]
+async fn a_stored_settings_row_that_does_not_parse_stops_the_start_and_is_left_alone() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let damaged = r#"{"provider_name": "Test Net", "endpoints": "not a list""#;
+	h.app.db.call(move |db| db.execute("update settings set value = ? where key = 'settings'", [damaged]).unwrap()).await.unwrap();
+	let Err(error) = build(h.app.cfg.clone()) else {panic!("the panel started on settings it could not read")};
+	assert!(error.contains("stored settings") && error.contains("untouched"), "{error}");
+	let kept: String = h.app.db.call(|db| db.query_row("select value from settings where key = 'settings'", [], |row| row.get(0)).unwrap()).await.unwrap();
+	assert_eq!(kept, damaged, "the row is as it was");
+	// A row that is not there at all is a first start, and gives the defaults.
+	h.app.db.call(|db| db.execute("delete from settings where key = 'settings'", []).unwrap()).await.unwrap();
+	assert_eq!(build(h.app.cfg.clone()).unwrap().settings().provider_name, "Veilway");
+}
+
+#[tokio::test]
+async fn a_device_key_belongs_to_one_account_and_is_never_a_nodes_inbound_key() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (_, ann) = h.user(&session, "ann", json!({})).await;
+	let (bob_id, bob) = h.user(&session, "bob", json!({})).await;
+	assert_eq!(h.fetch(&ann, &[key_of(&ann).kid()], 1, "confirm", None).await.status, StatusCode::OK);
+	h.app.sub_limits.clear(&format!("new:{bob_id}:1"));
+	// Bob offers ann's device key with a secret of his own: the answer is the one for a device whose secret is not the stored one, and nothing is stored for him.
+	let theirs = h.fetch(&bob, &[key_of(&bob).kid()], 1, "confirm", None).await;
+	assert_eq!(refusal_of(&theirs, &[key_of(&bob)]), Reason::DeviceMismatch);
+	// The key of an inbound of the node (the configuration has [7; 32]) is no device's.
+	let node = h.fetch(&bob, &[key_of(&bob).kid()], 7, "confirm", None).await;
+	assert_eq!(refusal_of(&node, &[key_of(&bob)]), Reason::DeviceMismatch);
+	assert_eq!(h.app.db.call(move |db| db.query_row("select count(*) from devices where user_id = ?", [bob_id], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap(), 0);
+	// Another key is taken as before, and the table itself refuses a key twice.
+	assert_eq!(h.fetch(&bob, &[key_of(&bob).kid()], 2, "confirm", None).await.status, StatusCode::OK);
+	let twice = h.app.db.call(move |db| db.execute("update devices set public_key = ? where user_id = ?", rusqlite::params![STANDARD.encode([1u8; 32]), bob_id])).await.unwrap();
+	assert!(twice.is_err(), "a unique index on the key");
+}
+
+#[tokio::test]
+async fn the_endpoints_limits_are_its_own_and_an_ipv6_source_counts_by_its_48() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (_, ann) = h.user(&session, "ann", json!({})).await;
+	assert_eq!((bucket("2001:db8:1:2::1", 48), bucket("192.0.2.7", 48)), (bucket("2001:db8:1:ffff::9", 48), "192.0.2.7".to_string()));
+	assert_ne!(bucket("2001:db8:1:2::1", 48), bucket("2001:db8:2:2::1", 48));
+	let Link::Native(native) = &ann else {panic!()};
+	let answer = h.sealed(&native.gateway(), fetch_body(&ann, 1), "/s", "[2001:db8:1:2::7]", |request| request).await.0;
+	assert_eq!(answer.status, StatusCode::OK);
+	assert_eq!(h.app.sub_limits.count(&format!("sub:{}", bucket("2001:db8:1:2::7", 48)), 60), 1, "the whole /48 shares one allowance");
+	assert_eq!(h.app.limits.count(&format!("sub:{}", bucket("2001:db8:1:2::7", 48)), 60), 0, "and the admin side's limiter is not the one charged");
+	// A flood of sources fills the endpoint's limiter to its cap. Admin requests still pass, since they count in another one.
+	for index in 0..100_000 {h.app.sub_limits.hit(&format!("sub:flood{index}"), 120, 60);}
+	assert!(!h.app.sub_limits.hit("sub:one more", 120, 60));
+	let again = h.login("10.0.0.9").await;
+	assert_eq!(h.call(Method::GET, "/p/api/users", Some(&again), None, "10.0.0.9").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": "wrong password here", "totp": "000000"})), "10.0.0.10").await.status, StatusCode::UNAUTHORIZED, "a sign-in is judged, not refused for a full table");
+}
+
+#[tokio::test]
+async fn a_theft_destroys_every_held_key_and_marks_the_accounts_of_all_of_them() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (ann_id, ann) = h.user(&session, "ann", json!({})).await;
+	let (_, bob) = h.user(&session, "bob", json!({})).await;
+	assert_eq!(h.fetch(&ann, &[key_of(&ann).kid()], 1, "confirm", None).await.status, StatusCode::OK);
+	assert_eq!(h.fetch(&bob, &[key_of(&bob).kid()], 2, "confirm", None).await.status, StatusCode::OK);
+	let switched = h.call(Method::POST, "/p/api/gateway-keys/rotate", Some(&session), Some(json!({})), "10.0.0.1").await.json();
+	assert_eq!(switched["gateway"]["retired"].as_array().unwrap().len(), 1);
+	let shown = h.call(Method::POST, &format!("/p/api/users/{ann_id}/subscription/show"), Some(&session), None, "10.0.0.1").await.json();
+	let fresh = Link::parse(shown["veilway"].as_str().unwrap()).unwrap();
+	h.app.sub_limits.clear(&format!("dev:{ann_id}:{}", STANDARD.encode([1u8; 32])));
+	assert_eq!(h.fetch(&fresh, &[key_of(&fresh).kid()], 1, "fetch", None).await.status, StatusCode::OK, "ann reaches the new active key");
+	let unknown = h.call(Method::GET, "/nothing", None, None, "198.51.100.7").await.shape();
+	let stolen = h.call(Method::POST, "/p/api/gateway-keys/theft", Some(&session), Some(json!({})), "10.0.0.1").await.json();
+	assert_eq!(stolen["affected"], 2, "ann (under both keys) and bob (under the retired one)");
+	assert_eq!(stolen["gateway"]["retired"].as_array().unwrap().len(), 0);
+	let kept: Value = serde_json::from_str(&std::fs::read_to_string(&h.app.cfg.gateway).unwrap()).unwrap();
+	assert_eq!(kept["held"].as_array().unwrap().len(), 1, "no retired key survives a theft");
+	assert_eq!(h.fetch(&bob, &[key_of(&bob).kid()], 2, "fetch", None).await.shape(), unknown, "the retired key opens nothing any more");
+	assert_eq!(h.call(Method::POST, "/p/api/gateway-keys/reset-affected", Some(&session), Some(json!({"dry_run": true})), "10.0.0.1").await.json()["count"], 2);
+}
+
+#[tokio::test]
+async fn a_theft_whose_request_is_dropped_still_marks_the_accounts() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (_, ann) = h.user(&session, "ann", json!({})).await;
+	assert_eq!(h.fetch(&ann, &[key_of(&ann).kid()], 1, "confirm", None).await.status, StatusCode::OK);
+	let before = std::fs::read(&h.app.cfg.gateway).unwrap();
+	{
+		let request = h.call(Method::POST, "/p/api/gateway-keys/theft", Some(&session), Some(json!({})), "10.0.0.1");
+		tokio::pin!(request);
+		// Poll the request until the key file has changed, then drop it, as a client that hangs up does.
+		for _ in 0..10_000 {
+			std::future::poll_fn(|context| {let _ = request.as_mut().poll(context); std::task::Poll::Ready(())}).await;
+			if std::fs::read(&h.app.cfg.gateway).unwrap() != before {break}
+			tokio::task::yield_now().await;
+		}
+		assert_ne!(std::fs::read(&h.app.cfg.gateway).unwrap(), before, "the key file was switched");
+	}
+	let mut marked = 0;
+	for _ in 0..200 {
+		marked = h.app.db.call(|db| db.query_row("select count(*) from settings where key = 'gateway_affected'", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap();
+		if marked == 1 {break}
+		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+	}
+	assert_eq!(marked, 1, "the database part of the action ran although the request was gone");
+	assert_eq!(h.call(Method::POST, "/p/api/gateway-keys/reset-affected", Some(&session), Some(json!({"dry_run": true})), "10.0.0.1").await.json()["count"], 1);
+}
+
+#[tokio::test]
+async fn the_affected_list_is_kept_until_the_links_are_built_and_then_the_accounts_settled_leave_it() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (ann_id, ann) = h.user(&session, "ann", json!({})).await;
+	assert_eq!(h.fetch(&ann, &[key_of(&ann).kid()], 1, "confirm", None).await.status, StatusCode::OK);
+	h.call(Method::POST, "/p/api/gateway-keys/theft", Some(&session), Some(json!({})), "10.0.0.1").await;
+	// A user who is gone is not left on the list for ever.
+	h.app.db.call(move |db| db.execute("insert into settings (key, value) values ('gateway_affected', ?) on conflict (key) do update set value = excluded.value", [json!([ann_id, 9999]).to_string()]).unwrap()).await.unwrap();
+	let reset = h.call(Method::POST, "/p/api/gateway-keys/reset-affected", Some(&session), Some(json!({})), "10.0.0.1").await.json();
+	assert_eq!((reset["count"].clone(), reset["links"].as_array().unwrap().len()), (json!(1), 1));
+	assert_eq!(h.app.db.call(|db| db.query_row("select count(*) from settings where key = 'gateway_affected'", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn a_key_the_operator_kept_loads_when_no_key_file_is_there_and_not_while_one_is() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (_, ann) = h.user(&session, "ann", json!({})).await;
+	let shown = h.call(Method::GET, "/p/api/gateway-keys", Some(&session), None, "10.0.0.1").await.json();
+	let (next_id, kept) = (shown["next"]["id"].as_u64().unwrap(), std::fs::read_to_string(&h.app.cfg.gateway_next).unwrap());
+	let unknown = h.call(Method::GET, "/nothing", None, None, "198.51.100.7").await.shape();
+	// A file that cannot be used is not replaced: it is for the operator to repair or move aside.
+	std::fs::write(&h.app.cfg.gateway, b"not json").unwrap();
+	let broken = rebuilt(&h, "on").await;
+	let session = broken.login("10.0.0.1").await;
+	let body = json!({"private": kept.trim(), "id": next_id, "confirm": true});
+	assert_eq!(broken.call(Method::POST, "/p/api/gateway-keys/rotate", Some(&session), Some(body.clone()), "10.0.0.1").await.status, StatusCode::CONFLICT);
+	assert_eq!(std::fs::read(&broken.app.cfg.gateway).unwrap(), b"not json");
+	assert_eq!(broken.call(Method::POST, "/p/api/gateway-keys/recreate", Some(&session), Some(json!({"confirm": true})), "10.0.0.1").await.status, StatusCode::CONFLICT, "new keys are not made over a file that is there");
+	assert_eq!(std::fs::read(&broken.app.cfg.gateway).unwrap(), b"not json");
+	std::fs::remove_file(&broken.app.cfg.gateway).unwrap();
+	let lost = rebuilt(&broken, "on").await;
+	let session = lost.login("10.0.0.1").await;
+	assert_eq!(lost.fetch(&ann, &[key_of(&ann).kid()], 1, "confirm", None).await.shape(), unknown);
+	for (what, edit) in [("no confirmation", json!({"confirm": false})), ("no id", json!({"id": null})), ("a key that is not a key", json!({"private": "short"}))] {
+		let mut changed = body.clone();
+		changed.as_object_mut().unwrap().extend(edit.as_object().unwrap().clone());
+		assert_eq!(lost.call(Method::POST, "/p/api/gateway-keys/rotate", Some(&session), Some(changed), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "{what}");
+	}
+	assert!(!lost.app.cfg.gateway.exists());
+	let loaded = lost.call(Method::POST, "/p/api/gateway-keys/rotate", Some(&session), Some(body), "10.0.0.1").await;
+	assert_eq!(loaded.status, StatusCode::OK, "{}", String::from_utf8_lossy(&loaded.body));
+	let loaded = loaded.json();
+	assert_eq!((loaded["gateway"]["loaded"].clone(), loaded["gateway"]["active"]["id"].clone()), (json!(true), json!(next_id)));
+	assert_ne!(loaded["next_private"].as_str().unwrap(), kept.trim(), "a fresh next key is made");
+	let private: [u8; 32] = URL_SAFE_NO_PAD.decode(kept.trim()).unwrap().try_into().unwrap();
+	let key = GatewayKey::new(next_id as u8, veilway_panel::gateway::public_of(&private)).unwrap();
+	let (answer, _) = lost.sealed(&key, fetch_body(&ann, 1), "/s", "198.51.100.7", |request| request).await;
+	assert_eq!(answer.status, StatusCode::OK, "a client that was shown this key as the next one is served by it");
+	assert_eq!(lost.app.db.call(|db| db.query_row("select count(*) from audit where action = 'gateway.recover'", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn refresh_mirrors_are_read_as_a_document_reads_them_and_pins_are_not_changed_to_none_that_clients_hold() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, pinned_endpoints()).await;
+	let put = |extra: Value| {
+		let (h, session) = (&h, &session);
+		async move {
+			let mut settings = h.call(Method::GET, "/p/api/settings", Some(session), None, "10.0.0.1").await.json();
+			settings.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+			h.call(Method::PUT, "/p/api/settings", Some(session), Some(settings), "10.0.0.1").await
+		}
+	};
+	let pin = STANDARD.encode([1u8; 32]);
+	assert_eq!(put(json!({"refresh_mirrors": ["https://mirror.example.net/s", {"url": "https://203.0.113.50/s", "pins": [pin]}]})).await.status, StatusCode::OK);
+	for (what, entries) in [
+		("a number", json!([7])),
+		("ftp", json!(["ftp://mirror.example.net/s"])),
+		("an address with no pins", json!(["https://203.0.113.50/s"])),
+		("pins on http", json!([{"url": "http://mirror.example.net/s", "pins": [pin]}])),
+		("an object with a member more", json!([{"url": "https://mirror.example.net/s", "pins": [pin], "more": 1}])),
+		("the same pin twice", json!([{"url": "https://mirror.example.net/s", "pins": [pin, pin]}])),
+		("one host in two kinds", json!(["https://mirror.example.net/s", "http://mirror.example.net:443/other"])),
+		("an endpoint's host in another kind", json!(["http://203.0.113.7:8443/s"])),
+		("an endpoint's host and none of its pins", json!([{"url": "https://203.0.113.7:8443/s", "pins": [STANDARD.encode([9u8; 32])]}])),
+	] {assert_eq!(put(json!({"refresh_mirrors": entries})).await.status, StatusCode::BAD_REQUEST, "{what}");}
+	assert_eq!(put(json!({"refresh_mirrors": [{"url": "https://203.0.113.7:8443/other", "pins": [pin]}]})).await.status, StatusCode::OK, "a relay of a pinned endpoint that holds one of its pins");
+	// A list of pins that keeps none of the ones clients hold locks them out, so it is refused. A switch keeps the former standby.
+	let endpoints = |pins: [u8; 2]| json!({"refresh_mirrors": [], "endpoints": [{"name": "old", "url": "https://203.0.113.7:8443/s", "pins": pins_of(pins)}, {"name": "new", "url": "https://203.0.113.9:8443/s", "pins": pins_of([3, 4])}]});
+	assert_eq!(put(endpoints([5, 6])).await.status, StatusCode::CONFLICT, "no pin kept");
+	assert_eq!(put(json!({"refresh_mirrors": [], "endpoints": [{"name": "old", "url": "https://203.0.113.7:8443/s", "pins": []}, {"name": "new", "url": "https://203.0.113.9:8443/s", "pins": pins_of([3, 4])}]})).await.status, StatusCode::BAD_REQUEST, "an address with no pin is refused by its own rule");
+	assert_eq!(put(endpoints([2, 5])).await.status, StatusCode::OK, "the standby is kept");
+	assert_eq!(h.app.settings().endpoints[0].pins, pins_of([2, 5]));
+	// A host name can drop to no pins in the URL rules, and the pin rule is what refuses it.
+	let named = |pins: Vec<String>| json!({"refresh_mirrors": [], "endpoints": [{"name": "old", "url": "https://old.example.org/s", "pins": pins}, {"name": "new", "url": "https://203.0.113.9:8443/s", "pins": pins_of([3, 4])}]});
+	assert_eq!(put(named(pins_of([2, 5]))).await.status, StatusCode::OK);
+	assert_eq!(put(named(Vec::new())).await.status, StatusCode::CONFLICT, "pins taken away from an endpoint whose clients hold them");
+	assert_eq!(h.app.settings().endpoints[0].pins, pins_of([2, 5]));
+}
+
+#[tokio::test]
+async fn a_known_token_is_counted_under_its_key_even_when_the_account_is_refused() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (id, link) = h.user(&session, "ann", json!({})).await;
+	assert_eq!(h.call(Method::PATCH, &format!("/p/api/users/{id}"), Some(&session), Some(json!({"enabled": false})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(refusal_of(&h.fetch(&link, &[key_of(&link).kid()], 1, "fetch", None).await, &[key_of(&link)]), Reason::Disabled);
+	let counted: i64 = h.app.db.call(move |db| db.query_row("select count(*) from gateway_use where user_id = ?", [id], |row| row.get(0)).unwrap()).await.unwrap();
+	assert_eq!(counted, 1, "a switch would have missed this account");
+}
+
+#[tokio::test]
+async fn a_fault_of_the_panel_answers_as_an_unknown_path_and_never_as_a_signed_disabled() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (_, link) = h.user(&session, "ann", json!({})).await;
+	let unknown = h.call(Method::GET, "/nothing", None, None, "198.51.100.7").await.shape();
+	h.app.update_settings(|settings| settings.profiles.clear()).await.unwrap();
+	let broken = h.fetch(&link, &[key_of(&link).kid()], 1, "confirm", None).await;
+	assert_eq!(broken.shape(), unknown, "no profile makes the document impossible to build");
+}
+
+#[tokio::test]
+async fn settings_reach_the_cache_only_after_their_commit_and_a_group_move_changes_only_its_own_entry() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let cache = h.app.settings.clone();
+	let after_rollback = h.app.db.call(move |db| {
+		let tx = db.transaction().unwrap();
+		let stored = veilway_panel::app::store_settings(&tx, &cache, |settings| settings.provider_name = "Never committed".into()).unwrap();
+		assert_eq!(stored.provider_name, "Never committed");
+		assert_eq!(cache.read().unwrap().provider_name, "Test Net", "the cache is not touched by the write");
+		drop(tx);
+		cache.read().unwrap().provider_name.clone()
+	}).await.unwrap();
+	assert_eq!(after_rollback, "Test Net");
+	let row: String = h.app.db.call(|db| db.query_row("select value from settings where key = 'settings'", [], |row| row.get(0)).unwrap()).await.unwrap();
+	assert!(row.contains("Test Net") && !row.contains("Never committed"));
+	h.configure(&session, json!({"endpoints": pinned_endpoints()["endpoints"].clone(), "default_endpoint": "old", "provider_name": "Renamed"})).await;
+	h.user(&session, "ann", json!({"groups": ["vip"]})).await;
+	let moved = h.call(Method::POST, "/p/api/endpoints/move", Some(&session), Some(json!({"group": "vip", "endpoint": "new"})), "10.0.0.1").await;
+	assert_eq!(moved.status, StatusCode::OK, "{}", String::from_utf8_lossy(&moved.body));
+	let after = h.app.settings();
+	assert_eq!((after.provider_name.as_str(), after.group_endpoints.get("vip").map(String::as_str)), ("Renamed", Some("new")));
+}
+
+#[tokio::test]
+async fn a_reset_of_a_link_is_one_unit() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (id, link) = h.user(&session, "ann", json!({})).await;
+	assert_eq!(h.fetch(&link, &[key_of(&link).kid()], 1, "confirm", None).await.status, StatusCode::OK);
+	let reset = h.call(Method::POST, &format!("/p/api/users/{id}/subscription/reset"), Some(&session), Some(json!({"remove_devices": true})), "10.0.0.1").await;
+	assert_eq!(reset.status, StatusCode::OK, "{}", String::from_utf8_lossy(&reset.body));
+	let (generation, devices, audited): (i64, i64, i64) = h.app.db.call(move |db| (db.query_row("select token_gen from users where id = ?", [id], |row| row.get(0)).unwrap(), db.query_row("select count(*) from devices where user_id = ?", [id], |row| row.get(0)).unwrap(), db.query_row("select count(*) from audit where action = 'link.reset'", [], |row| row.get(0)).unwrap())).await.unwrap();
+	assert_eq!((generation, devices, audited), (2, 0, 1));
+	assert_eq!(h.call(Method::POST, "/p/api/users/9999/subscription/reset", Some(&session), Some(json!({})), "10.0.0.1").await.status, StatusCode::NOT_FOUND, "a missing account changes nothing");
 }

@@ -1,5 +1,5 @@
 //! Admin accounts: setup, login, TOTP, sessions, API tokens, the audit log, settings, signing keys and the node.
-use crate::{app::{bucket, store_settings, App, Settings, SigningEntry}, auth::{Agent, COOKIE_NAME, TOKEN_PREFIX}, crypto::{self, now, Keys}, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
+use crate::{app::{bucket, publish_settings, store_settings, App, Settings, SigningEntry}, auth::{Agent, COOKIE_NAME, TOKEN_PREFIX}, crypto::{self, now, Keys}, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
 use veilway_proto::subscription::{Url, URL_MAX};
 use argon2::{password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
 use axum::{extract::{Path, Query, State}, http::{header::SET_COOKIE, HeaderName, HeaderValue, StatusCode}, response::Response, Extension};
@@ -97,7 +97,7 @@ pub struct Setup {pub token: String, pub username: String, pub password: String,
 const TERMS_VERSION: &str = "2026-10-16";
 
 pub async fn setup(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Setup>) -> Result<Response, Failure> {
-	if !app.limits.hit(&format!("setup:{}", bucket(&ctx.source)), 5, 900) {return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries."))}
+	if !app.limits.hit(&format!("setup:{}", bucket(&ctx.source, 64)), 5, 900) {return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries."))}
 	let expected = app.setup_token.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 	if !expected.is_some_and(|expected| crypto::equal(expected.as_bytes(), input.token.as_bytes())) {return Err(Failure::new(StatusCode::FORBIDDEN, "bad_setup_token", "The setup token is wrong, or setup is done."))}
 	if !input.accepted_terms {return Err(Failure::bad("Accept the Veilway terms to set up the panel."))}
@@ -187,7 +187,7 @@ pub struct LoggedIn {pub username: String, pub session_id: String, pub csrf: Str
 
 pub async fn login(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Extension(agent): Extension<Agent>, Body(input): Body<Login>) -> Result<Response, Failure> {
 	let per_source = if app.cfg.two_step_on() {LOGIN_PER_SOURCE} else {LOGIN_PER_SOURCE_OFF};
-	if !app.limits.hit(&format!("login:{}", bucket(&ctx.source)), per_source.0, per_source.1) {
+	if !app.limits.hit(&format!("login:{}", bucket(&ctx.source, 64)), per_source.0, per_source.1) {
 		let actor = actor_of(&app, &input.username).await;
 		app.db.audit(&actor, &ctx.source, "login.limited", "admin", "").await;
 		return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries. Wait a while."));
@@ -484,14 +484,13 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 		let tx = db.transaction()?;
 		let before = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 		crate::endpoints::in_use(&tx, &saved).map_err(Failure::conflict)?;
+		// A client accepts a list of pins only when it holds one of them, so a change that keeps none of the pins of an endpoint locks out every client that holds them. A switch to a standby keeps it: the former standby is in the new list.
+		if let Some(endpoint) = saved.endpoints.iter().find(|endpoint| before.named(&endpoint.name).is_some_and(|old| !old.pins.is_empty() && !old.pins.iter().any(|pin| endpoint.pins.contains(pin)))) {return Err(Failure::conflict(format!("The pins of {} keep none of its current pins, so the apps that hold them would refuse every document. Keep one of the current pins in the list (a switch keeps the standby), or add the endpoint under another name and move the accounts to it.", endpoint.name)))}
 		if saved.show_links_once && !before.show_links_once {tx.execute("update users set token_copy = null", [])?;}
 		let detail = if before.profiles != saved.profiles {"profiles changed"} else {""};
-		store_settings(&tx, &cache, move |settings| *settings = saved).map_err(Failure::internal)?;
-		// store_settings has already refreshed the cache, so a failed commit puts the old value back.
-		if let Err(error) = tx.commit() {
-			*cache.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = before;
-			return Err(error.into());
-		}
+		let stored = store_settings(&tx, &cache, move |settings| *settings = saved).map_err(Failure::internal)?;
+		tx.commit()?;
+		publish_settings(&cache, stored);
 		Ok(detail)
 	}).await??;
 	*app.not_found_page.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = input.not_found.clone();

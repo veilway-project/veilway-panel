@@ -1,16 +1,16 @@
 //! Named subscription endpoints: the list in the settings, the resolution of an account's endpoint (its own, then its group's, then the default) and the moves between endpoints. A move is the signed `main_endpoint` of "Moving the main endpoint": the panel keeps answering on the old endpoint and the documents it signs name the new one.
-use crate::{app::{store_settings, App, Endpoint, Settings}, crypto::now, db::audit, http::{ok, Body, Ctx, Failure}, subs::UserRow, users::name_ok};
+use crate::{app::{publish_settings, store_settings, App, Endpoint, Settings}, crypto::now, db::audit, http::{ok, Body, Ctx, Failure}, subs::UserRow, users::name_ok};
 use axum::{extract::{Path, State}, response::Response, Extension};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::{params, Connection, OptionalExtension};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
-use veilway_proto::subscription::{Url, LINK_URL_MAX};
+use veilway_proto::subscription::{payload::Refresh, Kind, Url, LINK_URL_MAX};
 
 pub const ENDPOINTS_MAX: usize = 16;
 /// An account counts as still refreshing on an endpoint when it did so within this many seconds.
-const RECENT: i64 = 30 * 86_400;
+pub const RECENT: i64 = 30 * 86_400;
 
 /// The URL as the app reads it: `https` by its chain or with pins, or `http` for a plain endpoint.
 pub fn read(endpoint: &Endpoint) -> Option<Url> {
@@ -25,11 +25,6 @@ impl Settings {
 		own.and_then(|name| self.named(name)).map(|endpoint| (endpoint, "user"))
 			.or_else(|| groups.iter().find_map(|group| self.group_endpoints.get(group).and_then(|name| self.named(name))).map(|endpoint| (endpoint, "group")))
 			.or_else(|| self.default_endpoint().map(|endpoint| (endpoint, "default")))
-	}
-	/// The endpoint a request came in on, by the Host header it carried: a host with or without its port.
-	pub fn by_host(&self, host: &str) -> Option<&Endpoint> {
-		let host = host.to_ascii_lowercase();
-		self.endpoints.iter().find(|endpoint| read(endpoint).is_some_and(|url| [url.authority(), url.host().to_string()].iter().any(|found| *found == host) || (url.authority() == format!("{host}:{}", if url.is_plain() {80} else {443}))))
 	}
 }
 
@@ -51,6 +46,21 @@ pub fn validate(settings: &Settings) -> Result<(), String> {
 		let found = url.authority();
 		if let Some((other, _)) = seen.iter().find(|(other, held)| *other == name || *held == found) {return Err(format!("{name} and {other} cannot share a name or a host and port. A document tells its endpoint by host and port, so each endpoint needs its own."))}
 		seen.push((name, found));
+	}
+	// An entry of `refresh_mirrors` goes into every document as `refresh_urls`, where the apps hold it to the rules of the proto reader and refuse the whole document for a fault. One on the host and port of a named endpoint (a relay mirror that is to become the main endpoint) is of the kind of that endpoint, and when pinned it holds one of its pins.
+	let mut listed: Vec<Refresh> = Vec::new();
+	for entry in &settings.refresh_mirrors {
+		let found = Refresh::parse(&entry.to_string()).ok_or("A refresh_mirrors entry is an https URL string with a host name, an http URL string, or an object with exactly url and pins (one or two different SHA-256 pins, standard base64) for a host with its own certificate. The URL has at most 256 characters, no user, query or fragment.")?;
+		if listed.iter().any(|other| other.authority() == found.authority() && other.kind() != found.kind()) {return Err(format!("{} is listed with two kinds of check in refresh_mirrors. One host and port has one kind.", found.authority()))}
+		listed.push(found);
+	}
+	for endpoint in &settings.endpoints {
+		let Some(url) = read(endpoint) else {continue};
+		let kind = if url.is_plain() {Kind::Plain} else if endpoint.pins.is_empty() {Kind::Chain} else {Kind::Pinned};
+		for found in listed.iter().filter(|found| found.authority() == url.authority()) {
+			if found.kind() != kind {return Err(format!("The refresh mirror {} has the host and port of the endpoint {} but another kind of check. The app refuses a document that moves a host from one kind to another.", found.authority(), endpoint.name))}
+			if found.pinned() && !found.pins().iter().any(|pin| endpoint.pins.contains(&STANDARD.encode(pin))) {return Err(format!("The refresh mirror {} has the host and port of the endpoint {} and none of its pins. The app refuses a document whose list holds no pin it holds.", found.authority(), endpoint.name))}
+		}
 	}
 	if !settings.endpoints.is_empty() && settings.named(&settings.default_endpoint).is_none() {return Err(format!("default_endpoint {:?} is not one of the endpoints.", settings.default_endpoint))}
 	if settings.group_endpoints.len() > 256 {return Err("group_endpoints has at most 256 entries.".into())}
@@ -166,14 +176,14 @@ pub struct MoveOut {
 }
 
 pub async fn move_users(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<MoveIn>) -> Result<Response, Failure> {
-	let settings = app.settings();
-	if input.endpoint.as_deref().is_some_and(|name| settings.named(name).is_none()) {return Err(Failure::bad("endpoint is the name of one of the endpoints, or null."))}
 	if input.users.as_ref().is_some_and(|ids| ids.len() > 1000) {return Err(Failure::bad("A move takes at most 1000 accounts."))}
 	if input.group.as_deref().is_some_and(|group| !name_ok(group, true)) {return Err(Failure::bad("group is a group name."))}
 	if input.users.is_some() == input.group.is_some() {return Err(Failure::bad("Give users or group, not both and not neither."))}
 	let (dry, cache) = (input.dry_run, app.settings.clone());
 	let out = app.db.call(move |db| -> Result<MoveOut, Failure> {
-		let before = settings;
+		// The settings are read here, in the job that writes, so a change made since the request began is not undone by it.
+		let before = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+		if input.endpoint.as_deref().is_some_and(|name| before.named(name).is_none()) {return Err(Failure::bad("endpoint is the name of one of the endpoints, or null."))}
 		let mut later = before.clone();
 		let everyone = people(db)?;
 		let mut picks: BTreeMap<i64, Option<String>> = BTreeMap::new();
@@ -200,15 +210,16 @@ pub async fn move_users(State(app): State<Arc<App>>, Extension(ctx): Extension<C
 		}
 		let out = MoveOut {applied: false, moving, staying: scope.len() as i64 - moving, changes_check, to_plain, names};
 		if dry {return Ok(out)}
-		if input.group.is_some() {
-			let tx = db.transaction()?;
-			store_settings(&tx, &cache, |settings| *settings = later).map_err(Failure::internal)?;
-			tx.commit()?;
+		let tx = db.transaction()?;
+		let stored = if let Some(group) = &input.group {
+			// Only the group's entry changes, on the settings as they are now.
+			Some(store_settings(&tx, &cache, |settings| {match &input.endpoint {Some(name) => settings.group_endpoints.insert(group.clone(), name.clone()), None => settings.group_endpoints.remove(group)};}).map_err(Failure::internal)?)
 		} else {
-			let tx = db.transaction()?;
 			for (id, pick) in &picks {tx.execute("update users set endpoint = ? where id = ?", params![pick, id])?;}
-			tx.commit()?;
-		}
+			None
+		};
+		tx.commit()?;
+		if let Some(stored) = stored {publish_settings(&cache, stored)}
 		audit(db, &ctx.actor, &ctx.source, "endpoint.move", &input.group.as_ref().map_or_else(|| format!("{} accounts", picks.len()), |group| format!("group:{group}")), &format!("to {}, {} moved", input.endpoint.as_deref().unwrap_or("default"), out.moving));
 		Ok(MoveOut {applied: true, ..out})
 	}).await??;

@@ -2,8 +2,8 @@
 //!
 //! Layout (`.vwbackup`), all numbers big-endian:
 //! `magic "VWPBACKP"` (8) | `format version` (1) | `argon2id memory in KiB` (4) | `passes` (4) | `lanes` (4) | `salt` (16) | `nonce` (12) | ChaCha20-Poly1305 of the content with a 16 byte tag.
-//! The first 49 bytes are the header and are the AAD. The content is three sections, each a 4 byte length and the bytes: database, `panel.keys`, signing keys.
-use crate::{app::{App, SigningEntry}, config::Config, crypto::{self, now}, db::{audit, migrate, MIGRATIONS}, http::{ok, Body, Ctx, Failure}};
+//! The first 49 bytes are the header and are the AAD. The content is four sections, each a 4 byte length and the bytes: database, `panel.keys`, signing keys, gateway keys. The last holds the gateway key file as it is on the host, which has the active and retired private keys and only the public half of the next key. It is empty when the host had no gateway key file.
+use crate::{app::{App, SigningEntry}, config::Config, crypto::{self, now}, db::{audit, migrate, MIGRATIONS}, gateway::KeyFile, http::{ok, Body, Ctx, Failure}};
 use argon2::{Algorithm, Argon2, Params, Version};
 use axum::{extract::{FromRequestParts, State}, http::request::Parts, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
@@ -50,7 +50,7 @@ pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 pub fn marker(cfg: &Config) -> PathBuf {with_suffix(&cfg.database, ".restore-pending")}
 
 fn sync_dirs(cfg: &Config) -> io::Result<()> {
-	for path in [&cfg.database, &cfg.keys, &cfg.signing] {File::open(path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new(".")))?.sync_all()?;}
+	for path in [&cfg.database, &cfg.keys, &cfg.signing, &cfg.gateway] {File::open(path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or(Path::new(".")))?.sync_all()?;}
 	Ok(())
 }
 
@@ -61,7 +61,7 @@ pub fn complete(cfg: &Config) -> io::Result<()> {
 		for suffix in ["-wal", "-shm"] {let _ = fs::remove_file(with_suffix(&cfg.database, suffix));}
 		fs::rename(&staged, &cfg.database)?;
 	}
-	for target in [&cfg.keys, &cfg.signing] {
+	for target in [&cfg.keys, &cfg.signing, &cfg.gateway] {
 		let staged = with_suffix(target, ".restore");
 		if staged.exists() {fs::rename(&staged, target)?}
 	}
@@ -104,17 +104,17 @@ pub fn open(passphrase: &str, mut file: Vec<u8>) -> Result<Vec<u8>, String> {
 	Ok(file)
 }
 
-pub fn pack(sections: [&[u8]; 3]) -> Vec<u8> {sections.iter().flat_map(|section| (section.len() as u32).to_be_bytes().into_iter().chain(section.iter().copied())).collect()}
+pub fn pack(sections: [&[u8]; 4]) -> Vec<u8> {sections.iter().flat_map(|section| (section.len() as u32).to_be_bytes().into_iter().chain(section.iter().copied())).collect()}
 
-pub fn unpack(content: &[u8]) -> Result<[Vec<u8>; 3], String> {
+pub fn unpack(content: &[u8]) -> Result<[Vec<u8>; 4], String> {
 	let (mut rest, mut sections) = (content, Vec::new());
-	for _ in 0..3 {
+	for _ in 0..4 {
 		let length = rest.get(..4).map(|bytes| u32::from_be_bytes(bytes.try_into().expect("4 bytes")) as usize).ok_or("The backup's content is cut short.")?;
 		sections.push(rest.get(4..4 + length).ok_or("The backup's content is cut short.")?.to_vec());
 		rest = &rest[4 + length..];
 	}
 	if !rest.is_empty() {return Err("The backup has data it should not have.".into())}
-	Ok(sections.try_into().expect("three sections"))
+	Ok(sections.try_into().expect("four sections"))
 }
 
 /// What stops a staged database from replacing the live one, or None. Its migrations run here, on the staged copy, so a backup this panel cannot migrate is refused before the swap.
@@ -156,7 +156,9 @@ pub async fn download(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx
 		let database = fs::read(&snapshot);
 		let _ = fs::remove_file(&snapshot);
 		made.map_err(Failure::internal)?.map_err(Failure::internal)?;
-		let content = pack([&database.map_err(Failure::internal)?, &fs::read(&cfg.keys).map_err(Failure::internal)?, &fs::read(&cfg.signing).map_err(Failure::internal)?]);
+		// A host without a gateway key file (lost, and not made again) backs up an empty section. One that cannot be read stops the backup, since a backup without its keys would look whole.
+		let gateway = match fs::read(&cfg.gateway) {Ok(bytes) => bytes, Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(), Err(error) => return Err(Failure::conflict(format!("The gateway key file {} cannot be read ({error}), so the backup would lack the keys links are sealed to. Fix it first.", cfg.gateway.display())))};
+		let content = pack([&database.map_err(Failure::internal)?, &fs::read(&cfg.keys).map_err(Failure::internal)?, &fs::read(&cfg.signing).map_err(Failure::internal)?, &gateway]);
 		if content.len() + HEADER + 16 > FILE_MAX {return Err(Failure::conflict("The database is larger than a backup can hold."))}
 		seal(&input.passphrase, &content).map_err(Failure::internal)
 	}).await.map_err(Failure::internal)??;
@@ -177,21 +179,35 @@ pub struct Restored {
 	pub ok: bool,
 	/// The folder in the data directory that holds the database and keys this restore replaced.
 	pub saved_as: String,
+	/// Things the operator should read before the panel comes back: the gateway keys on the host were not the backup's.
+	pub warnings: Vec<String>,
 }
 
 pub async fn restore(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, _turn: Turn, Body(input): Body<RestoreIn, BODY_MAX>) -> Result<Response, Failure> {
 	let worker = app.clone();
-	let result = tokio::task::spawn_blocking(move || -> Result<String, Failure> {
+	let result = tokio::task::spawn_blocking(move || -> Result<(String, Vec<String>), Failure> {
 		let (db, cfg) = (worker.db.clone(), worker.cfg.clone());
 		let RestoreIn {file, passphrase} = input;
 		let bytes = STANDARD.decode(&file).map_err(|_| Failure::bad("This is not a Veilway panel backup."))?;
 		drop(file);
 		let content = open(&passphrase, bytes).map_err(Failure::bad)?;
-		let [database, keys, signing] = unpack(&content).map_err(Failure::bad)?;
+		let [database, keys, signing, gateway] = unpack(&content).map_err(Failure::bad)?;
 		drop(content);
 		if keys.len() != 96 {return Err(Failure::bad("The key file in the backup has the wrong length."))}
 		if !serde_json::from_slice::<Vec<SigningEntry>>(&signing).is_ok_and(|entries| !entries.is_empty() && entries.iter().all(|entry| URL_SAFE_NO_PAD.decode(&entry.seed).is_ok_and(|seed| seed.len() == 32))) {return Err(Failure::bad("The signing keys in the backup cannot be read."))}
-		let (new_database, new_keys, new_signing) = (with_suffix(&cfg.database, ".restore"), with_suffix(&cfg.keys, ".restore"), with_suffix(&cfg.signing, ".restore"));
+		// The gateway section is the key file, read back and written again from what was read, so nothing but the keys is restored. An empty one leaves the host's file where it is.
+		let backed_up = if gateway.is_empty() {None} else {Some(serde_json::from_slice::<KeyFile>(&gateway).ok().filter(|file| file.usable() && URL_SAFE_NO_PAD.decode(&file.next.public).is_ok_and(|public| public.len() == 32)).ok_or_else(|| Failure::bad("The gateway keys in the backup cannot be read."))?)};
+		let on_host = fs::read(&cfg.gateway).ok().and_then(|bytes| serde_json::from_slice::<KeyFile>(&bytes).ok());
+		let warnings: Vec<String> = match (&backed_up, &on_host) {
+			(Some(backup), Some(host)) if backup != host => vec!["The gateway keys on this host are not the ones in the backup. The backup's are restored and the file they replace is kept in the folder named below. Links made under a key that is not in the backup (after a switch since the backup was made) stop opening, and the next key's private half you put away at the last switch is the next key of the host's file and not of the restored one.".into()],
+			(Some(_), None) => vec!["This host had no usable gateway key file. The backup's keys are restored.".into()],
+			(None, Some(_)) => vec!["The backup holds no gateway keys, so the file on this host stays. Check that it is the one the backup's links were sealed to.".into()],
+			(None, None) => vec!["Neither the backup nor this host has a usable gateway key file: the subscription endpoint answers as an unknown path until a key is loaded or new keys are made.".into()],
+			_ => Vec::new(),
+		};
+		let (new_database, new_keys, new_signing, new_gateway) = (with_suffix(&cfg.database, ".restore"), with_suffix(&cfg.keys, ".restore"), with_suffix(&cfg.signing, ".restore"), with_suffix(&cfg.gateway, ".restore"));
+		let _ = fs::remove_file(&new_gateway);
+		if let Some(file) = &backed_up {crypto::write_private(&new_gateway, &serde_json::to_vec(file).map_err(Failure::internal)?, false).map_err(Failure::internal)?}
 		for (path, content) in [(&new_database, &database), (&new_keys, &keys), (&new_signing, &signing)] {
 			let _ = fs::remove_file(path);
 			crypto::write_private(path, content, false).map_err(Failure::internal)?;
@@ -207,7 +223,7 @@ pub async fn restore(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 			Ok(None)
 		})().unwrap_or(Some("The database in the backup cannot be read.".into()));
 		if let Some(message) = refusal {
-			for path in [&new_database, &new_keys, &new_signing] {let _ = fs::remove_file(path);}
+			for path in [&new_database, &new_keys, &new_signing, &new_gateway] {let _ = fs::remove_file(path);}
 			return Err(Failure::bad(message));
 		}
 		// From here the panel refuses changes and its upkeep stops writing, until the process exits.
@@ -225,6 +241,7 @@ pub async fn restore(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 			}).map_err(Failure::internal)?.map_err(Failure::internal)?;
 		fs::copy(&cfg.keys, saved.join("panel.keys")).map_err(Failure::internal)?;
 		fs::copy(&cfg.signing, saved.join("signing.keys")).map_err(Failure::internal)?;
+		if cfg.gateway.exists() {fs::copy(&cfg.gateway, saved.join("gateway.keys")).map_err(Failure::internal)?;}
 		crypto::write_private(&marker(&cfg), b"", false).map_err(Failure::internal)?;
 		sync_dirs(&cfg).map_err(Failure::internal)?;
 		complete(&cfg).map_err(Failure::internal)?;
@@ -234,13 +251,13 @@ pub async fn restore(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 		}).collect();
 		old.sort();
 		for (_, path) in old.iter().take(old.len().saturating_sub(KEPT)) {let _ = fs::remove_dir_all(path);}
-		Ok(folder)
+		Ok((folder, warnings))
 	}).await.map_err(Failure::internal)?;
 	// A restore that failed before the marker changed nothing, so the panel goes on as it was.
 	if result.is_err() && !marker(&app.cfg).exists() {app.restoring.store(false, Ordering::SeqCst)}
-	let saved_as = result?;
+	let (saved_as, warnings) = result?;
 	app.restart.notify_one();
-	ok(&Restored {ok: true, saved_as})
+	ok(&Restored {ok: true, saved_as, warnings})
 }
 
 #[cfg(test)]
@@ -249,15 +266,15 @@ mod tests {
 
 	const PASSPHRASE: &str = "a long enough passphrase";
 
-	fn sample() -> Vec<u8> {pack([b"database bytes", &[7u8; 96], b"[]"])}
+	fn sample() -> Vec<u8> {pack([b"database bytes", &[7u8; 96], b"[]", b"{}"])}
 
 	#[test]
 	fn a_backup_round_trips() {
 		let file = seal(PASSPHRASE, &sample()).unwrap();
 		assert_eq!(&file[..8], MAGIC);
 		assert_eq!(file[8], FORMAT);
-		let [database, keys, signing] = unpack(&open(PASSPHRASE, file.clone()).unwrap()).unwrap();
-		assert_eq!((database.as_slice(), keys.len(), signing.as_slice()), (b"database bytes".as_slice(), 96, b"[]".as_slice()));
+		let [database, keys, signing, gateway] = unpack(&open(PASSPHRASE, file.clone()).unwrap()).unwrap();
+		assert_eq!((database.as_slice(), keys.len(), signing.as_slice(), gateway.as_slice()), (b"database bytes".as_slice(), 96, b"[]".as_slice(), b"{}".as_slice()));
 	}
 
 	#[test]

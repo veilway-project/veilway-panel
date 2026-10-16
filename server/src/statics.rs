@@ -1,5 +1,5 @@
 //! Static mirrors, the publisher's side ("Static mirrors" on the subscription format page): the keys a request leaves behind, the rounds that write every device's sealed file and the decoys into a new directory, and what the admin pages show about them.
-use crate::{app::{App, Settings, SigningEntry}, crypto::{self, now}, http::{ok, Ctx, Failure}, subs::{self, DeviceRow, Form, UserRow, DEVICE_COLUMNS, USER_COLUMNS}};
+use crate::{app::{App, Settings, SigningEntry}, crypto::{self, now}, endpoints::RECENT, http::{ok, Ctx, Failure}, subs::{self, DeviceRow, Form, UserRow, DEVICE_COLUMNS, USER_COLUMNS}};
 use axum::{extract::{Path as Route, State}, response::Response, Extension};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use data_encoding::HEXLOWER;
@@ -127,7 +127,7 @@ async fn publish(app: &App, at: i64, state: &mut Memory) -> Result<(), String> {
 	// While two keys are current a static file is signed with the older one, which every client that refreshed since the overlap began holds.
 	let signer = signing.first().ok_or("there is no signing key")?;
 	// One job reads the users and every enrolled device with its mirror keys, so the loop below asks the database for nothing.
-	let (users, mut held) = app.db.call(|db| -> rusqlite::Result<(Vec<UserRow>, HashMap<i64, Vec<(DeviceRow, (Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>))>>)> {
+	let (users, mut held, seen) = app.db.call(move |db| -> rusqlite::Result<(Vec<UserRow>, HashMap<i64, Vec<(DeviceRow, (Option<Vec<u8>>, Option<Vec<u8>>, Option<i64>))>>, Vec<(String, i64)>)> {
 		let users = db.prepare(&format!("select {USER_COLUMNS} from users order by id"))?.query_map([], UserRow::read)?.collect::<rusqlite::Result<Vec<_>>>()?;
 		let mut held: HashMap<i64, Vec<_>> = HashMap::new();
 		let mut statement = db.prepare(&format!("select {DEVICE_COLUMNS}, mirror_name, mirror_key, mirror_gen from devices where state = 'enrolled' order by id"))?;
@@ -135,7 +135,8 @@ async fn publish(app: &App, at: i64, state: &mut Memory) -> Result<(), String> {
 			let (device, stored) = row?;
 			held.entry(device.user_id).or_default().push((device, stored));
 		}
-		Ok((users, held))
+		let seen = db.prepare("select endpoint, user_id from endpoint_use where last_at >= ?")?.query_map([at - RECENT], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+		Ok((users, held, seen))
 	}).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 	let mut devices: Vec<(MirrorKeys, Vec<u8>)> = Vec::new();
 	for user in &users {
@@ -146,7 +147,10 @@ async fn publish(app: &App, at: i64, state: &mut Memory) -> Result<(), String> {
 			let public: [u8; 32] = STANDARD.decode(&device.public_key).ok().and_then(|bytes| bytes.try_into().ok()).ok_or("a device key is not 32 bytes")?;
 			let open = |label: &[u8], sealed: &[u8]| keys.open_secret(&user.record_id, [label, &public[..]].concat(), sealed).and_then(|plain| <[u8; 32]>::try_from(plain).ok()).ok_or("a stored static mirror key does not open: the key file is not the one that sealed it, so nothing is published and nothing is deleted");
 			let mirror_keys = MirrorKeys::restore(open(b"mirror_name", &name)?, open(b"mirror_key", &key)?);
-			let text = match reason {Some(reason) => subs::refusal(signer, &user.sub_id, reason), None => subs::document(app, user, &device, &signing, signer, Form::Static, None, None).await?};
+			// A static file is fetched from no endpoint, so it carries the pins of the endpoint the account resolves to, as the client holds them once its move is done. An account that refreshed lately on another endpoint is still moving, and a client that holds the old endpoint's pins refuses a list of the new ones, so its file carries none, which changes nothing.
+			let resolved = settings.resolve(user.endpoint.as_deref(), &serde_json::from_str::<Vec<String>>(&user.groups).unwrap_or_default()).map(|(found, _)| found);
+			let moving = resolved.is_some_and(|resolved| seen.iter().any(|(endpoint, id)| *id == user.id && *endpoint != resolved.name));
+			let text = match reason {Some(reason) => subs::refusal(signer, &user.sub_id, reason), None => subs::document(app, user, &device, &signing, signer, Form::Static, None, resolved.filter(|_| !moving)).await?};
 			devices.push((mirror_keys, text.into_bytes()));
 		}
 	}
@@ -295,7 +299,10 @@ pub struct Zipped {pub filename: String,
 	pub file: String}
 
 /// A zip file with the files stored as they are, in the order given. The files are sealed or random already, so compressing them would gain nothing, and the times are fixed so that no file carries the day it was written.
-fn zip(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+/// Refused past what a zip without the Zip64 extension can hold: 65,535 files, and offsets and sizes that fit 32 bits.
+fn zip(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
+	let total: u64 = files.iter().map(|(name, data)| 76 + 2 * name.len() as u64 + data.len() as u64).sum::<u64>() + 22;
+	if files.len() > usize::from(u16::MAX) || total >= u64::from(u32::MAX) {return Err(format!("The folder holds {} files and about {} MB, more than a zip file without Zip64 can hold (65,535 files, 4 GB). Copy the folder with rsync, rclone or git instead.", files.len(), total / 1_000_000))}
 	let table: Vec<u32> = (0..256u32).map(|mut value| {for _ in 0..8 {value = if value & 1 == 1 {0xedb8_8320 ^ (value >> 1)} else {value >> 1};} value}).collect();
 	let (mut out, mut central) = (Vec::new(), Vec::new());
 	for (name, data) in files {
@@ -307,7 +314,7 @@ fn zip(files: &[(String, Vec<u8>)]) -> Vec<u8> {
 	let (count, start, length) = (files.len() as u16, out.len() as u32, central.len() as u32);
 	out.extend(central);
 	out.extend([&0x0605_4b50u32.to_le_bytes()[..], &0u32.to_le_bytes(), &count.to_le_bytes(), &count.to_le_bytes(), &length.to_le_bytes(), &start.to_le_bytes(), &0u16.to_le_bytes()].concat());
-	out
+	Ok(out)
 }
 
 pub async fn download(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Route(name): Route<String>) -> Result<Response, Failure> {
@@ -318,8 +325,9 @@ pub async fn download(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx
 		files.sort();
 		Ok(files)
 	}).await.map_err(Failure::internal)?.map_err(|error| if error.kind() == std::io::ErrorKind::NotFound {Failure::conflict("No round has been published for this folder yet.")} else {Failure::internal(error)})?;
+	let archive = zip(&files).map_err(Failure::conflict)?;
 	app.db.audit(&ctx.actor, &ctx.source, "static.download", "static", &format!("{name}, {} files", files.len())).await;
-	ok(&Zipped {filename: format!("{name}.zip"), file: STANDARD.encode(zip(&files))})
+	ok(&Zipped {filename: format!("{name}.zip"), file: STANDARD.encode(archive)})
 }
 
 #[cfg(test)]
@@ -328,10 +336,17 @@ mod tests {
 
 	#[test]
 	fn the_zip_has_the_crc_of_its_files() {
-		let out = zip(&[("a.bin".into(), b"123456789".to_vec())]);
+		let out = zip(&[("a.bin".into(), b"123456789".to_vec())]).unwrap();
 		assert_eq!(&out[..4], b"PK\x03\x04");
 		assert_eq!(u32::from_le_bytes(out[14..18].try_into().unwrap()), 0xcbf4_3926);
 		assert_eq!(&out[out.len() - 22..out.len() - 18], b"PK\x05\x06");
+	}
+
+	#[test]
+	fn a_zip_past_what_it_can_hold_is_refused() {
+		let many: Vec<(String, Vec<u8>)> = (0..=usize::from(u16::MAX)).map(|number| (format!("{number}.bin"), Vec::new())).collect();
+		assert!(zip(&many).unwrap_err().contains("65,535"));
+		assert!(zip(&many[..usize::from(u16::MAX)]).is_ok());
 	}
 
 	#[test]

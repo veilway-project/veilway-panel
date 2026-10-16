@@ -33,7 +33,7 @@ pub struct Config {
 	pub listen: SocketAddr,
 	/// The path of the admin pages and API, random at install. No trailing slash.
 	pub prefix: String,
-	/// The path of the subscription endpoint behind the operator's web server.
+	/// The path the operator's web server forwards the subscription endpoints to. Each named endpoint is reached at this path, a slash and its name (`/sub/main`), and the panel tells the endpoints apart by that path alone. A panel with no named endpoint answers on the bare path.
 	pub sub_path: String,
 	pub database: PathBuf,
 	/// The three keys of sealed secrets: lookup, copy and secret. Mode 600, kept apart from the database.

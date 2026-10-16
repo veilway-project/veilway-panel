@@ -232,6 +232,12 @@
       "Counts": {
         "description": "How many requests each kind of refusal turned away since the start, and how many were served.",
         "properties": {
+          "full": {
+            "description": "Requests turned away because the gateway's memory of acted requests was full.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
           "key": {
             "format": "uint64",
             "minimum": 0,
@@ -281,7 +287,8 @@
           "request",
           "window",
           "replay",
-          "source"
+          "source",
+          "full"
         ],
         "type": "object"
       },
@@ -493,7 +500,7 @@
             "type": "array"
           },
           "url": {
-            "description": "The public URL with the path the web server forwards to the panel's `sub_path`: `https`, or `http` for a plain endpoint, which hides nothing from the network (the exchange stays sealed). At most 256 characters, no fragment.",
+            "description": "The public URL: `https`, or `http` for a plain endpoint, which hides nothing from the network (the exchange stays sealed). At most 256 characters, no fragment. The operator's web server forwards this host and path to the panel's `sub_path` followed by a slash and the name of the endpoint, and that path is how the panel knows which endpoint a request reached.",
             "type": "string"
           }
         },
@@ -1827,11 +1834,19 @@
           "saved_as": {
             "description": "The folder in the data directory that holds the database and keys this restore replaced.",
             "type": "string"
+          },
+          "warnings": {
+            "description": "Things the operator should read before the panel comes back: the gateway keys on the host were not the backup's.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
           "ok",
-          "saved_as"
+          "saved_as",
+          "warnings"
         ],
         "type": "object"
       },
@@ -2042,7 +2057,7 @@
           },
           "endpoints": {
             "default": [],
-            "description": "The named subscription endpoints, at most 16, each on its own host and port. An account's links and documents use the endpoint resolved for it: its own, else the first of its groups that has one in `group_endpoints`, else the default.",
+            "description": "The named subscription endpoints, at most 16, each on its own host and port and each reached by its own path, the panel's `sub_path` and the endpoint's name. An account's links and documents use the endpoint resolved for it: its own, else the first of its groups that has one in `group_endpoints`, else the default.",
             "items": {
               "$ref": "#/components/schemas/Endpoint"
             },
@@ -2281,6 +2296,21 @@
       "SwitchIn": {
         "additionalProperties": false,
         "properties": {
+          "confirm": {
+            "default": false,
+            "description": "Only while no key file is on this host: must be true. Loading a key from the operator's hands makes it the active key, so this is the explicit yes.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Only while no key file is on this host: the id the supplied key had (the number the key carried in the links and documents, as the panel showed it before the file was lost). The key becomes the active one under that id.",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "private": {
             "description": "The private half of the next key, 43 characters of base64url. Left out, the panel reads it from its `gateway_next` file.",
             "type": [
@@ -2294,7 +2324,7 @@
       "Switched": {
         "properties": {
           "affected": {
-            "description": "Accounts that sent a request under the stolen key (for a theft only): their tokens are to be reset.",
+            "description": "Accounts that sent a request under a stolen key (for a theft only): their tokens are to be reset.",
             "format": "int64",
             "type": "integer"
           },

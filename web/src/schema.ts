@@ -1347,6 +1347,11 @@ export interface components {
         };
         /** @description How many requests each kind of refusal turned away since the start, and how many were served. */
         Counts: {
+            /**
+             * Format: uint64
+             * @description Requests turned away because the gateway's memory of acted requests was full.
+             */
+            full: number;
             /** Format: uint64 */
             key: number;
             /** Format: uint64 */
@@ -1429,7 +1434,7 @@ export interface components {
              * @default []
              */
             pins: string[];
-            /** @description The public URL with the path the web server forwards to the panel's `sub_path`: `https`, or `http` for a plain endpoint, which hides nothing from the network (the exchange stays sealed). At most 256 characters, no fragment. */
+            /** @description The public URL: `https`, or `http` for a plain endpoint, which hides nothing from the network (the exchange stays sealed). At most 256 characters, no fragment. The operator's web server forwards this host and path to the panel's `sub_path` followed by a slash and the name of the endpoint, and that path is how the panel knows which endpoint a request reached. */
             url: string;
         };
         EndpointRow: {
@@ -1891,6 +1896,8 @@ export interface components {
             ok: boolean;
             /** @description The folder in the data directory that holds the database and keys this restore replaced. */
             saved_as: string;
+            /** @description Things the operator should read before the panel comes back: the gateway keys on the host were not the backup's. */
+            warnings: string[];
         };
         RetiredView: {
             /**
@@ -1971,7 +1978,7 @@ export interface components {
              */
             document_days: number;
             /**
-             * @description The named subscription endpoints, at most 16, each on its own host and port. An account's links and documents use the endpoint resolved for it: its own, else the first of its groups that has one in `group_endpoints`, else the default.
+             * @description The named subscription endpoints, at most 16, each on its own host and port and each reached by its own path, the panel's `sub_path` and the endpoint's name. An account's links and documents use the endpoint resolved for it: its own, else the first of its groups that has one in `group_endpoints`, else the default.
              * @default []
              */
             endpoints: components["schemas"]["Endpoint"][];
@@ -2095,13 +2102,23 @@ export interface components {
             token_generation: number;
         };
         SwitchIn: {
+            /**
+             * @description Only while no key file is on this host: must be true. Loading a key from the operator's hands makes it the active key, so this is the explicit yes.
+             * @default false
+             */
+            confirm: boolean;
+            /**
+             * Format: uint8
+             * @description Only while no key file is on this host: the id the supplied key had (the number the key carried in the links and documents, as the panel showed it before the file was lost). The key becomes the active one under that id.
+             */
+            id?: number | null;
             /** @description The private half of the next key, 43 characters of base64url. Left out, the panel reads it from its `gateway_next` file. */
             private?: string | null;
         };
         Switched: {
             /**
              * Format: int64
-             * @description Accounts that sent a request under the stolen key (for a theft only): their tokens are to be reset.
+             * @description Accounts that sent a request under a stolen key (for a theft only): their tokens are to be reset.
              */
             affected: number;
             gateway: components["schemas"]["GatewayOut"];

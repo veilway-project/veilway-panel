@@ -1,5 +1,5 @@
 //! The Xray add-on: its inbounds in the node's config, which the panel makes with a credential per user, and the users' share links. The credentials are sealed in the panel's database, which is what the links are made from, since the node only ever shows its marker.
-use crate::{admin::Done, app::{store_settings, App}, auth::reauthed, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, nodecfg, subs::UserRow, users::{self, name_ok, NodeState}};
+use crate::{admin::Done, app::{publish_settings, store_settings, App}, auth::reauthed, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, nodecfg, subs::UserRow, users::{self, name_ok, NodeState}};
 use axum::{extract::{Path, State}, http::StatusCode, response::Response, Extension};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::{params, OptionalExtension};
@@ -151,11 +151,12 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 		tx.execute("delete from xray_inbounds where tag = ?", [&tag]).map_err(|error| error.to_string())?;
 		tx.execute("insert into xray_inbounds (tag, protocol, host, created, server_key) values (?, ?, ?, ?, ?)", params![tag, protocol, host, now(), sealed]).map_err(|error| error.to_string())?;
 		let mut touched = Vec::new();
-		store_settings(&tx, &cache, |settings| for profile in settings.profiles.iter_mut().filter(|profile| profile["type"] == "veilway" && profile["rating_cap"] != "unsafe") {
+		let stored = store_settings(&tx, &cache, |settings| for profile in settings.profiles.iter_mut().filter(|profile| profile["type"] == "veilway" && profile["rating_cap"] != "unsafe") {
 			touched.push((profile["id"].clone(), profile["rating_cap"].clone()));
 			profile["rating_cap"] = json!("detectable");
 		})?;
 		tx.commit().map_err(|error| error.to_string())?;
+		publish_settings(&cache, stored);
 		Ok(touched)
 	}).await?.map_err(Failure::internal)?;
 	if let Err(error) = nodecfg::apply(&app, &ctx, document, &revision, &format!("xray:{}", input.tag)).await {
@@ -163,11 +164,13 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 		let undone = app.db.call(move |db| -> Result<(), String> {
 			let tx = db.transaction().map_err(|error| error.to_string())?;
 			tx.execute("delete from xray_inbounds where tag = ?", [&tag]).map_err(|error| error.to_string())?;
-			store_settings(&tx, &cache, |settings| for (id, cap) in touched {
+			let stored = store_settings(&tx, &cache, |settings| for (id, cap) in touched {
 				let Some(object) = settings.profiles.iter_mut().find(|profile| profile["id"] == id).and_then(Value::as_object_mut) else {continue};
 				if cap.is_null() {object.remove("rating_cap");} else {object.insert("rating_cap".into(), cap);}
 			})?;
-			tx.commit().map_err(|error| error.to_string())
+			tx.commit().map_err(|error| error.to_string())?;
+			publish_settings(&cache, stored);
+			Ok(())
 		}).await.map_err(|error| error.to_string()).and_then(|result| result);
 		if let Err(failed) = undone {tracing::error!("a refused Xray inbound could not be taken back: {failed}")}
 		return Err(error)

@@ -85,7 +85,7 @@ pub async fn guard(State(guard): State<Arc<Guard>>, mut request: Request, next: 
 			if !authority.is_some_and(|authority| names.contains(&authority)) {return refuse(StatusCode::FORBIDDEN, "bad_origin", "The request comes from another origin.")}
 		}
 	}
-	if !app.limits.hit(&format!("src:{}", bucket(&source)), 600, 60) {return refuse(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many requests from this address.")}
+	if !app.limits.hit(&format!("src:{}", bucket(&source, 64)), 600, 60) {return refuse(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many requests from this address.")}
 	let bearer = request.headers().get(AUTHORIZATION).and_then(|value| value.to_str().ok()).and_then(|value| value.strip_prefix("Bearer ")).map(str::to_string);
 	let agent = request.headers().get(USER_AGENT).and_then(|value| value.to_str().ok()).unwrap_or("").chars().take(200).collect::<String>();
 	if access == Access::Public {
@@ -128,7 +128,13 @@ pub async fn guard(State(guard): State<Arc<Guard>>, mut request: Request, next: 
 		return refuse(StatusCode::UNAUTHORIZED, "unauthorized", "The session has expired.");
 	}
 	if changes && !request.headers().get("x-csrf-token").and_then(|value| value.to_str().ok()).is_some_and(|sent| crypto::equal(sent.as_bytes(), csrf.as_bytes())) {return refuse(StatusCode::FORBIDDEN, "csrf", "The CSRF token is missing or wrong.")}
-	if !app.cfg.two_step_on() && ![format!("{}/api/account/password", app.cfg.prefix), format!("{}/api/session/reauth", app.cfg.prefix), format!("{}/api/session", app.cfg.prefix), format!("{}/api/logout", app.cfg.prefix)].contains(&path) && short_password(app, admin_id).await.unwrap_or(true) {return refuse(StatusCode::FORBIDDEN, "password_change_required", "Change your password first. It is shorter than 12 characters.")}
+	if !app.cfg.two_step_on() && ![format!("{}/api/account/password", app.cfg.prefix), format!("{}/api/session/reauth", app.cfg.prefix), format!("{}/api/session", app.cfg.prefix), format!("{}/api/logout", app.cfg.prefix)].contains(&path) {
+		match short_password(app, admin_id).await {
+			Ok(true) => return refuse(StatusCode::FORBIDDEN, "password_change_required", "Change your password first. It is shorter than 12 characters."),
+			Ok(false) => {}
+			Err(busy) => return busy.into_response(),
+		}
+	}
 	if access == Access::AdminReauth && at - reauth_at > REAUTH {return refuse(StatusCode::FORBIDDEN, "reauth_required", "Confirm your password and code again first.")}
 	let touched = id.clone();
 	let _ = app.db.call(move |db| db.execute("update sessions set last_seen = ? where id = ?", params![at, touched])).await;

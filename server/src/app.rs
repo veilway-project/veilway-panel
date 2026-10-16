@@ -15,10 +15,10 @@ pub const RETIRED_KEPT: i64 = 365 * 86_400;
 /// Most keys the limiter holds. Past it, a key it does not hold yet is refused rather than stored.
 const KEYS_MAX: usize = 100_000;
 
-/// The key a source's limit counts under. An IPv6 address counts as its /64, since one host may hold many addresses.
-pub fn bucket(source: &str) -> String {
+/// The key a source's limit counts under. An IPv6 address counts as its network of `prefix` bits, since one host may hold many addresses: /64 for the admin side, /48 for the subscription endpoint, where a provider's customer is given a /48 or less.
+pub fn bucket(source: &str, prefix: u8) -> String {
 	match source.parse::<IpAddr>() {
-		Ok(IpAddr::V6(address)) => ipnet::Ipv6Net::new(address, 64).map_or(source.to_string(), |net| net.trunc().to_string()),
+		Ok(IpAddr::V6(address)) => ipnet::Ipv6Net::new(address, prefix).map_or(source.to_string(), |net| net.trunc().to_string()),
 		_ => source.to_string(),
 	}
 }
@@ -90,7 +90,7 @@ impl Signing {
 pub struct Endpoint {
 	/// 1 to 64 characters of a-z, 0-9, dash and underscore.
 	pub name: String,
-	/// The public URL with the path the web server forwards to the panel's `sub_path`: `https`, or `http` for a plain endpoint, which hides nothing from the network (the exchange stays sealed). At most 256 characters, no fragment.
+	/// The public URL: `https`, or `http` for a plain endpoint, which hides nothing from the network (the exchange stays sealed). At most 256 characters, no fragment. The operator's web server forwards this host and path to the panel's `sub_path` followed by a slash and the name of the endpoint, and that path is how the panel knows which endpoint a request reached.
 	pub url: String,
 	/// SHA-256 of the SubjectPublicKeyInfo of the endpoint's certificate, standard base64, at most two. Required for a self-signed certificate (an IP address as host). Empty for a chain-validated or plain endpoint. `https` only.
 	#[serde(default)]
@@ -105,7 +105,7 @@ pub struct Settings {
 	/// The provider's own terms and privacy policy, put in every document as two `support` links. An `https` URL, or empty for none.
 	pub terms_url: String,
 	pub privacy_url: String,
-	/// The named subscription endpoints, at most 16, each on its own host and port. An account's links and documents use the endpoint resolved for it: its own, else the first of its groups that has one in `group_endpoints`, else the default.
+	/// The named subscription endpoints, at most 16, each on its own host and port and each reached by its own path, the panel's `sub_path` and the endpoint's name. An account's links and documents use the endpoint resolved for it: its own, else the first of its groups that has one in `group_endpoints`, else the default.
 	pub endpoints: Vec<Endpoint>,
 	/// The name of the default endpoint. Empty only while there are no endpoints.
 	pub default_endpoint: String,
@@ -158,6 +158,8 @@ pub struct App {
 	/// The signed refusals made, by account, reason and signing key, reused while they are within their age.
 	pub refusals: Mutex<HashMap<(i64, String, [u8; 8]), (i64, String)>>,
 	pub limits: Limiter,
+	/// The limits of the subscription endpoint, apart from `limits`: the keys a flood of requests makes there can fill this one and never lock an admin out.
+	pub sub_limits: Limiter,
 	pub setup_token: Mutex<Option<String>>,
 	/// One change of the node's config at a time.
 	pub node_lock: tokio::sync::Mutex<()>,
@@ -189,7 +191,7 @@ impl App {
 	pub fn settings(&self) -> Settings {self.settings.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()}
 	pub async fn update_settings(&self, change: impl FnOnce(&mut Settings) + Send + 'static) -> Result<(), String> {
 		let cache = self.settings.clone();
-		self.db.call(move |db| store_settings(db, &cache, change)).await.map_err(|error| error.to_string())?
+		self.db.call(move |db| store_settings(db, &cache, change).map(|settings| publish_settings(&cache, settings))).await.map_err(|error| error.to_string())?
 	}
 	/// The one answer for everything the panel does not serve: what the operator's web server says for a path it does not know.
 	pub fn not_found(&self) -> Response {
@@ -204,15 +206,17 @@ impl App {
 	pub fn standard(bytes: &[u8]) -> String {STANDARD.encode(bytes)}
 }
 
-/// Stores the settings a job changed, then refreshes the cache. A failed write leaves both as they were.
-pub fn store_settings(connection: &Connection, cache: &RwLock<Settings>, change: impl FnOnce(&mut Settings)) -> Result<(), String> {
+/// Writes the settings a job changed and gives the new value. The cache is not touched: a caller with the write in a transaction calls `publish_settings` after the commit, so a failed commit leaves the cache as the table is.
+pub fn store_settings(connection: &Connection, cache: &RwLock<Settings>, change: impl FnOnce(&mut Settings)) -> Result<Settings, String> {
 	let mut settings = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 	change(&mut settings);
 	let text = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
 	connection.execute("insert into settings (key, value) values ('settings', ?) on conflict (key) do update set value = excluded.value", [text]).map_err(|error| error.to_string())?;
-	*cache.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = settings;
-	Ok(())
+	Ok(settings)
 }
+
+/// Puts committed settings in the cache. Only a job calls it, after the commit that wrote them.
+pub fn publish_settings(cache: &RwLock<Settings>, settings: Settings) {*cache.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = settings}
 
 /// Loads the token lookup table from the users. Called inside every job that writes a token or removes a user, so the table and the rows move together.
 pub fn load_lookups(connection: &Connection, table: &RwLock<HashMap<[u8; 32], i64>>) {

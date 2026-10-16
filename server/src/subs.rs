@@ -1,6 +1,6 @@
 //! The subscription side: the link, the signed document, and the public endpoint that answers a valid token and nothing else.
 use crate::{app::{bucket, App, Endpoint, SigningEntry}, auth, crypto::{self, now}, gateway, mirrors, statics};
-use axum::{body::Body, extract::{Request, State}, http::{header::{CACHE_CONTROL, CONTENT_TYPE, HOST}, HeaderValue, Method, StatusCode}, response::Response};
+use axum::{body::Body, extract::{Request, State}, http::{header::{CACHE_CONTROL, CONTENT_TYPE}, HeaderValue, Method, StatusCode}, response::Response};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
 use ipnet::Ipv4Net;
@@ -72,7 +72,7 @@ pub fn refusal(entry: &SigningEntry, subscription_id: &str, reason: &str) -> Str
 pub enum Form {Answer, Static, Whole}
 
 /// A signed subscription for one device of one account. Its serial comes from the device's own counter, which the endpoint and the publisher share: the larger of the time and the last serial plus one, so no serial is signed for two bodies.
-pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[SigningEntry], signer: &SigningEntry, form: Form, used: Option<&Value>, host: Option<&str>) -> Result<String, String> {
+pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[SigningEntry], signer: &SigningEntry, form: Form, used: Option<&Value>, reached: Option<&Endpoint>) -> Result<String, String> {
 	let keys = app.keys.as_ref().ok_or("no key file")?;
 	let settings = app.settings();
 	if settings.profiles.is_empty() {return Err("no profile is configured".into())}
@@ -97,8 +97,7 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 		if listed.is_empty() {return Err("no gateway key".into())}
 		let keys: Vec<Value> = listed.iter().map(gateway::listed).collect();
 		let resolved = settings.resolve(user.endpoint.as_deref(), &serde_json::from_str::<Vec<String>>(&user.groups).unwrap_or_default()).map(|(found, _)| found);
-		// The pins are those of the endpoint this request came in on, since that is the endpoint the client holds. The move names the endpoint the account is to use, even when it is this one.
-		let reached = host.and_then(|host| settings.by_host(host)).or(resolved);
+		// The pins are those of the endpoint the request reached, since that is the endpoint the client holds. The move names the endpoint the account is to use, even when it is this one. A request that reached no named endpoint, or a static file for an account whose move is pending, gets none: a list of pins is refused by a client that holds none of them, and absent it changes nothing.
 		if let Some(reached) = reached.filter(|reached| !reached.pins.is_empty()) {payload["endpoint_pins"] = json!(reached.pins);}
 		payload["gateway_keys"] = json!(keys);
 		if let Some(resolved) = resolved {
@@ -135,11 +134,14 @@ fn unknown(app: &App, mirrored: bool) -> Response {
 	response
 }
 
-/// Reads the body, opens it through the gateway and answers a valid request with a sealed document or refusal. Anything else answers as an unknown path.
+/// Reads the body, opens it through the gateway and answers a valid request with a sealed document or refusal. Anything else answers as an unknown path. The endpoint a request reached is told by its path alone: the `sub_path` and the name of the endpoint, which the operator's web server puts after its public host and path. The Host header is never read, since it is whatever the sender or a relay says.
 pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response {
 	let post = request.method() == Method::POST;
 	let (direct, headers) = (auth::source(&app, &request), request.headers().clone());
-	let host = headers.get(HOST).and_then(|host| host.to_str().ok()).map(str::to_owned);
+	let reached = match request.uri().path().strip_prefix(&app.cfg.sub_path).and_then(|rest| rest.strip_prefix('/')) {
+		Some(name) => match app.settings.read().unwrap_or_else(|poisoned| poisoned.into_inner()).named(name).cloned() {Some(found) => Some(found), None => return unknown(&app, false)},
+		None => None,
+	};
 	// "The body is read up to 1,073 bytes and no further": a longer one reads as nothing, and the gateway then takes it for a body of another size.
 	let body = http_body_util::Limited::new(request.into_body(), exchange::REQUEST).collect().await.map(|body| body.to_bytes()).unwrap_or_default();
 	let via = mirrors::check(&app, &headers, &body);
@@ -151,7 +153,11 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	let admitted = post && via.is_ok() && !(mirrored && headers.get("x-forwarded-proto").is_some_and(|proto| proto != "https"));
 	let at = now();
 	let key_id = (body.len() == exchange::REQUEST).then(|| body[0]);
-	let opened = app.gateway.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).open(&body, at, || admitted && app.limits.hit(&format!("sub:{}", bucket(&source)), 120, 60) && verified.is_none_or(|verified| mirrors::accept(&app, verified)));
+	// The keys open the body here, outside the lock: every request costs the same work, and only the window, the memory and the source's limit are taken under the lock. The limiter of the endpoint is its own, so a flood here fills nothing the admin side counts in.
+	let keyring = app.gateway.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).keyring();
+	let Some(keyring) = keyring else {return unknown(&app, mirrored)};
+	let unsealed = keyring.unseal(&body);
+	let opened = app.gateway.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).admit(unsealed, at, || admitted && app.sub_limits.hit(&format!("sub:{}", bucket(&source, 48)), 120, 60) && verified.is_none_or(|verified| mirrors::accept(&app, verified)));
 	let Some(Ok(opened)) = opened else {return unknown(&app, mirrored)};
 	let Some(keys) = app.keys.as_ref() else {return unknown(&app, mirrored)};
 	let reply = opened.reply;
@@ -172,7 +178,14 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	// One HMAC and one lookup in memory, so a request with a token that is not known costs the database nothing.
 	let lookup = keys.token_lookup(&token);
 	let Some(id) = app.lookups.read().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&lookup).copied() else {return unknown(&app, mirrored)};
-	let user = match app.db.call(move |db| UserRow::load(db, id).optional()).await {
+	// Which gateway key and which endpoint this account used, for the switch and the move, kept at most hourly. It is written for every request with a known token, before any refusal, since a request refused as retired, disabled or expired is exactly one a switch has to count.
+	let reached_name = reached.as_ref().map(|found| found.name.clone());
+	let user = match app.db.call(move |db| -> rusqlite::Result<Option<UserRow>> {
+		let Some(user) = UserRow::load(db, id).optional()? else {return Ok(None)};
+		if let Some(key_id) = key_id {db.execute("insert into gateway_use (key_id, user_id, first_at, last_at) values (?, ?, ?, ?) on conflict (key_id, user_id) do update set last_at = excluded.last_at where excluded.last_at - gateway_use.last_at >= 3600", params![key_id, id, at, at])?;}
+		if let Some(name) = &reached_name {db.execute("insert into endpoint_use (endpoint, user_id, last_at) values (?, ?, ?) on conflict (endpoint, user_id) do update set last_at = excluded.last_at where excluded.last_at - endpoint_use.last_at >= 3600", params![name, id, at])?;}
+		Ok(Some(user))
+	}).await {
 		Ok(Ok(Some(user))) => user,
 		Ok(Ok(None)) | Err(_) => return unknown(&app, mirrored),
 		Ok(Err(error)) => {tracing::error!("the subscription lookup failed: {error}"); return unknown(&app, mirrored)}
@@ -192,15 +205,18 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	if !user.enabled {return refuse("disabled")}
 	if user.expires_at.is_some_and(|expires| expires <= at) {return refuse("expired")}
 	let settings = app.settings();
-	let reached = host.as_deref().and_then(|host| settings.by_host(host)).map(|found| found.name.clone());
 	let hash = keys.device_secret_hash(ask.device_secret().expose());
 	let (public_key, op, name) = (STANDARD.encode(ask.device_public_key()), match ask.op() {Op::Fetch => "fetch", Op::Confirm(_) => "confirm", Op::Release => "release"}, match ask.op() {Op::Confirm(Some(name)) => Some(name.as_str().to_owned()), _ => None});
+	// A key that is some inbound's public key of this node is never a device's: the node would take the device for the node itself.
+	let node_key = settings.profiles.iter().chain(settings.profile_overrides.values()).filter_map(|profile| profile.get("inbound_public_key")?.as_str()).any(|key| STANDARD.decode(key).is_ok_and(|bytes| STANDARD.encode(bytes) == public_key));
 	let (changed, outcome) = {
 		let (handle, held, user, dirty, pool) = (app.db.clone(), app.clone(), user.clone(), app.dirty.clone(), settings.pool_v4.clone());
 		match handle.call(move |db| -> rusqlite::Result<(bool, Result<Option<DeviceRow>, &'static str>)> {
 			let (keys, mut changed, tx) = (held.keys.as_ref().expect("checked before the lookup"), false, db.transaction()?);
 			changed |= tx.execute("delete from devices where user_id = ? and state = 'pending' and created < ?", params![user.id, at - PENDING_LAPSE])? > 0;
 			let device = tx.query_row(&format!("select {DEVICE_COLUMNS} from devices where user_id = ? and public_key = ?"), params![user.id, public_key], DeviceRow::read).optional()?;
+			// A device key belongs to one account across the whole panel (the table's unique index says so too): a key that another account holds is answered as a device whose secret is not the stored one, which tells nothing about the other account.
+			let elsewhere = device.is_none() && tx.query_row("select exists (select 1 from devices where public_key = ?)", [&public_key], |row| row.get::<_, bool>(0))?;
 			let outcome = match device {
 				Some(device) if !crypto::equal(&device.secret_hash, &hash) => Err("device_mismatch"),
 				Some(device) => match op {
@@ -210,16 +226,17 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 						changed |= device.state == "pending";
 						Ok(Some(tx.query_row(&format!("select {DEVICE_COLUMNS} from devices where id = ?"), [device.id], DeviceRow::read)?))
 					}
-					"fetch" if device.state == "enrolled" && !held.limits.hit(&format!("dev:{}:{}", user.id, public_key), 1, 60) => Err("rate_limited"),
+					"fetch" if device.state == "enrolled" && !held.sub_limits.hit(&format!("dev:{}:{}", user.id, public_key), 1, 60) => Err("rate_limited"),
 					_ => {tx.execute("update devices set last_seen = ? where id = ?", params![at, device.id])?; Ok(Some(device))}
 				},
 				None if op == "release" => Ok(None),
+				None if node_key || elsewhere => Err("device_mismatch"),
 				None => {
 					let (total, pending): (i64, i64) = tx.query_row("select count(*), coalesce(sum(state = 'pending'), 0) from devices where user_id = ?", [user.id], |row| Ok((row.get(0)?, row.get(1)?)))?;
 					let limit = if user.device_limit == 0 {NODE_DEVICES_MAX} else {user.device_limit.min(NODE_DEVICES_MAX)};
 					let (address, enroll) = (allocate(&tx, &pool), op == "confirm");
 					if total >= limit || (!enroll && pending >= PENDING_PLACES) || address.is_none() {Err("device_limit")}
-					else if !held.limits.hit(&format!("new:{}:{}", user.id, user.token_gen), 1, 600) {Err("rate_limited")}
+					else if !held.sub_limits.hit(&format!("new:{}:{}", user.id, user.token_gen), 1, 600) {Err("rate_limited")}
 					else {
 						let secret = keys.seal_secret(&user.record_id, &format!("transport_secret:{}", public_key), &crypto::random::<32>());
 						tx.execute("insert into devices (user_id, name, public_key, secret_hash, address, transport_secret, state, token_gen, created, confirmed_at, last_seen) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![user.id, name.clone().unwrap_or_default(), public_key, hash.as_slice(), address, secret, if enroll {"enrolled"} else {"pending"}, user.token_gen, at, enroll.then_some(at), at])?;
@@ -228,9 +245,6 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 					}
 				}
 			};
-			// Which gateway key and which endpoint this account used, for the switch and the move, kept at most hourly.
-			if let Some(key_id) = key_id {tx.execute("insert into gateway_use (key_id, user_id, first_at, last_at) values (?, ?, ?, ?) on conflict (key_id, user_id) do update set last_at = excluded.last_at where excluded.last_at - gateway_use.last_at >= 3600", params![key_id, user.id, at, at])?;}
-			if let Some(reached) = &reached {tx.execute("insert into endpoint_use (endpoint, user_id, last_at) values (?, ?, ?) on conflict (endpoint, user_id) do update set last_at = excluded.last_at where excluded.last_at - endpoint_use.last_at >= 3600", params![reached, user.id, at])?;}
 			tx.commit()?;
 			if changed {dirty.store(true, Ordering::Relaxed)}
 			Ok((changed, outcome))
@@ -251,11 +265,12 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	};
 	if device.state == "enrolled" {statics::remember(&app, &user, &device, &token, ask.device_secret().expose()).await}
 	let used = crate::node::usage(&app).await.remove(&user.name);
-	match document(&app, &user, &device, &signing, &signer, Form::Answer, used.as_ref(), host.as_deref()).await {
+	match document(&app, &user, &device, &signing, &signer, Form::Answer, used.as_ref(), reached.as_ref()).await {
 		Ok(text) => answer(&text),
 		Err(error) => {
+			// A fault of the panel is no word of the account's state: it answers as an unknown path and says so in the log, and never as a signed refusal such as "disabled".
 			tracing::error!("a subscription document could not be built: {error}");
-			refuse("disabled")
+			unknown(&app, mirrored)
 		}
 	}
 }

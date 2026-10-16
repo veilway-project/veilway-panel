@@ -461,16 +461,19 @@ pub async fn sub_reset(State(app): State<Arc<App>>, Extension(ctx): Extension<Ct
 	let (lookup, remove_devices) = (keys.token_lookup(&token), input.remove_devices);
 	let old = app.db.call(move |db| -> Result<Vec<DeviceRow>, Failure> {
 		let keys = held.keys.as_ref().expect("checked before the lookup");
-		let user = UserRow::load(db, id)?;
+		// One transaction: the new token, the removed devices, the new Xray credentials and the audit line all happen or none does.
+		let tx = db.transaction()?;
+		let user = UserRow::load(&tx, id)?;
 		let once = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).show_links_once;
 		let copy = (!once).then(|| keys.seal_copy(&user.record_id, &token));
-		let old: Vec<DeviceRow> = DeviceRow::for_user(db, id)?.into_iter().filter(|device| device.token_gen == user.token_gen).collect();
-		db.execute("update users set token_lookup = ?, token_copy = ?, token_gen = token_gen + 1, token_created = ? where id = ?", params![lookup.as_slice(), copy, now(), id])?;
-		crate::app::load_lookups(db, &held.lookups);
-		if remove_devices {db.execute("delete from devices where user_id = ? and token_gen = ?", params![id, user.token_gen])?;}
+		let old: Vec<DeviceRow> = DeviceRow::for_user(&tx, id)?.into_iter().filter(|device| device.token_gen == user.token_gen).collect();
+		tx.execute("update users set token_lookup = ?, token_copy = ?, token_gen = token_gen + 1, token_created = ? where id = ?", params![lookup.as_slice(), copy, now(), id])?;
+		if remove_devices {tx.execute("delete from devices where user_id = ? and token_gen = ?", params![id, user.token_gen])?;}
 		// A link that was reset is a link that may have leaked, and the Xray share links are the same user's, so they are made new with it and the push below carries them to the node.
-		db.execute("delete from xray_clients where user_id = ?", [id])?;
-		audit(db, &ctx.actor, &ctx.source, "link.reset", &format!("user:{id}"), &format!("{} devices of the old link, removed: {}, Xray credentials made new", old.len(), remove_devices));
+		tx.execute("delete from xray_clients where user_id = ?", [id])?;
+		audit(&tx, &ctx.actor, &ctx.source, "link.reset", &format!("user:{id}"), &format!("{} devices of the old link, removed: {}, Xray credentials made new", old.len(), remove_devices));
+		tx.commit()?;
+		crate::app::load_lookups(db, &held.lookups);
 		dirty.store(true, Ordering::Relaxed);
 		Ok(old)
 	}).await??;

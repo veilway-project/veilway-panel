@@ -3,13 +3,13 @@ import {Fragment, useState} from "react";
 import {api, type ResetOut, type Settings, type Switched} from "../api.ts";
 import {Copyable, ErrorNote, Mark, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 
-type Ask = "switch" | "theft" | "recreate" | "reset" | null;
+type Ask = "switch" | "theft" | "recreate" | "load" | "reset" | null;
 
 // The gateway keys behind the subscription endpoint. The days a retired key is kept save with the settings form; every other action acts on its own and asks for a fresh sign-in.
 export function GatewaySection({draft, patch}: {draft: Settings, patch: (change: Partial<Settings>) => void}) {
 	const {t, date, number} = useP(), say = useSay(), guard = useGuard(), toast = useToast(), keys = useLoad(() => api("get", "/gateway-keys"), []);
-	const [ask, setAsk] = useState<Ask>(null), [paste, setPaste] = useState(""), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [made, setMade] = useState<Switched | null>(null), [count, setCount] = useState<number | null>(null), [links, setLinks] = useState<ResetOut | null>(null);
-	const data = keys.data, day = (seconds: number) => date(new Date(seconds * 1000)), close = () => { setAsk(null); setPaste(""); setError(null); setCount(null); };
+	const [ask, setAsk] = useState<Ask>(null), [paste, setPaste] = useState(""), [keyId, setKeyId] = useState<number | "">(""), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [made, setMade] = useState<Switched | null>(null), [count, setCount] = useState<number | null>(null), [links, setLinks] = useState<ResetOut | null>(null);
+	const data = keys.data, day = (seconds: number) => date(new Date(seconds * 1000)), close = () => { setAsk(null); setPaste(""); setKeyId(""); setError(null); setCount(null); };
 	const act = async (work: () => Promise<void>) => {
 		setBusy(true);
 		setError(null);
@@ -22,7 +22,13 @@ export function GatewaySection({draft, patch}: {draft: Settings, patch: (change:
 		}
 	};
 	const swap = (path: "/gateway-keys/rotate" | "/gateway-keys/theft") => act(async () => {
-		const answer = await api("post", path, {body: {private: paste.trim() || null}});
+		const answer = await api("post", path, {body: {private: paste.trim() || null, confirm: false}});
+		setMade(answer);
+		keys.set(answer.gateway);
+		close();
+	});
+	const load = () => act(async () => {
+		const answer = await api("post", "/gateway-keys/rotate", {body: {private: paste.trim(), id: keyId === "" ? null : keyId, confirm: true}});
 		setMade(answer);
 		keys.set(answer.gateway);
 		close();
@@ -47,7 +53,7 @@ export function GatewaySection({draft, patch}: {draft: Settings, patch: (change:
 			{keys.error && !data ? <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={keys.reload}>{t("action.retry")}</Button>}>{say(keys.error)}</StateBlock>
 			: !data ? <StateBlock kind="loading" title={t("common.loading")}/>
 			: <>
-				{!data.loaded && <Banner tone="danger" title={t("gateway.lost")} action={<Button size="sm" variant="danger" onClick={() => setAsk("recreate")}>{t("gateway.recreate")}</Button>}>{t("gateway.lostBody")}</Banner>}
+				{!data.loaded && <Banner tone="danger" title={t("gateway.lost")} action={<span className="p-cluster"><Button size="sm" onClick={() => setAsk("load")}>{t("gateway.load")}</Button><Button size="sm" variant="danger" onClick={() => setAsk("recreate")}>{t("gateway.recreate")}</Button></span>}>{t("gateway.lostBody")}</Banner>}
 				{data.loaded && data.switch_due && <Banner tone="info" title={t("gateway.due")}>{t("gateway.dueBody")}</Banner>}
 				{data.next?.on_host && <Banner tone="warning" title={t("gateway.onHost")}>{t("gateway.onHostBody")}</Banner>}
 				{(data.active || data.next || data.retired.length > 0) && <List label={t("settings.gateway")}>
@@ -66,7 +72,7 @@ export function GatewaySection({draft, patch}: {draft: Settings, patch: (change:
 				<details className="p-details">
 					<summary>{t("gateway.counters")}</summary>
 					<dl className="p-kv">
-						{(["served", "size", "key", "open", "request", "window", "replay", "source"] as const).map(k => <Fragment key={k}><dt>{t(`gateway.count.${k}`)}</dt><dd className="vw-num">{number(data.counts[k])}</dd></Fragment>)}
+						{(["served", "size", "key", "open", "request", "window", "replay", "source", "full"] as const).map(k => <Fragment key={k}><dt>{t(`gateway.count.${k}`)}</dt><dd className="vw-num">{number(data.counts[k])}</dd></Fragment>)}
 						<dt>{t("gateway.remembered")}</dt><dd className="vw-num">{number(data.remembered)}</dd>
 						<dt>{t("gateway.clockSteps")}</dt><dd className="vw-num">{number(data.clock_steps)}</dd>
 					</dl>
@@ -81,6 +87,14 @@ export function GatewaySection({draft, patch}: {draft: Settings, patch: (change:
 				<SecretField label={t("gateway.paste")} hint={t("gateway.pasteHint")} value={paste} onChange={setPaste} autoComplete="off" optional/>
 				<ErrorNote error={error}/>
 				<div className="vw-dialog-foot"><Button onClick={close}>{t("action.cancel")}</Button><Button type="submit" variant={ask === "theft" ? "danger" : "primary"} disabled={busy}>{t(ask === "theft" ? "gateway.theftConfirm" : "gateway.switchConfirm")}</Button></div>
+			</form>
+		</Dialog>
+		<Dialog open={ask === "load"} onOpenChange={open => { if (!open) close(); }} title={t("gateway.loadTitle")} description={t("gateway.loadBody")}>
+			<form className="p-stack" onSubmit={event => { event.preventDefault(); void load(); }}>
+				<SecretField label={t("gateway.paste")} value={paste} onChange={setPaste} autoComplete="off"/>
+				<NumberField label={t("gateway.loadId")} hint={t("gateway.loadIdHint")} unit="" min={0} max={255} value={keyId} onChange={setKeyId}/>
+				<ErrorNote error={error}/>
+				<div className="vw-dialog-foot"><Button onClick={close}>{t("action.cancel")}</Button><Button type="submit" variant="primary" disabled={busy || !paste.trim() || keyId === ""}>{t("gateway.loadConfirm")}</Button></div>
 			</form>
 		</Dialog>
 		<ConfirmDialog open={ask === "recreate"} onOpenChange={open => { if (!open) close(); }} danger title={t("gateway.recreateTitle")} body={t("gateway.recreateBody")} confirmLabel={t("gateway.recreate")} onConfirm={() => void recreate()}/>

@@ -38,11 +38,13 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 		tracing::info!("finished a restore that was cut short");
 	}
 	let db = db::Db::open(&cfg.database).map_err(|error| format!("{}: {error}", cfg.database.display()))?;
-	let (accounts, settings, admins) = db.blocking(|connection| -> rusqlite::Result<(i64, Settings, i64)> {
+	let (accounts, stored, admins) = db.blocking(|connection| -> rusqlite::Result<(i64, Option<String>, i64)> {
 		let accounts = connection.query_row("select (select count(*) from users) + (select count(*) from admins)", [], |row| row.get(0))?;
-		let settings = connection.query_row("select value from settings where key = 'settings'", [], |row| row.get::<_, String>(0)).optional()?.and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
-		Ok((accounts, settings, connection.query_row("select count(*) from admins", [], |row| row.get(0))?))
+		let stored = connection.query_row("select value from settings where key = 'settings'", [], |row| row.get::<_, String>(0)).optional()?;
+		Ok((accounts, stored, connection.query_row("select count(*) from admins", [], |row| row.get(0))?))
 	}).map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+	// A row that does not parse is never turned into the defaults: the next save would write them over it and drop the profiles, endpoints and relays it held. The row is left as it is for the operator to read or restore.
+	let settings: Settings = stored.map(|text| serde_json::from_str(&text).map_err(|error| format!("the stored settings in {} cannot be read ({error}); the row 'settings' of the table 'settings' is left untouched. Restore a backup, or fix the row by hand with the panel stopped", cfg.database.display()))).transpose()?.unwrap_or_default();
 	let keys = match (cfg.keys.exists(), accounts) {
 		(true, _) => crypto::Keys::load(&cfg.keys).map_err(|error| tracing::error!("the key file {} cannot be used: {error}", cfg.keys.display())).ok(),
 		(false, 0) => Some(crypto::Keys::create(&cfg.keys).map_err(|error| format!("{}: {error}", cfg.keys.display()))?),
@@ -79,7 +81,7 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 	}).map_err(|error| error.to_string())?;
 	let token = setup_needed.then(|| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<20>()));
 	if let Some(token) = &token {println!("Setup token (one time): {token}\nPOST it with a username and password to {}/api/setup", cfg.prefix);}
-	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), gateway: Mutex::new(gateway), lookups, refusals: Mutex::new(HashMap::new()), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: Arc::new(AtomicBool::new(false)), settings: Arc::new(RwLock::new(settings)), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), mirrors_seen: Default::default(), publishing: tokio::sync::Mutex::new(())}))
+	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), gateway: Mutex::new(gateway), lookups, refusals: Mutex::new(HashMap::new()), limits: Limiter::default(), sub_limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: Arc::new(AtomicBool::new(false)), settings: Arc::new(RwLock::new(settings)), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), mirrors_seen: Default::default(), publishing: tokio::sync::Mutex::new(())}))
 }
 
 /// What the upkeep loop remembers between passes.
@@ -170,5 +172,5 @@ pub fn router(app: Arc<App>) -> Router {
 	for page in &pages {for method in [Method::GET, Method::HEAD] {access.insert((method, page.clone()), Access::Public);}}
 	let guard = Arc::new(Guard {app: app.clone(), access});
 	let admin = api.route(&pages[0], get(web::slash)).route(&pages[1], get(web::index)).route(&pages[2], get(web::asset)).route_layer(middleware::from_fn_with_state(guard, auth::guard)).method_not_allowed_fallback(routes::not_found).layer(middleware::from_fn(headers));
-	Router::new().merge(admin).route(&app.cfg.sub_path, any(subs::endpoint)).route("/robots.txt", get(web::robots)).fallback(routes::not_found).layer(middleware::from_fn_with_state(app.clone(), restoring)).with_state(app)
+	Router::new().merge(admin).route(&app.cfg.sub_path, any(subs::endpoint)).route(&format!("{}/{{*endpoint}}", app.cfg.sub_path), any(subs::endpoint)).route("/robots.txt", get(web::robots)).fallback(routes::not_found).layer(middleware::from_fn_with_state(app.clone(), restoring)).with_state(app)
 }

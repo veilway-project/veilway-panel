@@ -85,7 +85,7 @@ impl Harness {
 		if answer.status == StatusCode::OK {answer.body = sealed.open(&answer.body).expect("the answer opens");}
 		answer
 	}
-	fn forget_limits(&self, id: i64, device: u8) {self.app.limits.clear(&format!("dev:{id}:{}", STANDARD.encode([device; 32])));}
+	fn forget_limits(&self, id: i64, device: u8) {self.app.sub_limits.clear(&format!("dev:{id}:{}", STANDARD.encode([device; 32])));}
 	fn root(&self, base: &str) -> PathBuf {self.dir.join("static").join(statics::label(base))}
 	fn current(&self, base: &str) -> PathBuf {self.root(base).join("current")}
 }
@@ -112,7 +112,7 @@ async fn enrolled(h: &Harness, session: &Session, devices: &[u8]) -> (i64, Link)
 	h.configure(session, json!({"static_mirrors": [BASE, RAW]})).await;
 	let (id, link) = h.user(session, "ann").await;
 	for device in devices {
-		h.app.limits.clear(&format!("new:{id}:1"));
+		h.app.sub_limits.clear(&format!("new:{id}:1"));
 		assert_eq!(h.fetch(&link, *device, "confirm").await.status, StatusCode::OK);
 	}
 	(id, link)
@@ -147,7 +147,7 @@ async fn a_round_writes_a_sealed_file_per_confirmed_device_and_period_and_decoys
 	let h = Harness::new().await;
 	let session = h.login().await;
 	let (id, link) = enrolled(&h, &session, &[1, 2]).await;
-	h.app.limits.clear(&format!("new:{id}:1"));
+	h.app.sub_limits.clear(&format!("new:{id}:1"));
 	assert_eq!(h.fetch(&link, 3, "fetch").await.status, StatusCode::OK, "a pending device");
 	let at = crypto::now();
 	statics::round(&h.app, at).await.unwrap();
