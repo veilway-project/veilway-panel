@@ -360,3 +360,10 @@
 .p-hand-exits > li { grid-template-columns: minmax(6rem, auto) minmax(0, 1fr) auto; }
 @media (prefers-reduced-motion: reduce) { .p-hand > summary::before { transition: none; } }
 @media (max-width: 480px) { .p-hand-body, .p-hand > .p-hand-summary { padding-inline: var(--s-3); } .p-hand-dial { grid-template-columns: minmax(0, 1fr) 4.75rem; } .p-hand .p-mirror { padding: var(--s-3); } }
+.p-static { display: grid; gap: var(--s-4); }
+.p-static-url { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s-2); align-items: end; }
+.p-static-facts { display: flex; flex-wrap: wrap; gap: var(--s-2) var(--s-6); margin: 0; }
+.p-static-facts > div { display: grid; gap: var(--s-1); }
+.p-static-facts dt { font-size: var(--text-2); color: var(--c-text-muted); }
+.p-static-facts dd { margin: 0; }
+.p-static .p-mirror .p-flag { white-space: normal; }

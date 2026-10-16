@@ -14,6 +14,7 @@ pub mod node;
 pub mod openapi;
 pub mod routes;
 pub mod stats;
+pub mod statics;
 pub mod subs;
 pub mod updater;
 pub mod users;
@@ -66,7 +67,7 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 	}
 	let token = setup_needed.then(|| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<20>()));
 	if let Some(token) = &token {println!("Setup token (one time): {token}\nPOST it with a username and password to {}/api/setup", cfg.prefix);}
-	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: AtomicBool::new(false), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), mirrors_seen: Default::default()}))
+	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: AtomicBool::new(false), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), mirrors_seen: Default::default(), publishing: tokio::sync::Mutex::new(())}))
 }
 
 /// What the upkeep loop remembers between passes.
@@ -100,6 +101,9 @@ pub async fn upkeep_once(app: &Arc<App>, state: &mut Upkeep) {
 	if at - state.polled_at >= stats::POLL {
 		state.polled_at = at;
 		stats::poll(app).await;
+	}
+	if statics::due(app, at) {
+		if let Err(error) = statics::round(app, at).await {tracing::warn!("static mirrors: no round was published: {error}")}
 	}
 	if app.dirty.load(Ordering::Relaxed) && at >= state.retry_at {
 		state.wait = if node::sync(app).await.is_ok() {0} else {(state.wait * 2).clamp(5, 600)};

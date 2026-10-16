@@ -1,5 +1,5 @@
 //! The subscription side: the link, the signed document, and the public endpoint that answers a valid token and nothing else.
-use crate::{app::{bucket, App, Settings, SigningEntry}, auth, crypto::{self, now}, mirrors};
+use crate::{app::{bucket, App, Settings, SigningEntry}, auth, crypto::{self, now}, mirrors, statics};
 use axum::{body::Body, extract::{Request, State}, http::{header::{CACHE_CONTROL, CONTENT_TYPE}, HeaderValue, Method}, response::Response};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
@@ -66,8 +66,12 @@ fn sign(entry: &SigningEntry, payload: &Value) -> String {
 
 pub fn refusal(entry: &SigningEntry, subscription_id: &str, reason: &str) -> String {sign(entry, &json!({"v": 1, "subscription_id": subscription_id, "issued_at": now(), "refusal": reason}))}
 
-/// A signed subscription for one device of one account.
-pub fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[SigningEntry], signer: &SigningEntry, used: Option<&Value>) -> Result<String, String> {
+/// Which document is built. The endpoint's answer lists the static mirrors and carries usage. A static file has no usage, since a host may keep every version for good. A whole document, handed out as a file or in a link, lists no static mirrors, since it has no link to derive their keys from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Form {Answer, Static, Whole}
+
+/// A signed subscription for one device of one account. Its serial comes from the device's own counter, which the endpoint and the publisher share: the larger of the time and the last serial plus one, so no serial is signed for two bodies.
+pub fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[SigningEntry], signer: &SigningEntry, form: Form, used: Option<&Value>) -> Result<String, String> {
 	let keys = app.keys.as_ref().ok_or("no key file")?;
 	let settings = app.settings();
 	if settings.profiles.is_empty() {return Err("no profile is configured".into())}
@@ -77,15 +81,17 @@ pub fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[SigningE
 	if let Some(sealed) = &this.private_key {device["private_key"] = json!(STANDARD.encode(keys.open_secret(&user.record_id, &format!("private_key:{}", this.public_key), sealed).ok_or("a private key does not open")?));}
 	let profiles: Vec<Value> = settings.profiles.iter().cloned().map(|mut profile| {profile["device"] = device.clone(); profile}).collect();
 	let at = now();
+	let serial: i64 = app.db.lock().query_row("update devices set last_serial = max(?, last_serial + 1) where id = ? returning last_serial", params![at * 1000 + (crypto::random::<2>()[0] as i64 % 250), this.id], |row| row.get(0)).map_err(|error| error.to_string())?;
 	let mut payload = json!({
-		"v": 1, "subscription_id": user.sub_id, "serial": at * 1000 + (crypto::random::<2>()[0] as i64 % 250), "issued_at": at, "expires_at": at + i64::from(settings.document_days) * 86_400,
+		"v": 1, "subscription_id": user.sub_id, "serial": serial, "issued_at": at, "expires_at": at + i64::from(settings.document_days) * 86_400,
 		"signing_keys": signing.iter().map(|entry| STANDARD.encode(entry.public())).collect::<Vec<_>>(),
 		"provider": {"name": settings.provider_name}, "update_interval": settings.update_interval, "profiles": profiles,
 		"devices": devices.iter().map(|other| json!({"name": other.name, "enrolled_at": other.confirmed_at.unwrap_or(other.created), "this": other.id == this.id, "pending": other.state == "pending"})).collect::<Vec<_>>(),
-		"usage": {"used_bytes": used.and_then(|user| user.get("used_bytes")).and_then(Value::as_u64).unwrap_or(0), "quota_bytes": user.quota_bytes.unwrap_or(0), "period": user.quota_period.as_deref().unwrap_or("none"), "period_start": used.and_then(|user| user.get("period_start")).and_then(Value::as_i64).unwrap_or(0).max(0), "expires_at": user.expires_at.unwrap_or(0), "device_limit": user.device_limit},
 	});
+	if form != Form::Static {payload["usage"] = json!({"used_bytes": used.and_then(|user| user.get("used_bytes")).and_then(Value::as_u64).unwrap_or(0), "quota_bytes": user.quota_bytes.unwrap_or(0), "period": user.quota_period.as_deref().unwrap_or("none"), "period_start": used.and_then(|user| user.get("period_start")).and_then(Value::as_i64).unwrap_or(0).max(0), "expires_at": user.expires_at.unwrap_or(0), "device_limit": user.device_limit});}
 	if !settings.endpoint_pins.is_empty() {payload["endpoint_pins"] = json!(settings.endpoint_pins);}
 	if !settings.refresh_mirrors.is_empty() {payload["refresh_urls"] = json!(settings.refresh_mirrors);}
+	if form != Form::Whole && !settings.static_mirrors.is_empty() {payload["static_mirrors"] = json!(settings.static_mirrors);}
 	Ok(sign(signer, &payload))
 }
 
@@ -203,8 +209,11 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 		Ok(None) => return refuse("released"),
 		Ok(Some(device)) => device,
 	};
+	if device.state == "enrolled" {
+		if let Some(token) = token {statics::remember(&app, &user, &device, &token, &ask.secret)}
+	}
 	let used = crate::node::usage(&app).await.remove(&user.name);
-	match document(&app, &user, &device, &signing, &signer, used.as_ref()) {
+	match document(&app, &user, &device, &signing, &signer, Form::Answer, used.as_ref()) {
 		Ok(text) => signed_response(text),
 		Err(error) => {
 			tracing::error!("a subscription document could not be built: {error}");

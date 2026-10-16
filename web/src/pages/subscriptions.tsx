@@ -4,9 +4,10 @@ import {api, type NotFound, type Settings} from "../api.ts";
 import {ErrorNote, lines, LinesField, Mark, PageHead, useGuard, useLoad, useP, useReorder, useSay} from "../kit.tsx";
 import {SettingsContext} from "../settings.ts";
 import {ProfilesEditor} from "./handwritten.tsx";
+import {StaticMirrors} from "./statics.tsx";
 
 type Mirror = {url: string, pins: string};
-const SECTIONS = ["endpoint", "refresh", "new-users", "mirrors", "strangers", "profiles", "keys"] as const;
+const SECTIONS = ["endpoint", "refresh", "new-users", "mirrors", "static", "strangers", "profiles", "keys"] as const;
 
 // Every setting on one page. The settings are one document saved with PUT, so the whole form saves at once from the bar that shows while anything is changed; signing keys act on their own.
 export function SettingsPage() {
@@ -106,6 +107,7 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 					{mirrors.length < 4 && <div><Button size="sm" icon="plus" onClick={() => set({mirrors: [...mirrors, {url: "", pins: ""}]})}>{t("subs.addMirror")}</Button></div>}
 				</div>
 			</section>
+			<StaticMirrors draft={draft} patch={patch} saved={initial}/>
 			<section className="p-section" id="set-strangers">
 				{head("strangers")}
 				<div className="p-form">

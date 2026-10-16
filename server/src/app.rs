@@ -101,6 +101,10 @@ pub struct Settings {
 	pub document_days: u32,
 	/// Other endpoints of the same subscription, put in every document as `refresh_urls`. A string, or an object with `url` and `pins`.
 	pub refresh_mirrors: Vec<Value>,
+	/// Base URLs of static mirrors, put in every document as `static_mirrors`: plain file hosting that holds each device's sealed document. `https`, a path ending in `/`, no pins and no IP literal, at most 4, and none shares host and port with the endpoint or a relay mirror.
+	pub static_mirrors: Vec<String>,
+	/// Hours between publishing rounds of the static mirrors, 1 to 12.
+	pub static_interval: u32,
 	/// One profile per inbound, in the shape of "A profile" on the subscription format page, without `device`. The panel adds the device.
 	pub profiles: Vec<Value>,
 	/// Edits to the profiles derived from the node's inbounds, by inbound tag: an object whose members replace the derived ones.
@@ -113,7 +117,7 @@ pub struct Settings {
 
 impl Default for Settings {
 	fn default() -> Self {
-		Self {provider_name: "Veilway".into(), endpoint_url: String::new(), endpoint_pins: Vec::new(), pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None}
+		Self {provider_name: "Veilway".into(), endpoint_url: String::new(), endpoint_pins: Vec::new(), pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None}
 	}
 }
 
@@ -145,6 +149,8 @@ pub struct App {
 	pub pairing: Mutex<crate::links::Pairing>,
 	/// Nonces of the relay mirror headers that were accepted, so that a header seen once is not taken twice.
 	pub mirrors_seen: crate::mirrors::Seen,
+	/// One publishing round at a time.
+	pub publishing: tokio::sync::Mutex<()>,
 }
 
 impl App {

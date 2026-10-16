@@ -18,7 +18,7 @@ create table if not exists xray_clients (tag text not null references xray_inbou
 ";
 
 /// Kept in the file's `user_version`. A file with a higher number was made by a newer panel and is refused, at start-up and in a restore. A file with none is the first layout.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
@@ -34,6 +34,8 @@ impl Db {
 		let _ = connection.execute("alter table xray_inbounds add column server_key blob", []);
 		// Version 2: the exit a user's devices leave through when they choose none.
 		let _ = connection.execute("alter table users add column default_exit text", []);
+		// Version 3: the keys of a device's static mirror files (sealed, with the token generation they were derived under), and the last serial signed for it.
+		for column in ["mirror_name blob", "mirror_key blob", "mirror_gen integer", "last_serial integer not null default 0"] {let _ = connection.execute(&format!("alter table devices add column {column}"), []);}
 		Ok(Self(Arc::new(Mutex::new(connection))))
 	}
 	/// Held for the length of one query or one short transaction and never across an await.

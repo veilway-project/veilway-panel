@@ -465,6 +465,64 @@
         ],
         "type": "object"
       },
+      "FolderOut": {
+        "properties": {
+          "base_url": {
+            "type": "string"
+          },
+          "files": {
+            "description": "Files in the folder, real and decoy together. Null before the first round.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "path": {
+            "description": "The folder to copy to the host: a link that is switched to each new round in one step.",
+            "type": "string"
+          },
+          "shared_host": {
+            "description": "False when the host is not on the panel's list of shared host names: a censor that learns it can block it without blocking anything else.",
+            "type": "boolean"
+          },
+          "size": {
+            "description": "The size of every file of the folder, in bytes. Null before the first round.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "sync": {
+            "items": {
+              "$ref": "#/components/schemas/SyncOut"
+            },
+            "type": "array"
+          },
+          "written_at": {
+            "description": "When this folder was last written.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "label",
+          "base_url",
+          "shared_host",
+          "path",
+          "sync"
+        ],
+        "type": "object"
+      },
       "HistoryOut": {
         "properties": {
           "kind": {
@@ -903,6 +961,13 @@
       },
       "NodeInfo": {
         "properties": {
+          "clock_synchronized": {
+            "description": "Whether the system reports its clock as synchronized, null when it cannot tell. A panel whose clock is off by more than a day writes static mirror names that no client asks for.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "keys_missing": {
             "type": "boolean"
           },
@@ -1395,6 +1460,21 @@
             "description": "Store no copy of a token: a link is shown at creation and reset, and never again.",
             "type": "boolean"
           },
+          "static_interval": {
+            "default": 6,
+            "description": "Hours between publishing rounds of the static mirrors, 1 to 12.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "static_mirrors": {
+            "default": [],
+            "description": "Base URLs of static mirrors, put in every document as `static_mirrors`: plain file hosting that holds each device's sealed document. `https`, a path ending in `/`, no pins and no IP literal, at most 4, and none shares host and port with the endpoint or a relay mirror.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "update_interval": {
             "default": 3600,
             "format": "uint32",
@@ -1421,6 +1501,47 @@
           "token",
           "username",
           "password"
+        ],
+        "type": "object"
+      },
+      "StaticOut": {
+        "properties": {
+          "error": {
+            "description": "Why the last round published nothing, if it failed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "folders": {
+            "items": {
+              "$ref": "#/components/schemas/FolderOut"
+            },
+            "type": "array"
+          },
+          "interval_hours": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "last_round": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "next_round": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "folders",
+          "interval_hours"
         ],
         "type": "object"
       },
@@ -1480,6 +1601,21 @@
           "token_created",
           "can_show",
           "key_fingerprints"
+        ],
+        "type": "object"
+      },
+      "SyncOut": {
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool",
+          "command"
         ],
         "type": "object"
       },
@@ -2073,6 +2209,22 @@
         "required": [
           "installed",
           "inbounds"
+        ],
+        "type": "object"
+      },
+      "Zipped": {
+        "properties": {
+          "file": {
+            "description": "The zip file, standard base64.",
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename",
+          "file"
         ],
         "type": "object"
       }
@@ -4891,6 +5043,135 @@
           }
         },
         "summary": "Adds a second current key. Both are listed in every document until the rotation is finished.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/static": {
+      "get": {
+        "operationId": "getStatic",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StaticOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The static mirror folders: where each is, how many files and of what size (real and decoy together), when it was last written, the commands that copy it to a host, and why the last round failed if it did.",
+        "x-access": "session"
+      }
+    },
+    "/static/{label}/zip": {
+      "post": {
+        "operationId": "downloadStatic",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Zipped"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The current round of one static mirror folder as a zip file, as base64 in `file`. Needs a recent re-authentication and is audited. No API token can do this.",
         "x-access": "session-reauth"
       }
     },
