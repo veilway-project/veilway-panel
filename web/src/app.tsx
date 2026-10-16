@@ -148,7 +148,7 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 					</nav>
 				</div>
 				<div className="p-account">
-					<a className="p-account-link" href="#/account" aria-current={page === "account" ? "page" : undefined} title={collapsed && !open ? username : undefined}><span className="p-avatar" aria-hidden="true">{initials}</span><span className="p-account-text"><strong className="vw-code">{username}</strong><span>{t("nav.account")}</span></span></a>
+					<a className="p-account-link" href="#/account" aria-current={page === "account" ? "page" : undefined} title={collapsed && !open ? username : undefined}><span className="p-avatar" aria-hidden="true">{initials}</span><span className="p-account-text"><strong><bdi className="vw-code">{username}</bdi></strong><span>{t("nav.account")}</span></span></a>
 					<IconButton icon="power" label={t("account.logout")} onClick={onLogout}/>
 				</div>
 			</aside>
