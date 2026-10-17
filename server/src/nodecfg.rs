@@ -248,6 +248,7 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 			Some(match transport["type"].as_str()? {
 				kind @ ("udp" | "udp-obfs") => json!({"type": kind, "endpoints": [endpoint]}),
 				kind @ ("tls" | "ws") if transport.get("decoy").is_some() => json!({"type": kind, "path": transport["path"], "candidates": [{"address": endpoint, "sni": host, "host": host}]}),
+				kind @ "fronted-shaped" if transport.get("decoy").is_some() => json!({"type": kind, "path": transport["path"], "candidates": [{"address": endpoint, "sni": host, "host": host}], "shape": transport["shape"]}),
 				_ => return None,
 			})
 		}).collect();
@@ -260,7 +261,7 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 		let mut missing = Vec::new();
 		if profile.get("inbound_public_key").is_none() {missing.push("inbound_public_key")}
 		if host.is_empty() {missing.push("node_host")}
-		if profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport["type"] == "tls" || transport["type"] == "ws")) && profile.get("transport_public_key").is_none() {missing.push("transport_public_key")}
+		if profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport["type"] == "tls" || transport["type"] == "ws" || transport["type"] == "fronted-shaped")) && profile.get("transport_public_key").is_none() {missing.push("transport_public_key")}
 		json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed})
 	}).collect()
 }
@@ -415,6 +416,16 @@ mod tests {
 		let mut stranger = published.clone();
 		carry(&mut stranger, "Main", &reaching(&relays, Some((8, &groups))));
 		assert_eq!(stranger["transports"][0]["endpoints"], json!(["192.0.2.10:51820", "198.51.100.8:51820"]), "an account without its own relay gets only the relays for everyone");
+	}
+
+	#[test]
+	fn a_fronted_shaped_transport_carries_its_shape_into_the_profile() {
+		let shape = json!({"up": {"method": "POST", "in": "body"}, "down": {"mode": "sse"}});
+		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "fronted-shaped", "listen": "127.0.0.1:8443", "path": "/a-long-enough-path", "decoy": {"origin": "http://127.0.0.1:8080"}, "trusted_proxies": ["127.0.0.1"], "shape": shape.clone()}]}]});
+		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
+		let template = derive(&settings, &document, &[], None).remove(0);
+		assert_eq!(template["profile"]["transports"], json!([{"type": "fronted-shaped", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:8443", "sni": "192.0.2.10", "host": "192.0.2.10"}], "shape": shape}]), "the shape is the node's object, as the subscription format wants it");
+		assert_eq!(template["missing"], json!(["inbound_public_key", "transport_public_key"]), "a fronted-shaped transport needs the transport public key like tls and ws");
 	}
 
 	#[test]
