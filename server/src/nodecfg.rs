@@ -10,13 +10,13 @@ use veilway_proto::subscription::payload::{dialable, CANDIDATES_MAX};
 /// `veilway schema` of the core, kept next to the manifest. The node's own validation stays the authority: this is for an editor.
 const SCHEMA: &str = include_str!("../config.schema.json");
 /// The parts of the document that are edited as structured objects. `users` is the panel's own and never appears here.
-const SECTIONS: [&str; 9] = ["inbounds", "outbounds", "exits", "routing", "notices", "dns", "log", "links", "replay"];
+const SECTIONS: [&str; 10] = ["inbounds", "outbounds", "exits", "routing", "notices", "dns", "log", "links", "tunnels", "replay"];
 /// The sections that are an object. The others are lists.
 const OBJECTS: [&str; 4] = ["routing", "dns", "log", "replay"];
-/// Sections that change the node's links, log, resolvers or notices. Only a session that confirmed its password and code again may change them, and no API token may change them through the whole document either.
-const GUARDED: [&str; 4] = ["links", "log", "dns", "notices"];
+/// Sections that change the node's links, tunnels, log, resolvers or notices. Only a session that confirmed its password and code again may change them, and no API token may change them through the whole document either.
+const GUARDED: [&str; 5] = ["links", "tunnels", "log", "dns", "notices"];
 /// Sections the document may leave out, which a null removes.
-const OPTIONAL: [&str; 5] = ["dns", "log", "notices", "replay", "links"];
+const OPTIONAL: [&str; 6] = ["dns", "log", "notices", "replay", "links", "tunnels"];
 /// The transports a relay can carry, by their type in a profile.
 const RELAYED: [&str; 5] = ["udp", "udp-obfs", "tls", "ws", "fronted"];
 /// Every transport keeps at least one candidate of its own, so this many relays always fit in the payload's 16.
@@ -166,7 +166,7 @@ pub async fn put_config(State(app): State<Arc<App>>, Extension(ctx): Extension<C
 	let _turn = app.node_lock.lock().await;
 	let (_, _, live) = running(&app).await?;
 	let changed = |sections: &[&str]| sections.iter().any(|section| live[*section] != input.document[*section]);
-	if ctx.token_id.is_some() && changed(&["exits", "outbounds", "links", "log", "dns", "notices"]) {return Err(Failure::new(StatusCode::FORBIDDEN, "forbidden", "An API token cannot change exits, outbounds, links, log, dns or notices through the whole config."))}
+	if ctx.token_id.is_some() && changed(&["exits", "outbounds", "links", "tunnels", "log", "dns", "notices"]) {return Err(Failure::new(StatusCode::FORBIDDEN, "forbidden", "An API token cannot change exits, outbounds, links, tunnels, log, dns or notices through the whole config."))}
 	if changed(&GUARDED) {reauthed(&app, &ctx).await?}
 	ok(&apply(&app, &ctx, input.document, &input.revision, "config").await?)
 }

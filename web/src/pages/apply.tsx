@@ -4,7 +4,7 @@ import {api, ApiError, type Diff, type Report, type Running} from "../api.ts";
 import {ErrorNote, Issues, useGuard, useLoad, useP} from "../kit.tsx";
 import {loadRunning} from "./config.tsx";
 
-export type NodeSection = "notices" | "dns" | "log" | "links" | "replay";
+export type NodeSection = "notices" | "dns" | "log" | "links" | "tunnels" | "replay";
 
 // The running config, read once per page, so every change below is made on the revision the page shows.
 export const useRunning = () => useLoad(loadRunning, []);

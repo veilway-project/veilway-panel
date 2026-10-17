@@ -727,11 +727,11 @@ async fn notices_dns_log_links_and_replay_are_sections_like_the_others() {
 	let notices = h.call(Method::GET, "/p/api/config/notices", Some(&session), None, "10.0.0.1").await.json();
 	assert_eq!(notices["value"], Value::Null, "a section the document leaves out is null");
 	assert_eq!(h.call(Method::GET, "/p/api/config/replay", Some(&session), None, "10.0.0.1").await.json()["read_at_start"], json!(["cache"]));
-	for (section, wrong) in [("notices", json!({})), ("links", json!({})), ("dns", json!([])), ("log", json!([]))] {
+	for (section, wrong) in [("notices", json!({})), ("links", json!({})), ("tunnels", json!({})), ("dns", json!([])), ("log", json!([]))] {
 		assert_eq!(h.bearer(Method::PUT, &format!("/p/api/config/{section}"), &full, Some(json!({"revision": "rev1", "value": wrong})), "10.1.1.1").await.status, StatusCode::BAD_REQUEST, "{section}");
 	}
 	let mut revision = 1;
-	for (section, value) in [("notices", json!([{"severity": "warning", "text": "Maintenance on Friday from 02:00 UTC"}])), ("dns", json!({"servers": ["9.9.9.9:53"], "hijack": false})), ("log", json!({"level": "warn", "destinations": false})), ("links", json!([])), ("replay", json!({"cache": 4096}))] {
+	for (section, value) in [("notices", json!([{"severity": "warning", "text": "Maintenance on Friday from 02:00 UTC"}])), ("dns", json!({"servers": ["9.9.9.9:53"], "hijack": false})), ("log", json!({"level": "warn", "destinations": false})), ("links", json!([])), ("tunnels", json!([])), ("replay", json!({"cache": 4096}))] {
 		let applied = h.call(Method::PUT, &format!("/p/api/config/{section}"), Some(&session), Some(json!({"revision": format!("rev{revision}"), "value": value})), "10.0.0.1").await;
 		assert_eq!(applied.status, StatusCode::OK, "{section}: {}", String::from_utf8_lossy(&applied.body));
 		revision += 1;
@@ -928,6 +928,10 @@ async fn stats_are_recorded_per_bucket_and_survive_a_node_restart() {
 	}
 	let now = h.call(Method::GET, "/p/api/stats/now", Some(&session), None, "10.0.0.1").await.json();
 	assert_eq!((now["reachable"].clone(), now["online_users"].clone(), now["sessions"].clone(), now["exits"][0]["tag"].clone()), (json!(true), json!(["ann"]), json!(2), json!("main")));
+	*fake.stats.lock().unwrap() = json!({"users": [], "inbounds": [], "exits": [], "outbounds": [], "tunnels": [{"name": "web", "opened": 3, "open": 1}]});
+	state.polled_at = 0;
+	upkeep_once(&h.app, &mut state).await;
+	assert_eq!(h.call(Method::GET, "/p/api/stats/now", Some(&session), None, "10.0.0.1").await.json()["tunnels"][0]["open"], 1);
 	assert_eq!(h.call(Method::GET, "/p/api/stats/usage?kind=nothing", Some(&session), None, "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
 	h.app.db.call(|db| db.execute("update usage_buckets set at = at - 2 * 86400 where res = 60", []).unwrap()).await.unwrap();
 	h.app.db.call(|db| veilway_panel::stats::prune(db, crypto::now())).await.unwrap();

@@ -4,6 +4,7 @@ import {api, ApiError, type NodeLink, type Pairings, type Pasted, type Running, 
 import {ago, Copyable, DayField, ErrorNote, lines, LinesField, Mark, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {SectionReview, useRunning} from "./apply.tsx";
 import {loadRunning} from "./config.tsx";
+import {TunnelCards, TunnelPreset} from "./tunnels.tsx";
 
 type Compare = {id: string, fingerprint: string, name: string};
 type Side = "entry" | "exit";
@@ -15,7 +16,7 @@ const STATE_TONE: Record<string, "success" | "info" | "warning" | "danger" | und
 // This node and every node it is linked to, one card each, with the pairing steps for a new link.
 export function NodesPage({status, reachable, online}: {status: {version?: string, generation?: number, uptime_secs?: number, public_addresses?: string[]} | null, reachable: boolean, online: number | undefined}) {
 	const {t, bytes, time, number} = useP(), say = useSay(), toast = useToast(), links = useLoad(() => api("get", "/links") as Promise<{links: NodeLink[] | null}>, []), pairings = useLoad(() => api("get", "/links/pairings") as Promise<Pairings>, []);
-	const [flow, setFlow] = useState<"offer" | "paste" | null>(null), [preset, setPreset] = useState<{side: Side | null, direction: string} | null>(null), [compare, setCompare] = useState<Compare | null>(null), [answering, setAnswering] = useState<string | null>(null);
+	const [flow, setFlow] = useState<"offer" | "paste" | null>(null), [preset, setPreset] = useState<{side: Side | null, direction: string} | null>(null), [tunnelPreset, setTunnelPreset] = useState<"tcp" | "udp" | null>(null), [compare, setCompare] = useState<Compare | null>(null), [answering, setAnswering] = useState<string | null>(null);
 	const running = useRunning(), configured = (running.data?.document.links ?? []) as LinkConfig[], [editing, setEditing] = useState<LinkConfig | null>(null), [removing, setRemoving] = useState<LinkConfig | null>(null), [proposed, setProposed] = useState<{value: LinkConfig[], summary: string} | null>(null);
 	const manage = (tag: string) => { const found = configured.find(link => link.tag === tag); return found && <span className="p-cluster"><Button size="sm" variant="quiet" onClick={() => setEditing(found)}>{t("links.manage")}</Button><Button size="sm" variant="quiet" onClick={() => setRemoving(found)}>{t("common.remove")}</Button></span>; };
 	const idle = configured.filter(link => !(links.data?.links ?? []).some(l => l.tag === link.tag));
@@ -25,6 +26,7 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 	const waiting = pairings.data ? pairings.data.offers.length + pairings.data.answered.length : 0, span = (seconds: number) => { const found = ago(seconds); return t(found.key, {count: found.count}); };
 	if (compare) return <><PageHead title={t("nav.nodes")}/><Fingerprints pairing={compare} onClose={() => { setCompare(null); refresh(); }}/></>;
 	if (preset) return <><PageHead title={t("nav.nodes")}/><Preset start={preset} onClose={() => { setPreset(null); running.reload(); refresh(); }}/></>;
+	if (tunnelPreset && running.data) return <><PageHead title={t("nav.nodes")}/><TunnelPreset protocol={tunnelPreset} running={running.data} onClose={() => { setTunnelPreset(null); running.reload(); }}/></>;
 	return <>
 		<PageHead title={t("nav.nodes")} lead={t("links.lead")}>
 			<Button variant={flow === "paste" ? "primary" : "secondary"} onClick={() => setFlow(flow === "paste" ? null : "paste")}>{t("links.paste")}</Button>
@@ -39,6 +41,8 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 				<button type="button" className="p-preset" onClick={() => setPreset({side: "entry", direction: "forward"})}><strong>{t("preset.entry")}</strong><span>{t("preset.entryDetail")}</span></button>
 				<button type="button" className="p-preset" onClick={() => setPreset({side: "exit", direction: "forward"})}><strong>{t("preset.exit")}</strong><span>{t("preset.exitDetail")}</span></button>
 				<button type="button" className="p-preset" onClick={() => setPreset({side: null, direction: "reverse"})}><strong>{t("preset.reverse")}</strong><span>{t("preset.reverseDetail")}</span></button>
+				<button type="button" className="p-preset" onClick={() => setTunnelPreset("tcp")}><strong>{t("preset.tunnel")}</strong><span>{t("preset.tunnelDetail")}</span></button>
+				<button type="button" className="p-preset" onClick={() => setTunnelPreset("udp")}><strong>{t("preset.tunnelUdp")}</strong><span>{t("preset.tunnelUdpDetail")}</span></button>
 			</div>
 		</Glass>}
 		{links.error && !links.data && <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={links.reload}>{t("action.retry")}</Button>}>{say(links.error)}</StateBlock>}
@@ -66,6 +70,7 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 				{manage(link.tag)}
 			</Glass>)}
 		</div>
+		{running.data && !flow && !answering && <TunnelCards running={running.data} onChanged={running.reload} onAdd={() => setTunnelPreset("tcp")}/>}
 		{links.data && !(links.data.links ?? []).length && !flow && <Glass className="p-panel"><StateBlock kind="empty" title={t("links.empty")} action={<Button variant="primary" icon="plus" onClick={() => setFlow("offer")}>{t("links.offer")}</Button>}>{t("links.emptyBody")}</StateBlock></Glass>}
 		{editing && <LinkDialog link={editing} exits={((running.data?.document.exits ?? []) as {tag: string, backend?: {type?: string}}[]).filter(exit => exit.backend?.type !== "chain").map(exit => exit.tag)} onClose={() => setEditing(null)} onSave={changed => { setEditing(null); setProposed({value: configured.map(link => link.tag === changed.tag ? changed : link), summary: t("links.summaryEdit", {name: changed.tag})}); }}/>}
 		<ConfirmDialog open={removing !== null} onOpenChange={open => { if (!open) setRemoving(null); }} danger title={t("links.removeTitle", {name: removing?.tag ?? ""})} body={t("links.removeBody", {name: removing?.tag ?? ""})} confirmLabel={t("links.removeConfirm")} onConfirm={() => { const gone = removing!; setRemoving(null); setProposed({value: configured.filter(link => link.tag !== gone.tag), summary: t("links.summaryRemove", {name: gone.tag})}); }}/>

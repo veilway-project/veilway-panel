@@ -1647,6 +1647,8 @@ export interface components {
             reachable: boolean;
             /** Format: uint */
             sessions: number;
+            /** @description What each tunnel of the node counted since the node started: connections or sessions opened and open now, those refused by reason, and the bytes carried. As the node reports them. */
+            tunnels: unknown;
         };
         LoggedIn: {
             csrf: string;

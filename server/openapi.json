@@ -1149,6 +1149,9 @@
             "format": "uint",
             "minimum": 0,
             "type": "integer"
+          },
+          "tunnels": {
+            "description": "What each tunnel of the node counted since the node started: connections or sessions opened and open now, those refused by reason, and the bytes carried. As the node reports them."
           }
         },
         "required": [
@@ -1157,6 +1160,7 @@
           "health",
           "rates",
           "exits",
+          "tunnels",
           "sessions",
           "online_users"
         ],
