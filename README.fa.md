@@ -18,6 +18,32 @@
 
 <div dir="rtl">
 
+## تصاویر
+
+داشبورد در پوستهٔ تیره، به فارسی.
+
+![داشبورد پنل به فارسی](docs/screenshots/panel-fa-dashboard-dark.png)
+
+فهرست کاربران.
+
+![فهرست کاربران به فارسی](docs/screenshots/panel-fa-users-dark.png)
+
+صفحهٔ یک کاربر: مصرف، دستگاه‌ها و لینک اشتراک.
+
+![صفحهٔ یک کاربر](docs/screenshots/panel-user-dark.png)
+
+ترافیک.
+
+![صفحهٔ ترافیک](docs/screenshots/panel-traffic-dark.png)
+
+ورودی‌ها.
+
+![صفحهٔ ورودی‌ها](docs/screenshots/panel-inbounds-dark.png)
+
+داشبورد در پوستهٔ روشن.
+
+![داشبورد در پوستهٔ روشن](docs/screenshots/panel-dashboard-light.png)
+
 ## این مخزن چیست
 
 Veilway یک پلتفرم VPN متن‌باز برای کسانی است که پشت شبکه‌های سانسورشده هستند: یک هستهٔ Rust، یک پنل وب و برنامه‌های رسمی. پنل، بخش مدیریت یک گره است. این بخش یک سرور Rust با SQLite است و یک برنامهٔ React که در همان فایل اجرایی ساخته می‌شود. پنل روی میزبان گره اجرا می‌شود و کاربران و تنظیمات را از راه API کنترل گره، روی سوکت unix آن، تغییر می‌دهد.

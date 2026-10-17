@@ -16,6 +16,32 @@ The admin panel of a Veilway node: users, devices, subscription links and an API
 <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
 </p>
 
+## Screenshots
+
+The dashboard in the dark theme.
+
+![Dashboard with live speed, a day of traffic, users near their quota and exits](docs/screenshots/panel-dashboard-dark.png)
+
+The users list with quotas, expiry and state.
+
+![Users list with usage bars, groups, expiry and device counts](docs/screenshots/panel-users-dark.png)
+
+One user: usage, devices and the subscription link.
+
+![User page with usage, devices and the subscription link](docs/screenshots/panel-user-dark.png)
+
+Traffic per user, inbound, exit and outbound.
+
+![Traffic page with a chart and a usage table](docs/screenshots/panel-traffic-dark.png)
+
+Inbounds, native and Xray.
+
+![Inbounds page listing a Veilway, a WireGuard and an Xray inbound](docs/screenshots/panel-inbounds-dark.png)
+
+The dashboard in the light theme.
+
+![Dashboard in the light theme](docs/screenshots/panel-dashboard-light.png)
+
 ## What it is
 
 Veilway is an open-source VPN platform for people on censored networks: a Rust core, a web panel and first-party apps. The panel is the admin side of a node. It is a Rust server with SQLite, and a React app that is built into the same binary. It runs on the node's host and changes users and settings through the node's control API on its unix socket.
