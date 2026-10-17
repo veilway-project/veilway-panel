@@ -1,0 +1,96 @@
+import type {components} from "./schema.js";
+
+type Schemas = components["schemas"];
+export type {components, paths, operations} from "./schema.js";
+export type User = Schemas["UserOut"];
+export type UserInput = Schemas["UserIn"];
+export type UserPatch = Schemas["UserPatch"];
+export type Created = Schemas["Created"];
+export type Changed = Schemas["Changed"];
+export type Deleted = Schemas["Deleted"];
+export type Device = Schemas["DeviceOut"];
+export type DeviceCreated = Schemas["DeviceCreated"];
+export type Subscription = Schemas["SubscriptionInfo"];
+export type LinkReset = Schemas["LinkReset"];
+export type Live = Schemas["Live"];
+export type Usage = Schemas["UsageOut"];
+export type History = Schemas["HistoryOut"];
+/** The exits section of the node's config. The generated schema leaves `value` open, so it is `unknown` here. */
+export interface ExitsSection {revision: string, generation: number, value: unknown}
+/** The part of a fetch response the client uses, so the global `fetch` and a test double both fit. */
+export interface FetchResponse {
+	status: number;
+	text(): Promise<string>;
+}
+export type Fetch = (url: string, init: {method: string, headers: Record<string, string>, body?: string}) => Promise<FetchResponse>;
+
+/** Every answer that is not a success, and an answer the client could not read. */
+export class VeilwayError extends Error {
+	constructor(readonly status: number, readonly code: string, message: string) {
+		super(message);
+		this.name = "VeilwayError";
+	}
+}
+
+/** The query string of the params that are set, or "" when none is. */
+function query(params: object): string {
+	const search = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)]));
+	return search.size ? "?" + search : "";
+}
+
+export class Client {
+	/** `base` is the panel's address with its path prefix, for example "https://panel.example/veilway". `token` is an API token, sent as a Bearer header. A route the token's scope does not allow answers `forbidden`, and a route only a logged-in admin may use answers `unauthorized`. */
+	constructor(private readonly fetch: Fetch, private readonly base: string, private readonly token: string) {}
+
+	private async send(method: string, path: string, body?: unknown): Promise<FetchResponse> {
+		const headers: Record<string, string> = {accept: "application/json", authorization: "Bearer " + this.token};
+		if (body !== undefined) headers["content-type"] = "application/json";
+		const response = await this.fetch(this.base.replace(/\/+$/, "") + path, {method, headers, body: body === undefined ? undefined : JSON.stringify(body)});
+		if (response.status >= 200 && response.status < 300) return response;
+		const text = await response.text().catch(() => "");
+		let failure: {code?: unknown, message?: unknown} | undefined;
+		try {failure = JSON.parse(text).error} catch {}
+		if (failure && typeof failure.code === "string" && typeof failure.message === "string") throw new VeilwayError(response.status, failure.code, failure.message);
+		throw new VeilwayError(response.status, "bad_response", "The panel answered " + response.status + " with a body that is not an error document.");
+	}
+
+	private async json<T>(method: string, path: string, body?: unknown): Promise<T> {
+		const response = await this.send(method, path, body);
+		try {return JSON.parse(await response.text()) as T} catch {throw new VeilwayError(response.status, "bad_response", "The panel answered with a body that is not JSON.")}
+	}
+
+	async listUsers(filter: {q?: string, group?: string, enabled?: boolean} = {}): Promise<User[]> {return (await this.json<{users: User[]}>("GET", "/users" + query(filter))).users}
+
+	getUser(id: number): Promise<User> {return this.json("GET", "/users/" + id)}
+
+	createUser(input: UserInput): Promise<Created> {return this.json("POST", "/users", input)}
+
+	/** A field set to null clears it. */
+	updateUser(id: number, patch: UserPatch): Promise<Changed> {return this.json("PATCH", "/users/" + id, patch)}
+
+	deleteUser(id: number): Promise<Deleted> {return this.json("DELETE", "/users/" + id)}
+
+	async listDevices(id: number): Promise<Device[]> {return (await this.json<{devices: Device[]}>("GET", "/users/" + id + "/devices")).devices}
+
+	createDevice(id: number, name: string): Promise<DeviceCreated> {return this.json("POST", "/users/" + id + "/devices", {name})}
+
+	removeDevice(id: number, device: number): Promise<Deleted> {return this.json("DELETE", "/users/" + id + "/devices/" + device)}
+
+	/** The facts about the user's link. The link itself is not returned. */
+	getSubscription(id: number): Promise<Subscription> {return this.json("GET", "/users/" + id + "/subscription")}
+
+	/** Makes a new link, and the old one stops working. `removeDevices` also removes the devices that were enrolled with the old one. */
+	resetSubscription(id: number, options: {removeDevices?: boolean} = {}): Promise<LinkReset> {return this.json("POST", "/users/" + id + "/subscription/reset", {remove_devices: options.removeDevices === true})}
+
+	/** Starts the user's quota count over on the node. With `totals` the traffic goes back to zero as well. */
+	resetUsage(id: number, options: {totals?: boolean} = {}): Promise<unknown> {return this.json("POST", "/users/" + id + "/usage/reset", {totals: options.totals === true})}
+
+	getExits(): Promise<ExitsSection> {return this.json("GET", "/config/exits")}
+
+	statsNow(): Promise<Live> {return this.json("GET", "/stats/now")}
+
+	/** Bytes carried over a period (day, week, month or year) by `kind`: user, inbound, exit or outbound. */
+	statsUsage(kind: string, options: {period?: string, name?: string} = {}): Promise<Usage> {return this.json("GET", "/stats/usage" + query({kind, ...options}))}
+
+	statsHistory(kind: string, name: string, options: {resolution?: string, since?: number} = {}): Promise<History> {return this.json("GET", "/stats/history" + query({kind, name, ...options}))}
+}

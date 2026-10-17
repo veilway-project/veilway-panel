@@ -4,7 +4,7 @@ Rust server (`server/`, crate `veilway-panel`) and React app (`web/`, built into
 
 ## Layout
 
-- `server/src/routes.rs` is the one route table that builds the router and `openapi.json` (`openapi.rs`). Add a route there and run `cargo run -- openapi > openapi.json`; a test fails when the file is stale.
+- `server/src/routes.rs` is the one route table that builds the router and `openapi.json` (`openapi.rs`). Add a route there and run `cargo run -- openapi > openapi.json`; a test fails when the file is stale. Then regenerate `sdk/src/schema.ts` (`npm run generate` in `sdk/`, in Docker); CI fails when it is stale.
 - `auth.rs` is the guard in front of every admin route: host and origin, rate limits, API tokens, sessions, CSRF, re-authentication. A route's `Access` decides who may call it; tokens never reach `Admin` or `AdminReauth` routes.
 - `subs.rs` is the subscription endpoint, the link and the signed document. Use `veilway-proto` for links and the envelope, never reimplement them. `crypto.rs` holds the sealed-secret keys and TOTP.
 - `node.rs` talks to the node's control API on its unix socket; `users.rs` and `admin.rs` hold the handlers.
