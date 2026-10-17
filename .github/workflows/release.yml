@@ -96,6 +96,11 @@ jobs:
           printf "%s\n" "$RELEASE_SIGNING_KEY" > "$RUNNER_TEMP/minisign.key"
           for f in dist/*; do minisign -S -s "$RUNNER_TEMP/minisign.key" -m "$f" -t "veilway-panel $REF_NAME $(basename "$f")" </dev/null; done
           echo "signed every asset in dist with minisign"
+          # The signed pointer to the newest release: installers and mirrors read it instead of asking GitHub's API.
+          # Its trusted comment names the tag, so a mirror cannot pass an old pointer off as a newer one.
+          printf "veilway-panel %s\n" "$REF_NAME" > dist/latest-veilway-panel.txt
+          minisign -S -s "$RUNNER_TEMP/minisign.key" -m dist/latest-veilway-panel.txt -t "veilway-panel latest $REF_NAME" </dev/null
+          echo "signed the latest pointer"
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
