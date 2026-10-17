@@ -1,10 +1,11 @@
 //! The node's config through its control API: the schema, the document as a whole and by section, dry runs, the one path that applies a change, and the profile templates derived from the inbounds.
-use crate::{app::{App, Settings}, auth::reauthed, crypto::now, http::{json, ok, Body, Ctx, Failure}, node};
+use crate::{app::{store_settings, App, Settings}, auth::reauthed, crypto::now, http::{json, ok, Body, Ctx, Failure}, node, subs::UserRow, users::name_ok};
 use axum::{extract::{Path, State}, http::{header::CONTENT_TYPE, HeaderValue, StatusCode}, response::{IntoResponse, Response}, Extension};
+use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
-use std::{collections::{BTreeMap, BTreeSet}, net::{IpAddr, SocketAddr}, sync::Arc};
+use std::{collections::{BTreeMap, BTreeSet}, net::{IpAddr, SocketAddr}, sync::{Arc, RwLock}};
 use veilway_proto::subscription::payload::{dialable, CANDIDATES_MAX};
 
 /// `veilway schema` of the core, kept next to the manifest. The node's own validation stays the authority: this is for an editor.
@@ -42,6 +43,12 @@ pub struct Relay {
 	/// Put its candidates before the node's own address instead of after it.
 	#[serde(default)]
 	pub prefer: bool,
+	/// Groups whose accounts get it. Empty with `users` too means everyone gets it.
+	#[serde(default)]
+	pub groups: Vec<String>,
+	/// Accounts that get it, by id. Empty with `groups` too means everyone gets it.
+	#[serde(default)]
+	pub users: Vec<i64>,
 	pub enabled: bool,
 }
 
@@ -56,6 +63,7 @@ pub fn checked_relays<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<
 		if !relay.address.parse::<IpAddr>().is_ok_and(dialable) {return fail(format!("relay {name}: the address is an IP address that apps may dial, not a host name and not a loopback, link-local or multicast address."))}
 		if relay.transports.len() > RELAYED.len() || relay.transports.iter().enumerate().any(|(i, kind)| !RELAYED.contains(&kind.as_str()) || relay.transports[..i].contains(kind)) || relay.ports.iter().any(|(kind, port)| !RELAYED.contains(&kind.as_str()) || *port == 0) {return fail(format!("relay {name}: transports and ports name udp, udp-obfs, tls, ws or fronted once each, and a port is 1 to 65535."))}
 		if relay.inbounds.len() > 16 || relay.inbounds.iter().enumerate().any(|(i, tag)| tag.is_empty() || tag.len() > 64 || relay.inbounds[..i].contains(tag)) {return fail(format!("relay {name}: inbounds is at most 16 different tags of 1 to 64 characters."))}
+		if relay.groups.len() > 64 || relay.groups.iter().any(|group| !name_ok(group, true)) || relay.users.len() > 1000 {return fail(format!("relay {name}: groups is at most 64 group names and users at most 1000 account ids."))}
 	}
 	Ok(relays)
 }
@@ -195,9 +203,41 @@ fn host_port(host: &str, listen: &str) -> Option<String> {
 	Some(if host.contains(':') && !host.starts_with('[') {format!("[{host}]:{port}")} else {format!("{host}:{port}")})
 }
 
-/// One template per `veilway` inbound, with the overrides laid over it. `missing` lists what a profile still needs from the operator, since the node never reveals a public key and does not know its own public address.
-fn derive(settings: &Settings, document: &Value) -> Vec<Value> {
+/// The relays that reach an account, with the tier of the audience that names it: 0 for the account itself, 1 for one of its groups, 2 for everyone. Without an account only the relays for everyone reach.
+pub fn reaching<'a>(relays: &'a [Relay], user: Option<(i64, &[String])>) -> Vec<(u8, &'a Relay)> {
+	relays.iter().filter(|relay| relay.enabled).filter_map(|relay| {
+		let tier = if relay.users.is_empty() && relay.groups.is_empty() {2} else if user.is_some_and(|(id, _)| relay.users.contains(&id)) {0} else if user.is_some_and(|(_, groups)| relay.groups.iter().any(|group| groups.contains(group))) {1} else {return None};
+		Some((tier, relay))
+	}).collect()
+}
+
+/// Adds the relays that reach an account to the candidates of the transports they carry in the profile of the inbound `tag`. Within the cap of a transport, the account's own relays come first, then its groups', then everyone's. Returns what the cap cut, as `transport` and `relay`.
+pub fn carry(profile: &mut Value, tag: &str, reaching: &[(u8, &Relay)]) -> Vec<Value> {
+	let mut trimmed = Vec::new();
+	for transport in profile["transports"].as_array_mut().into_iter().flatten() {
+		let (kind, list) = (transport["type"].as_str().unwrap_or_default().to_string(), if transport["endpoints"].is_array() {"endpoints"} else {"candidates"});
+		let Some(own) = transport[list].as_array().filter(|own| !own.is_empty()).cloned() else {continue};
+		let address_of = |entry: &Value| entry.as_str().or_else(|| entry["address"].as_str()).map(str::to_string);
+		let first_port = address_of(&own[0]).and_then(|address| address.rsplit_once(':')?.1.parse::<u16>().ok());
+		let mut carried: Vec<(u8, bool, String, Value)> = reaching.iter().filter(|(_, relay)| (relay.inbounds.is_empty() || relay.inbounds.iter().any(|held| held == tag)) && (relay.transports.is_empty() || relay.transports.contains(&kind))).filter_map(|(tier, relay)| {
+			let address = SocketAddr::new(relay.address.parse().ok()?, relay.ports.get(&kind).copied().or(first_port)?).to_string();
+			Some((*tier, relay.prefer, relay.name.clone(), if list == "endpoints" {json!(address)} else {let mut candidate = own[0].clone(); candidate["address"] = json!(address); candidate}))
+		}).collect();
+		carried.sort_by_key(|(tier, prefer, _, _)| (*tier, !prefer));
+		let mut seen: BTreeSet<String> = own.iter().filter_map(address_of).collect();
+		let unique: Vec<(bool, String, Value)> = carried.into_iter().filter(|(_, _, _, entry)| address_of(entry).is_some_and(|address| seen.insert(address))).map(|(_, prefer, name, entry)| (prefer, name, entry)).collect();
+		let room = CANDIDATES_MAX.saturating_sub(own.len());
+		trimmed.extend(unique.iter().skip(room).map(|(_, name, _)| json!({"transport": kind, "relay": name})));
+		let picked: Vec<(bool, Value)> = unique.into_iter().take(room).map(|(prefer, _, entry)| (prefer, entry)).collect();
+		transport[list] = picked.iter().filter(|(prefer, _)| *prefer).map(|(_, entry)| entry.clone()).chain(own).chain(picked.iter().filter(|(prefer, _)| !prefer).map(|(_, entry)| entry.clone())).collect();
+	}
+	trimmed
+}
+
+/// One template per `veilway` inbound, with the overrides laid over it and the relays that reach `user` carried in. `user` is the account's id and groups, or None for the relays that reach everyone. `missing` lists what a profile still needs from the operator, since the node never reveals a public key and does not know its own public address.
+fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>) -> Vec<Value> {
 	let inbounds = document.get("inbounds").and_then(Value::as_array).cloned().unwrap_or_default();
+	let reached = reaching(relays, user);
 	inbounds.iter().filter(|inbound| inbound["type"] == "veilway").map(|inbound| {
 		let (tag, host) = (inbound["tag"].as_str().unwrap_or_default().to_string(), settings.node_host.as_str());
 		let transports: Vec<&Value> = inbound["transports"].as_array().map(|list| list.iter().collect()).unwrap_or_default();
@@ -215,32 +255,20 @@ fn derive(settings: &Settings, document: &Value) -> Vec<Value> {
 		// The Xray inbounds answer on this server's address like the profiles do, so no profile may claim more than Detectable. An override can lower it further and not raise it.
 		if document["xray"]["inbounds"].as_array().is_some_and(|list| !list.is_empty()) {profile["rating_cap"] = json!("detectable");}
 		if let Some(edits) = settings.profile_overrides.get(&tag).and_then(Value::as_object) {for (key, value) in edits {profile[key] = value.clone();}}
-		// Relays come after the overrides, so a transport an override wrote gets them too. A relay copies the transport's own first candidate and changes only the address dialed: the app checks the same name, pins and keys.
-		for transport in profile["transports"].as_array_mut().into_iter().flatten() {
-			let (kind, list) = (transport["type"].as_str().unwrap_or_default().to_string(), if transport["endpoints"].is_array() {"endpoints"} else {"candidates"});
-			let Some(own) = transport[list].as_array().filter(|own| !own.is_empty()).cloned() else {continue};
-			let address_of = |entry: &Value| entry.as_str().or_else(|| entry["address"].as_str()).map(str::to_string);
-			let first_port = address_of(&own[0]).and_then(|address| address.rsplit_once(':')?.1.parse::<u16>().ok());
-			let mut carried: Vec<(bool, Value)> = settings.relays.iter().filter(|relay| relay.enabled && (relay.inbounds.is_empty() || relay.inbounds.contains(&tag)) && (relay.transports.is_empty() || relay.transports.contains(&kind))).filter_map(|relay| {
-				let address = SocketAddr::new(relay.address.parse().ok()?, relay.ports.get(&kind).copied().or(first_port)?).to_string();
-				Some((relay.prefer, if list == "endpoints" {json!(address)} else {let mut candidate = own[0].clone(); candidate["address"] = json!(address); candidate}))
-			}).collect();
-			carried.sort_by_key(|(prefer, _)| !prefer);
-			let mut seen: BTreeSet<String> = own.iter().filter_map(address_of).collect();
-			let picked: Vec<(bool, Value)> = carried.into_iter().filter(|(_, entry)| address_of(entry).is_some_and(|address| seen.insert(address))).take(CANDIDATES_MAX.saturating_sub(own.len())).collect();
-			transport[list] = picked.iter().filter(|(prefer, _)| *prefer).map(|(_, entry)| entry.clone()).chain(own).chain(picked.iter().filter(|(prefer, _)| !prefer).map(|(_, entry)| entry.clone())).collect();
-		}
+		// Relays come after the overrides, so a transport an override wrote gets them too.
+		let trimmed = carry(&mut profile, &tag, &reached);
 		let mut missing = Vec::new();
 		if profile.get("inbound_public_key").is_none() {missing.push("inbound_public_key")}
 		if host.is_empty() {missing.push("node_host")}
 		if profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport["type"] == "tls" || transport["type"] == "ws")) && profile.get("transport_public_key").is_none() {missing.push("transport_public_key")}
-		json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()})
+		json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed})
 	}).collect()
 }
 
 pub async fn derived_profiles(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let (revision, _, document) = running(&app).await?;
-	ok(&json!({"revision": revision, "templates": derive(&app.settings(), &document)}))
+	let settings = app.settings();
+	ok(&json!({"revision": revision, "templates": derive(&settings, &document, &settings.relays, None)}))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -248,12 +276,24 @@ pub async fn derived_profiles(State(app): State<Arc<App>>) -> Result<Response, F
 pub struct PreviewIn {
 	#[serde(deserialize_with = "checked_relays")]
 	pub relays: Vec<Relay>,
+	/// The account whose documents are shown. Null shows what accounts without a relay of their own get.
+	pub user: Option<i64>,
 }
 
-/// The templates as they would be with these relays instead of the saved ones. Nothing is saved.
+/// The templates as they would be with these relays instead of the saved ones, for the account given or for no account. Nothing is saved.
 pub async fn preview_profiles(State(app): State<Arc<App>>, Body(input): Body<PreviewIn>) -> Result<Response, Failure> {
 	let (revision, _, document) = running(&app).await?;
-	ok(&json!({"revision": revision, "templates": derive(&Settings {relays: input.relays, ..app.settings()}, &document)}))
+	let account = match input.user {
+		Some(id) => Some(app.db.call(move |db| UserRow::load(db, id)).await??),
+		None => None,
+	};
+	let groups: Vec<String> = account.as_ref().map(|user| serde_json::from_str(&user.groups).unwrap_or_default()).unwrap_or_default();
+	ok(&json!({"revision": revision, "templates": derive(&app.settings(), &document, &input.relays, account.as_ref().map(|user| (user.id, groups.as_slice())))}))
+}
+
+/// Takes a deleted account out of the audiences of the saved and the published relays, in the transaction that deletes it. SQLite gives a new account the id of the last one deleted, so no relay may keep it.
+pub fn forget_user(connection: &Connection, cache: &RwLock<Settings>, id: i64) -> Result<Settings, String> {
+	store_settings(connection, cache, |settings| for relay in settings.relays.iter_mut().chain(settings.published_relays.iter_mut()) {relay.users.retain(|held| *held != id)})
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -274,13 +314,19 @@ pub async fn put_override(State(app): State<Arc<App>>, Extension(ctx): Extension
 /// Writes the derived templates into the settings' `profiles`, which is what the subscription endpoint serves. A profile that is not derived from an inbound stays. A template with something missing stops the publish.
 pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {
 	let (_, _, document) = running(&app).await?;
-	let templates = derive(&app.settings(), &document);
+	let current = app.settings();
+	let templates = derive(&current, &document, &[], None);
 	if let Some(bad) = templates.iter().find(|template| !template["missing"].as_array().is_some_and(Vec::is_empty)) {return Err(Failure::bad(format!("The profile of inbound {} still needs: {}.", bad["inbound"].as_str().unwrap_or_default(), bad["missing"])))}
 	let ids: Vec<Value> = templates.iter().map(|template| template["profile"]["id"].clone()).collect();
 	let fresh: Vec<Value> = templates.iter().map(|template| template["profile"].clone()).collect();
+	// Profiles are published without relays: each document adds the published relays that reach its account.
+	let carrying: BTreeMap<String, String> = templates.iter().map(|template| (template["profile"]["id"].as_str().unwrap_or_default().to_string(), template["inbound"].as_str().unwrap_or_default().to_string())).collect();
+	let relays = current.relays.clone();
 	app.update_settings(move |settings| {
 		settings.profiles.retain(|profile| !ids.contains(&profile["id"]));
 		settings.profiles.extend(fresh);
+		settings.relay_profiles = carrying;
+		settings.published_relays = relays;
 	}).await.map_err(Failure::internal)?;
 	app.db.audit(&ctx.actor, &ctx.source, "settings.update", "settings", &format!("profiles changed at {}", now())).await;
 	ok(&json!({"profiles": app.settings().profiles}))
@@ -301,7 +347,14 @@ mod tests {
 	fn derived(relays: Vec<Relay>) -> Vec<Value> {
 		let mut settings = Settings {node_host: "192.0.2.10".into(), relays, ..Settings::default()};
 		settings.profile_overrides.insert("Main".into(), json!({"transport_public_key": "key"}));
-		derive(&settings, &document()).into_iter().map(|template| template["profile"]["transports"].clone()).collect()
+		derive(&settings, &document(), &settings.relays, None).into_iter().map(|template| template["profile"]["transports"].clone()).collect()
+	}
+
+	fn for_account(relays: &[Relay], id: i64, groups: &[&str]) -> Vec<String> {
+		let groups: Vec<String> = groups.iter().map(|group| group.to_string()).collect();
+		let mut found = reaching(relays, Some((id, &groups)));
+		found.sort_by_key(|(tier, _)| *tier);
+		found.into_iter().map(|(_, relay)| relay.name.clone()).collect()
 	}
 
 	#[test]
@@ -323,8 +376,45 @@ mod tests {
 		let many: Vec<Relay> = (0..RELAYS_MAX).map(|i| relay(json!({"name": format!("r{i}"), "address": format!("198.51.100.{}", i + 1), "prefer": i == 3}))).collect();
 		let mut settings = Settings {node_host: "192.0.2.10".into(), relays: many, ..Settings::default()};
 		settings.profile_overrides.insert("Main".into(), json!({"transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820", "192.0.2.11:51820"]}]}));
-		let endpoints = derive(&settings, &document())[0]["profile"]["transports"][0]["endpoints"].as_array().unwrap().clone();
+		let endpoints = derive(&settings, &document(), &settings.relays, None)[0]["profile"]["transports"][0]["endpoints"].as_array().unwrap().clone();
 		assert_eq!((endpoints.len(), endpoints[0].clone(), endpoints[1].clone(), endpoints[2].clone()), (CANDIDATES_MAX, json!("198.51.100.4:51820"), json!("192.0.2.10:51820"), json!("192.0.2.11:51820")), "the node's own are kept and the preferred relay leads");
+	}
+
+	#[test]
+	fn a_relay_reaches_the_accounts_its_audience_names_and_everyone_without_one() {
+		let relays = vec![relay(json!({"name": "all"})), relay(json!({"name": "team", "groups": ["office"]})), relay(json!({"name": "ann", "users": [7]})), relay(json!({"name": "other", "users": [8], "groups": ["family"]})), relay(json!({"name": "off", "enabled": false}))];
+		assert_eq!(for_account(&relays, 7, &["office"]), vec!["ann", "team", "all"], "own first, then the group's, then everyone's");
+		assert_eq!(for_account(&relays, 8, &["family"]), vec!["other", "all"]);
+		assert_eq!(for_account(&relays, 9, &[]), vec!["all"]);
+		assert_eq!(reaching(&relays, None).len(), 1, "without an account only the relays for everyone reach");
+	}
+
+	#[test]
+	fn the_cap_drops_the_relays_for_everyone_before_the_accounts_own_or_its_groups() {
+		let mut relays: Vec<Relay> = (0..13).map(|i| relay(json!({"name": format!("all{i}"), "address": format!("198.51.100.{}", i + 1)}))).collect();
+		relays.push(relay(json!({"name": "team", "address": "198.51.100.90", "groups": ["office"]})));
+		relays.push(relay(json!({"name": "ann", "address": "198.51.100.91", "users": [7]})));
+		let mut settings = Settings {node_host: "192.0.2.10".into(), relays: relays.clone(), ..Settings::default()};
+		settings.profile_overrides.insert("Main".into(), json!({"transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820", "192.0.2.11:51820"]}]}));
+		let groups = vec!["office".to_string()];
+		let template = derive(&settings, &document(), &relays, Some((7, &groups)))[0].clone();
+		let endpoints = template["profile"]["transports"][0]["endpoints"].as_array().unwrap().clone();
+		assert_eq!((endpoints.len(), endpoints[2].clone(), endpoints[3].clone()), (CANDIDATES_MAX, json!("198.51.100.91:51820"), json!("198.51.100.90:51820")), "the account's relay leads the ones it gets, then its group's");
+		assert_eq!(template["trimmed"], json!([{"transport": "udp", "relay": "all12"}]), "the preview names what the cap cut");
+	}
+
+	#[test]
+	fn a_published_profile_carries_for_each_account_what_the_preview_shows() {
+		let relays = vec![relay(json!({"name": "all", "address": "198.51.100.8"})), relay(json!({"name": "ann", "address": "198.51.100.9", "users": [7]})), relay(json!({"name": "other-inbound", "address": "198.51.100.10", "inbounds": ["Other"]}))];
+		let settings = Settings {node_host: "192.0.2.10".into(), relays: relays.clone(), ..Settings::default()};
+		let groups: Vec<String> = Vec::new();
+		let published = derive(&settings, &document(), &[], None)[0]["profile"].clone();
+		let mut carried = published.clone();
+		carry(&mut carried, "Main", &reaching(&relays, Some((7, &groups))));
+		assert_eq!(carried["transports"], derive(&settings, &document(), &relays, Some((7, &groups)))[0]["profile"]["transports"], "the stored base plus the account's relays is the preview for the account");
+		let mut stranger = published.clone();
+		carry(&mut stranger, "Main", &reaching(&relays, Some((8, &groups))));
+		assert_eq!(stranger["transports"][0]["endpoints"], json!(["192.0.2.10:51820", "198.51.100.8:51820"]), "an account without its own relay gets only the relays for everyone");
 	}
 
 	#[test]
@@ -334,5 +424,7 @@ mod tests {
 		for bad in [json!({"name": "a", "address": "relay.example.org", "enabled": true}), json!({"name": "a", "address": "127.0.0.1", "enabled": true}), json!({"name": " a", "address": "198.51.100.7", "enabled": true}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["quic"]}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "ports": {"udp": 0}}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["udp", "udp"]}), json!({"name": "a", "address": "198.51.100.7"})] {assert!(read(json!([bad])).is_err(), "{bad}")}
 		assert!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true}, {"name": "a", "address": "198.51.100.8", "enabled": true}])).is_err(), "names are unique");
 		assert!(read(json!((0..=RELAYS_MAX).map(|i| json!({"name": format!("r{i}"), "address": "198.51.100.7", "enabled": true})).collect::<Vec<_>>())).unwrap_err().contains("at most 15"));
+		assert_eq!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true, "groups": ["office"], "users": [7]}])), Ok(1), "audiences are optional and an old relay without them is for everyone");
+		assert!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true, "groups": ["Bad Group"]}])).is_err());
 	}
 }

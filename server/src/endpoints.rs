@@ -139,13 +139,19 @@ pub struct UserEndpoint {
 	pub source: String,
 	pub url: Option<String>,
 	pub plain: bool,
+	/// The relays of the saved list that reach the account, by name: its own first, then its groups', then everyone's. A relay may still skip some of its inbounds or transports.
+	pub relays: Vec<String>,
 }
 
 pub async fn user(State(app): State<Arc<App>>, Path(id): Path<i64>) -> Result<Response, Failure> {
 	let (user, own) = app.db.call(move |db| -> rusqlite::Result<_> {Ok((UserRow::load(db, id)?, db.query_row("select endpoint from users where id = ?", [id], |row| row.get::<_, Option<String>>(0))?))}).await??;
 	let settings = app.settings();
-	let found = settings.resolve(own.as_deref(), &serde_json::from_str::<Vec<String>>(&user.groups).unwrap_or_default());
-	ok(&UserEndpoint {own, resolved: found.map(|(endpoint, _)| endpoint.name.clone()), source: found.map_or("default", |(_, source)| source).into(), url: found.map(|(endpoint, _)| endpoint.url.clone()), plain: found.is_some_and(|(endpoint, _)| endpoint.url.starts_with("http://"))})
+	let groups = serde_json::from_str::<Vec<String>>(&user.groups).unwrap_or_default();
+	let found = settings.resolve(own.as_deref(), &groups);
+	let mut reached = crate::nodecfg::reaching(&settings.relays, Some((id, groups.as_slice())));
+	reached.sort_by_key(|(tier, _)| *tier);
+	let relays = reached.into_iter().map(|(_, relay)| relay.name.clone()).collect();
+	ok(&UserEndpoint {own, resolved: found.map(|(endpoint, _)| endpoint.name.clone()), source: found.map_or("default", |(_, source)| source).into(), url: found.map(|(endpoint, _)| endpoint.url.clone()), plain: found.is_some_and(|(endpoint, _)| endpoint.url.starts_with("http://")), relays})
 }
 
 #[derive(Deserialize, JsonSchema)]

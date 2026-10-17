@@ -905,6 +905,43 @@ async fn relays_are_saved_with_the_settings_and_previewed_before() {
 	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(settings), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
 }
 
+fn dialed(profile: &payload::Profile) -> Vec<String> {
+	match &profile.transports[0] {payload::Transport::Udp(dials) => dials.iter().map(|dial| dial.address().to_string()).collect(), _ => panic!("the first transport is udp")}
+}
+
+#[tokio::test]
+async fn relays_reach_the_accounts_they_are_for_in_their_documents() {
+	let (_fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"node_host": "192.0.2.10"})).await;
+	let (ann_id, ann) = h.user(&session, "ann", json!({"groups": ["office"]})).await;
+	let (bob_id, bob) = h.user(&session, "bob", json!({})).await;
+	let relays = json!([{"name": "all", "address": "198.51.100.7", "enabled": true}, {"name": "office", "address": "198.51.100.8", "groups": ["office"], "enabled": true}, {"name": "ann", "address": "198.51.100.9", "users": [ann_id], "enabled": true}]);
+	h.configure(&session, json!({"node_host": "192.0.2.10", "relays": relays.clone(), "published_relays": relays.clone(), "relay_profiles": {"main": "Main"}})).await;
+	let (key, kids) = (key_of(&ann), [key_of(&ann).kid()]);
+	let answer = h.fetch(&ann, &kids, 1, "fetch", None).await;
+	let Payload::Subscription(for_ann) = opened(&answer, &[key]) else {panic!("a document {:?}", refusal_of(&answer, &[key]))};
+	assert_eq!(dialed(&for_ann.profiles[0]), ["192.0.2.10:51820", "198.51.100.9:51820", "198.51.100.8:51820", "198.51.100.7:51820"], "own first, then the group's, then everyone's");
+	let (key, kids) = (key_of(&bob), [key_of(&bob).kid()]);
+	let answer = h.fetch(&bob, &kids, 2, "fetch", None).await;
+	let Payload::Subscription(for_bob) = opened(&answer, &[key]) else {panic!("a document {:?}", refusal_of(&answer, &[key]))};
+	assert_eq!(dialed(&for_bob.profiles[0]), ["192.0.2.10:51820", "198.51.100.7:51820"], "an account with no relay of its own gets the relays for everyone");
+	let preview = h.call(Method::POST, "/p/api/profiles/preview", Some(&session), Some(json!({"relays": relays.clone(), "user": bob_id})), "10.0.0.1").await.json();
+	assert_eq!(preview["templates"][0]["profile"]["transports"][0]["endpoints"], json!(["192.0.2.10:51820", "198.51.100.7:51820"]));
+	let preview = h.call(Method::POST, "/p/api/profiles/preview", Some(&session), Some(json!({"relays": relays.clone(), "user": ann_id})), "10.0.0.1").await.json();
+	assert_eq!(preview["templates"][0]["profile"]["transports"][0]["endpoints"], json!(["192.0.2.10:51820", "198.51.100.9:51820", "198.51.100.8:51820", "198.51.100.7:51820"]));
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/preview", Some(&session), Some(json!({"relays": relays.clone(), "user": 999})), "10.0.0.1").await.status, StatusCode::NOT_FOUND);
+	let endpoint = h.call(Method::GET, &format!("/p/api/users/{ann_id}/endpoint"), Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(endpoint["relays"], json!(["ann", "office", "all"]));
+	let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	settings["relays"][2]["users"] = json!([9999]);
+	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(settings), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "an account that does not exist is refused");
+	assert_eq!(h.call(Method::DELETE, &format!("/p/api/users/{ann_id}"), Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	let settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((settings["relays"][2]["users"].clone(), settings["published_relays"][2]["users"].clone()), (json!([]), json!([])), "a deleted account leaves the audiences, saved and published");
+}
+
 #[tokio::test]
 async fn stats_are_recorded_per_bucket_and_survive_a_node_restart() {
 	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;

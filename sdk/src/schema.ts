@@ -628,7 +628,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** The templates of derivedProfiles as they would be with the relays given instead of the saved ones. Nothing is saved. */
+        /** The templates of derivedProfiles as they would be with the relays given instead of the saved ones, for the account given or for none. Nothing is saved. */
         post: operations["previewProfiles"];
         delete?: never;
         options?: never;
@@ -1816,6 +1816,11 @@ export interface components {
         };
         PreviewIn: {
             relays: components["schemas"]["Relay"][];
+            /**
+             * Format: int64
+             * @description The account whose documents are shown. Null shows what accounts without a relay of their own get.
+             */
+            user?: number | null;
         };
         Reauth: {
             password: string;
@@ -1834,6 +1839,11 @@ export interface components {
             /** @description An IP address: apps dial candidates by address, never by name. */
             address: string;
             enabled: boolean;
+            /**
+             * @description Groups whose accounts get it. Empty with `users` too means everyone gets it.
+             * @default []
+             */
+            groups: string[];
             /**
              * @description The tags of the `veilway` inbounds it carries. Empty for all of them.
              * @default []
@@ -1858,6 +1868,11 @@ export interface components {
              * @default []
              */
             transports: string[];
+            /**
+             * @description Accounts that get it, by id. Empty with `groups` too means everyone gets it.
+             * @default []
+             */
+            users: number[];
         };
         Requested: {
             ok: boolean;
@@ -2039,10 +2054,22 @@ export interface components {
             /** @default Veilway */
             provider_name: string;
             /**
+             * @description The relays as they were when the profiles were published. A document carries the ones that reach its account.
+             * @default []
+             */
+            published_relays: components["schemas"]["Relay"][];
+            /**
              * @description Other endpoints of the same subscription, put in every document as `refresh_urls`. A string, or an object with `url` and `pins`.
              * @default []
              */
             refresh_mirrors: unknown[];
+            /**
+             * @description The profiles derived from an inbound that carry the published relays reaching each account, by profile id and inbound tag. Written by publish.
+             * @default {}
+             */
+            relay_profiles: {
+                [key: string]: string;
+            };
             /**
              * @description Forwarders in front of the node. Each one adds its address to the candidates of the transports it carries when profiles are derived.
              * @default []
@@ -2205,6 +2232,8 @@ export interface components {
             /** @description The endpoint given to the account by name, null when its group's or the default applies. */
             own?: string | null;
             plain: boolean;
+            /** @description The relays of the saved list that reach the account, by name: its own first, then its groups', then everyone's. A relay may still skip some of its inbounds or transports. */
+            relays: string[];
             /** @description The endpoint in use for the account, null while no endpoint is set. */
             resolved?: string | null;
             /** @description "user", "group" or "default". */

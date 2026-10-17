@@ -81,7 +81,13 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 	let secret = keys.open_secret(&user.record_id, &format!("transport_secret:{}", this.public_key), &this.transport_secret).ok_or("a transport secret does not open")?;
 	let mut device = json!({"public_key": this.public_key, "addresses": [this.address], "transport_secrets": [STANDARD.encode(secret)]});
 	if let Some(sealed) = &this.private_key {device["private_key"] = json!(STANDARD.encode(keys.open_secret(&user.record_id, &format!("private_key:{}", this.public_key), sealed).ok_or("a private key does not open")?));}
-	let profiles: Vec<Value> = settings.profiles.iter().cloned().map(|mut profile| {profile["device"] = device.clone(); profile}).collect();
+	let groups: Vec<String> = serde_json::from_str(&user.groups).unwrap_or_default();
+	let reaching = crate::nodecfg::reaching(&settings.published_relays, Some((user.id, groups.as_slice())));
+	let profiles: Vec<Value> = settings.profiles.iter().cloned().map(|mut profile| {
+		if let Some(tag) = profile["id"].as_str().and_then(|id| settings.relay_profiles.get(id)) {crate::nodecfg::carry(&mut profile, tag, &reaching);}
+		profile["device"] = device.clone();
+		profile
+	}).collect();
 	let at = now();
 	let (floor, device_id) = (at * 1000 + (crypto::random::<2>()[0] as i64 % 250), this.id);
 	let serial: i64 = app.db.call(move |db| db.query_row("update devices set last_serial = max(?, last_serial + 1) where id = ? returning last_serial", params![floor, device_id], |row| row.get::<_, i64>(0))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;

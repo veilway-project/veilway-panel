@@ -186,6 +186,7 @@ export function UserPage({id}: {id: number}) {
 					<dl className="p-kv">
 						<dt>{t("endpoint.inUse")}</dt><dd>{where.resolved ? <><strong className="vw-code">{where.resolved}</strong>{where.url && <span className="p-block vw-code" dir="ltr">{where.url}</span>}</> : t("endpoint.unset")}</dd>
 						<dt>{t("endpoint.source")}</dt><dd>{t(`endpoint.source.${where.source as "user"}`)}</dd>
+						<dt>{t("relays.reach")}</dt><dd>{where.relays.length ? where.relays.join(", ") : t("common.none")}</dd>
 					</dl>
 					{where.plain && <PlainNote/>}
 					<EndpointPick label={t("endpoint.label")} hint={t("endpoint.hint")} value={ownEndpoint ?? where.own ?? ""} onChange={setOwnEndpoint} followLabel={t("endpoint.follow")}/>

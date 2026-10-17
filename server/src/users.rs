@@ -1,12 +1,12 @@
 //! Users, their devices and their subscription links.
-use crate::{app::App, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, subs::{self, DeviceRow, UserRow, USER_COLUMNS}};
+use crate::{app::{App, Settings}, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, subs::{self, DeviceRow, UserRow, USER_COLUMNS}};
 use axum::{extract::{Path, Query, State}, http::StatusCode, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::{atomic::Ordering, Arc}};
+use std::{collections::HashMap, sync::{atomic::Ordering, Arc, RwLock}};
 use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 use veilway_proto::subscription::{link::{Carried, Link}, sealed_file};
@@ -198,12 +198,22 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 #[derive(Serialize, JsonSchema)]
 pub struct Deleted {pub node: NodeState}
 
+/// Deletes an account and takes it out of the relays' audiences in one transaction, then reloads the token lookups. SQLite gives a new account the id of the last one deleted, so no relay may keep it.
+fn delete_account(db: &mut Connection, cache: &RwLock<Settings>, lookups: &RwLock<HashMap<[u8; 32], i64>>, id: i64) -> Result<(), Failure> {
+	let tx = db.transaction()?;
+	tx.execute("delete from users where id = ?", [id])?;
+	let stored = crate::nodecfg::forget_user(&tx, cache, id).map_err(Failure::internal)?;
+	tx.commit()?;
+	crate::app::publish_settings(cache, stored);
+	crate::app::load_lookups(db, lookups);
+	Ok(())
+}
+
 pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
-	let (dirty, lookups) = (app.dirty.clone(), app.lookups.clone());
-	app.db.call(move |db| -> rusqlite::Result<()> {
+	let (dirty, lookups, cache) = (app.dirty.clone(), app.lookups.clone(), app.settings.clone());
+	app.db.call(move |db| -> Result<(), Failure> {
 		let name: String = db.query_row("select name from users where id = ?", [id], |row| row.get(0))?;
-		db.execute("delete from users where id = ?", [id])?;
-		crate::app::load_lookups(db, &lookups);
+		delete_account(db, &cache, &lookups, id)?;
 		audit(db, &ctx.actor, &ctx.source, "user.delete", &format!("user:{id}"), &name);
 		dirty.store(true, Ordering::Relaxed);
 		Ok(())
@@ -243,7 +253,7 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 			let (value, dirty, lookups) = (input.value.clone(), app.dirty.clone(), app.lookups.clone());
 			match input.action.as_str() {
 				"enable" | "disable" => {let enable = input.action == "enable"; app.db.call(move |db| db.execute("update users set enabled = ? where id = ?", params![enable, id]).inspect(|_| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
-				"delete" => {app.db.call(move |db| db.execute("delete from users where id = ?", [id]).inspect(|_| {crate::app::load_lookups(db, &lookups); dirty.store(true, Ordering::Relaxed)})).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
+				"delete" => {let cache = app.settings.clone(); app.db.call(move |db| delete_account(db, &cache, &lookups, id).map(|()| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.message)?;}
 				"reset_usage" => {let (status, _) = node::request(&app.cfg.node_socket, "POST", &format!("/v1/users/{}/usage/reset", user.name), None, Some(&json!({"totals": false}))).await?; if status != 200 {return Err(format!("the node answered {status}"))}}
 				"reset_links" => {let (_, old) = reset_link(&app, &ctx, id, input.remove_devices).await.map_err(|error| error.message)?; if input.remove_devices {removed += old.len()}}
 				"add_group" | "remove_group" => {

@@ -1626,6 +1626,14 @@
               "$ref": "#/components/schemas/Relay"
             },
             "type": "array"
+          },
+          "user": {
+            "description": "The account whose documents are shown. Null shows what accounts without a relay of their own get.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1674,6 +1682,14 @@
           "enabled": {
             "type": "boolean"
           },
+          "groups": {
+            "default": [],
+            "description": "Groups whose accounts get it. Empty with `users` too means everyone gets it.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "inbounds": {
             "default": [],
             "description": "The tags of the `veilway` inbounds it carries. Empty for all of them.",
@@ -1707,6 +1723,15 @@
             "description": "The transport types it carries: udp, udp-obfs, tls, ws, fronted. Empty for all of them.",
             "items": {
               "type": "string"
+            },
+            "type": "array"
+          },
+          "users": {
+            "default": [],
+            "description": "Accounts that get it, by id. Empty with `groups` too means everyone gets it.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
             },
             "type": "array"
           }
@@ -2138,11 +2163,27 @@
             "default": "Veilway",
             "type": "string"
           },
+          "published_relays": {
+            "default": [],
+            "description": "The relays as they were when the profiles were published. A document carries the ones that reach its account.",
+            "items": {
+              "$ref": "#/components/schemas/Relay"
+            },
+            "type": "array"
+          },
           "refresh_mirrors": {
             "default": [],
             "description": "Other endpoints of the same subscription, put in every document as `refresh_urls`. A string, or an object with `url` and `pins`.",
             "items": true,
             "type": "array"
+          },
+          "relay_profiles": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "The profiles derived from an inbound that carry the published relays reaching each account, by profile id and inbound tag. Written by publish.",
+            "type": "object"
           },
           "relays": {
             "default": [],
@@ -2594,6 +2635,13 @@
           "plain": {
             "type": "boolean"
           },
+          "relays": {
+            "description": "The relays of the saved list that reach the account, by name: its own first, then its groups', then everyone's. A relay may still skip some of its inbounds or transports.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "resolved": {
             "description": "The endpoint in use for the account, null while no endpoint is set.",
             "type": [
@@ -2614,7 +2662,8 @@
         },
         "required": [
           "source",
-          "plain"
+          "plain",
+          "relays"
         ],
         "type": "object"
       },
@@ -5705,7 +5754,7 @@
             "description": "Rate limited."
           }
         },
-        "summary": "The templates of derivedProfiles as they would be with the relays given instead of the saved ones. Nothing is saved.",
+        "summary": "The templates of derivedProfiles as they would be with the relays given instead of the saved ones, for the account given or for none. Nothing is saved.",
         "x-access": "read"
       }
     },

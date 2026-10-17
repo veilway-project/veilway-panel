@@ -484,6 +484,8 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 		let tx = db.transaction()?;
 		let before = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 		crate::endpoints::in_use(&tx, &saved).map_err(Failure::conflict)?;
+		let known: Vec<i64> = tx.prepare("select id from users")?.query_map([], |row| row.get(0))?.collect::<Result<_, _>>()?;
+		if let Some(id) = saved.relays.iter().flat_map(|relay| relay.users.iter().copied()).find(|id| !known.contains(id)) {return Err(Failure::bad(format!("A relay names the account {id}, which does not exist. Take it off the relay first.")))}
 		// A client accepts a list of pins only when it holds one of them, so a change that keeps none of the pins of an endpoint locks out every client that holds them. A switch to a standby keeps it: the former standby is in the new list.
 		if let Some(endpoint) = saved.endpoints.iter().find(|endpoint| before.named(&endpoint.name).is_some_and(|old| !old.pins.is_empty() && !old.pins.iter().any(|pin| endpoint.pins.contains(pin)))) {return Err(Failure::conflict(format!("The pins of {} keep none of its current pins, so the apps that hold them would refuse every document. Keep one of the current pins in the list (a switch keeps the standby), or add the endpoint under another name and move the accounts to it.", endpoint.name)))}
 		if saved.show_links_once && !before.show_links_once {tx.execute("update users set token_copy = null", [])?;}
