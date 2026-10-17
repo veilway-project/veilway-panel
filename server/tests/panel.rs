@@ -782,6 +782,44 @@ async fn bulk_exits_set_every_user_and_clear_defaults_they_leave_out() {
 }
 
 #[tokio::test]
+async fn bulk_reset_links_makes_new_links_and_xray_credentials_and_removes_devices_only_when_asked() {
+	let mut document = node_document("10.66.0.1/24");
+	document["public_addresses"] = json!(["vpn.example.org"]);
+	let (fake, socket) = Fake::start(document).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	*fake.status.lock().unwrap() = json!({"version": "0.0.0", "addons": {"xray": {"installed": true, "release": "v26.3.27"}}});
+	let vless = json!({"tag": "vless1", "protocol": "vless", "port": 8444, "cert": "/etc/veilway/cert.pem", "key": "/etc/veilway/key.pem", "decoy": "http://127.0.0.1:8080"});
+	assert_eq!(h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(vless), "10.0.0.1").await.status, StatusCode::OK);
+	let (ann, _) = h.user(&session, "ann", json!({})).await;
+	let (bob, _) = h.user(&session, "bob", json!({})).await;
+	for id in [ann, bob] {
+		assert_eq!(h.call(Method::POST, &format!("/p/api/users/{id}/devices"), Some(&session), Some(json!({"name": "phone"})), "10.0.0.1").await.status, StatusCode::OK);
+	}
+	let (old_ann, old_bob) = (h.call(Method::POST, &format!("/p/api/users/{ann}/subscription/show"), Some(&session), None, "10.0.0.1").await.json()["veilway"].clone(), h.call(Method::POST, &format!("/p/api/users/{bob}/subscription/show"), Some(&session), None, "10.0.0.1").await.json()["veilway"].clone());
+	let secret = |applied: &Value, user: &str| applied["xray"]["inbounds"][0]["clients"].as_array().unwrap().iter().find(|client| client["user"] == user).unwrap()["secret"].clone();
+	let before = fake.applied.lock().unwrap().last().unwrap().clone();
+	let (xray_ann, xray_bob) = (secret(&before, "ann"), secret(&before, "bob"));
+	let kept = h.call(Method::POST, "/p/api/users/bulk", Some(&session), Some(json!({"ids": [ann], "action": "reset_links", "remove_devices": false})), "10.0.0.1").await.json();
+	assert_eq!((kept["done"].clone(), kept["devices_removed"].clone(), kept["failed"].as_array().unwrap().len()), (json!(1), json!(0), 0));
+	assert_ne!(h.call(Method::POST, &format!("/p/api/users/{ann}/subscription/show"), Some(&session), None, "10.0.0.1").await.json()["veilway"], old_ann, "the selected user gets a new link");
+	assert_eq!(h.call(Method::POST, &format!("/p/api/users/{bob}/subscription/show"), Some(&session), None, "10.0.0.1").await.json()["veilway"], old_bob, "an unselected user keeps the link");
+	assert_eq!(h.call(Method::GET, &format!("/p/api/users/{ann}/devices"), Some(&session), None, "10.0.0.1").await.json()["devices"].as_array().unwrap().len(), 1, "devices stay unless asked");
+	let after = fake.applied.lock().unwrap().last().unwrap().clone();
+	assert_ne!(secret(&after, "ann"), xray_ann, "the selected user gets new Xray credentials");
+	assert_eq!(secret(&after, "bob"), xray_bob, "the unselected user keeps theirs");
+	assert_eq!(h.call(Method::POST, &format!("/p/api/users/{ann}/devices"), Some(&session), Some(json!({"name": "tablet"})), "10.0.0.1").await.status, StatusCode::OK);
+	let removed = h.call(Method::POST, "/p/api/users/bulk", Some(&session), Some(json!({"ids": [ann], "action": "reset_links", "remove_devices": true})), "10.0.0.1").await.json();
+	assert_eq!((removed["done"].clone(), removed["devices_removed"].clone()), (json!(1), json!(1)));
+	assert_eq!(h.call(Method::GET, &format!("/p/api/users/{ann}/devices"), Some(&session), None, "10.0.0.1").await.json()["devices"].as_array().unwrap().len(), 1, "only the devices of the current link go, the earlier one keeps working");
+	assert_eq!(h.call(Method::GET, &format!("/p/api/users/{bob}/devices"), Some(&session), None, "10.0.0.1").await.json()["devices"].as_array().unwrap().len(), 1, "an unselected user's devices stay");
+	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(audit["entries"].as_array().unwrap().iter().filter(|entry| entry["action"] == "link.reset" && entry["target"] == json!(format!("user:{ann}"))).count(), 2, "one audit line per reset");
+	assert_eq!(h.call(Method::POST, "/p/api/users/bulk", Some(&session), Some(json!({"ids": [ann], "action": "disable"})), "10.0.0.1").await.json()["devices_removed"], Value::Null, "other actions answer null");
+}
+
+#[tokio::test]
 async fn guarded_sections_need_a_recent_reauth_and_no_token_and_null_removes_optional_ones() {
 	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
 	let h = Harness::with_socket(Some(socket)).await;

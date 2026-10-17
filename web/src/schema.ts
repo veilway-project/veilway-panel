@@ -1310,9 +1310,14 @@ export interface components {
             target: string;
         };
         Bulk: {
-            /** @description enable, disable, delete, reset_usage, add_group, remove_group, set_quota, set_expiry, set_device_limit or set_exits. */
+            /** @description enable, disable, delete, reset_usage, reset_links, add_group, remove_group, set_quota, set_expiry, set_device_limit or set_exits. */
             action: string;
             ids: number[];
+            /**
+             * @description For reset_links: remove the devices that were enrolled with the old links.
+             * @default false
+             */
+            remove_devices: boolean;
             /** @description The group name, the quota (an object with quota_bytes and quota_period), the expiry in Unix seconds or null, the device limit, or the exits ("all" or a list of exit tags). A default exit the new exits leave out is cleared. */
             value?: unknown;
         };
@@ -1322,6 +1327,11 @@ export interface components {
             id: number;
         };
         BulkResult: {
+            /**
+             * Format: uint
+             * @description The devices removed by reset_links, null for the other actions.
+             */
+            devices_removed?: number | null;
             /** Format: uint */
             done: number;
             failed: components["schemas"]["BulkFailure"][];

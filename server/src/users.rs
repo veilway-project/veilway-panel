@@ -215,21 +215,27 @@ pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 #[serde(deny_unknown_fields)]
 pub struct Bulk {
 	pub ids: Vec<i64>,
-	/// enable, disable, delete, reset_usage, add_group, remove_group, set_quota, set_expiry, set_device_limit or set_exits.
+	/// enable, disable, delete, reset_usage, reset_links, add_group, remove_group, set_quota, set_expiry, set_device_limit or set_exits.
 	pub action: String,
 	/// The group name, the quota (an object with quota_bytes and quota_period), the expiry in Unix seconds or null, the device limit, or the exits ("all" or a list of exit tags). A default exit the new exits leave out is cleared.
 	pub value: Option<Value>,
+	/// For reset_links: remove the devices that were enrolled with the old links.
+	#[serde(default)] pub remove_devices: bool,
 }
 
 #[derive(Serialize, JsonSchema)]
-pub struct BulkResult {pub done: usize, pub failed: Vec<BulkFailure>, pub node: NodeState}
+pub struct BulkResult {
+	pub done: usize, pub failed: Vec<BulkFailure>, pub node: NodeState,
+	/// The devices removed by reset_links, null for the other actions.
+	pub devices_removed: Option<usize>,
+}
 
 #[derive(Serialize, JsonSchema)]
 pub struct BulkFailure {pub id: i64, pub error: String}
 
 pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Bulk>) -> Result<Response, Failure> {
 	if input.ids.len() > 1000 {return Err(Failure::bad("A bulk action takes at most 1000 users."))}
-	let (mut done, mut failed) = (0, Vec::new());
+	let (mut done, mut failed, mut removed) = (0, Vec::new(), 0);
 	for id in &input.ids {
 		let result: Result<(), String> = async {
 			let id = *id;
@@ -239,6 +245,7 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 				"enable" | "disable" => {let enable = input.action == "enable"; app.db.call(move |db| db.execute("update users set enabled = ? where id = ?", params![enable, id]).inspect(|_| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
 				"delete" => {app.db.call(move |db| db.execute("delete from users where id = ?", [id]).inspect(|_| {crate::app::load_lookups(db, &lookups); dirty.store(true, Ordering::Relaxed)})).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
 				"reset_usage" => {let (status, _) = node::request(&app.cfg.node_socket, "POST", &format!("/v1/users/{}/usage/reset", user.name), None, Some(&json!({"totals": false}))).await?; if status != 200 {return Err(format!("the node answered {status}"))}}
+				"reset_links" => {let (_, old) = reset_link(&app, &ctx, id, input.remove_devices).await.map_err(|error| error.message)?; if input.remove_devices {removed += old.len()}}
 				"add_group" | "remove_group" => {
 					let group = value.as_ref().and_then(Value::as_str).filter(|group| name_ok(group, true)).ok_or("value is a group name")?;
 					let mut groups: Vec<String> = serde_json::from_str(&user.groups).unwrap_or_default();
@@ -270,7 +277,7 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 		match result {Ok(()) => done += 1, Err(error) => failed.push(BulkFailure {id: *id, error})}
 	}
 	app.db.audit(&ctx.actor, &ctx.source, "user.bulk", &input.action, &format!("{} users, {} failed", input.ids.len(), failed.len())).await;
-	ok(&BulkResult {done, failed, node: push(&app).await})
+	ok(&BulkResult {done, failed, node: push(&app).await, devices_removed: (input.action == "reset_links").then_some(removed)})
 }
 
 #[derive(Deserialize, JsonSchema, Default)]
@@ -455,10 +462,11 @@ pub struct ResetLink {
 #[derive(Serialize, JsonSchema)]
 pub struct LinkReset {pub link: Option<LinkView>, pub link_error: Option<String>, pub old_devices: Vec<DeviceOut>, pub removed: bool, pub node: NodeState}
 
-pub async fn sub_reset(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>, Body(input): Body<ResetLink>) -> Result<Response, Failure> {
+/// Makes a new token for the user and returns it with the devices enrolled with the old one. The caller pushes to the node.
+async fn reset_link(app: &Arc<App>, ctx: &Ctx, id: i64, remove_devices: bool) -> Result<([u8; 16], Vec<DeviceRow>), Failure> {
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
 	let (token, held, cache, dirty) = (crypto::random::<16>(), app.clone(), app.settings.clone(), app.dirty.clone());
-	let (lookup, remove_devices) = (keys.token_lookup(&token), input.remove_devices);
+	let (lookup, actor, source) = (keys.token_lookup(&token), ctx.actor.clone(), ctx.source.clone());
 	let old = app.db.call(move |db| -> Result<Vec<DeviceRow>, Failure> {
 		let keys = held.keys.as_ref().expect("checked before the lookup");
 		// One transaction: the new token, the removed devices, the new Xray credentials and the audit line all happen or none does.
@@ -471,12 +479,17 @@ pub async fn sub_reset(State(app): State<Arc<App>>, Extension(ctx): Extension<Ct
 		if remove_devices {tx.execute("delete from devices where user_id = ? and token_gen = ?", params![id, user.token_gen])?;}
 		// A link that was reset is a link that may have leaked, and the Xray share links are the same user's, so they are made new with it and the push below carries them to the node.
 		tx.execute("delete from xray_clients where user_id = ?", [id])?;
-		audit(&tx, &ctx.actor, &ctx.source, "link.reset", &format!("user:{id}"), &format!("{} devices of the old link, removed: {}, Xray credentials made new", old.len(), remove_devices));
+		audit(&tx, &actor, &source, "link.reset", &format!("user:{id}"), &format!("{} devices of the old link, removed: {}, Xray credentials made new", old.len(), remove_devices));
 		tx.commit()?;
 		crate::app::load_lookups(db, &held.lookups);
 		dirty.store(true, Ordering::Relaxed);
 		Ok(old)
 	}).await??;
+	Ok((token, old))
+}
+
+pub async fn sub_reset(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>, Body(input): Body<ResetLink>) -> Result<Response, Failure> {
+	let (token, old) = reset_link(&app, &ctx, id, input.remove_devices).await?;
 	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
 	let (link, link_error) = match view(&app, &user, &token) {Ok(link) => (Some(link), None), Err(error) => (None, Some(error))};
 	ok(&LinkReset {link, link_error, old_devices: old.iter().map(device_out).collect(), removed: input.remove_devices, node: push(&app).await})

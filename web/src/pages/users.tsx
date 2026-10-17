@@ -1,4 +1,4 @@
-import {Banner, Button, ConfirmDialog, Dialog, Glass, NumberField, RadioGroup, Segmented, SelectField, StateBlock, Switch, TextField, UsageBar, useToast} from "@veilway/ui";
+import {Banner, Button, Checkbox, ConfirmDialog, Dialog, Glass, NumberField, RadioGroup, Segmented, SelectField, StateBlock, Switch, TextField, UsageBar, useToast} from "@veilway/ui";
 import {useEffect, useId, useState} from "react";
 import {api, type LinkView, type NodeState, type NodeUser, type User, type UserPatch} from "../api.ts";
 import {ago, DayField, ErrorNote, fromDay, Mark, NodeNote, PageHead, toDay, useGuard, useLoad, useP, useSay} from "../kit.tsx";
@@ -29,7 +29,7 @@ export function UsersPage({adding}: {adding: boolean}) {
 	const {t, number, bytes, date} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings();
 	const [search, setSearch] = useState(""), [query, setQuery] = useState(""), [shown, setShown] = useState("all"), [group, setGroup] = useState("*"), [sort, setSort] = useState("name"), [page, setPage] = useState(0), [picked, setPicked] = useState<Set<number>>(new Set());
 	const [form, setForm] = useState<User | "new" | null>(adding ? "new" : null);
-	const [confirm, setConfirm] = useState<"delete" | "reset_usage" | null>(null), [more, setMore] = useState(false), [moving, setMoving] = useState(false), [result, setResult] = useState<{done: number, failed: {id: number, error: string}[], node: NodeState} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
+	const [confirm, setConfirm] = useState<"delete" | "reset_usage" | "reset_links" | null>(null), [removeDevices, setRemoveDevices] = useState(false), [more, setMore] = useState(false), [moving, setMoving] = useState(false), [result, setResult] = useState<{done: number, failed: {id: number, error: string}[], node: NodeState, devices_removed?: number | null} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	useEffect(() => { const timer = setTimeout(() => setQuery(search.trim()), 250); return () => clearTimeout(timer); }, [search]);
 	useEffect(() => setPage(0), [query, shown, group, sort]);
 	// Every user matching the search comes in one answer, so the counts, the group filter and the order are worked out here.
@@ -38,15 +38,16 @@ export function UsersPage({adding}: {adding: boolean}) {
 	const used = (u: User) => (u.node as NodeUser | null)?.used_bytes ?? -1;
 	const rows = all.filter(u => (shown === "all" || u.enabled === (shown === "enabled")) && (group === "*" || u.groups.includes(group))).sort((a, b) => sort === "usage" ? used(b) - used(a) : sort === "expiry" ? (a.expires_at ?? Infinity) - (b.expires_at ?? Infinity) : a.name.localeCompare(b.name));
 	const pages = Math.max(1, Math.ceil(rows.length / PAGE)), visible = rows.slice(page * PAGE, page * PAGE + PAGE);
-	const bulk = async (action: string, value?: unknown) => {
+	const bulk = async (action: string, value?: unknown, remove = false) => {
 		setBusy(true);
 		setError(null);
 		setResult(null);
 		try {
-			const answer = await guard(() => api("post", "/users/bulk", {body: {ids: [...picked], action, value}}));
+			const answer = await guard(() => api("post", "/users/bulk", {body: {ids: [...picked], action, value, remove_devices: remove}}));
 			setResult(answer);
 			if (!answer.failed.length) setPicked(new Set());
 			setMore(false);
+			setConfirm(null);
 			users.reload();
 		} catch (failure) {
 			setError(failure);
@@ -80,13 +81,14 @@ export function UsersPage({adding}: {adding: boolean}) {
 				<Button size="sm" disabled={busy} onClick={() => void bulk("enable")}>{t("bulk.enable")}</Button>
 				<Button size="sm" disabled={busy} onClick={() => void bulk("disable")}>{t("bulk.disable")}</Button>
 				<Button size="sm" disabled={busy} onClick={() => setConfirm("reset_usage")}>{t("bulk.resetUsage")}</Button>
+				<Button size="sm" disabled={busy} onClick={() => { setRemoveDevices(false); setConfirm("reset_links"); }}>{t("bulk.resetLinks")}</Button>
 				<Button size="sm" disabled={busy} onClick={() => setMoving(true)}>{t("bulk.moveEndpoint")}</Button>
 				<Button size="sm" disabled={busy} onClick={() => setMore(true)}>{t("bulk.more")}</Button>
 				<Button size="sm" variant="danger" disabled={busy} onClick={() => setConfirm("delete")}>{t("bulk.delete")}</Button>
 				<Button size="sm" variant="quiet" onClick={() => setPicked(new Set())}>{t("bulk.clear")}</Button>
 			</div>}
 			<ErrorNote error={error}/>
-			{result && <Banner tone={result.failed.length ? "warning" : "success"} title={t("bulk.done", {count: result.done}) + (result.failed.length ? ". " + t("bulk.failed", {count: result.failed.length}) : "")}>{result.failed.length ? result.failed.map(f => (names.get(f.id) ?? f.id) + ": " + f.error).join("; ") : undefined}</Banner>}
+			{result && <Banner tone={result.failed.length ? "warning" : "success"} title={(result.devices_removed == null ? t("bulk.done", {count: result.done}) : t("bulk.linksDone", {count: result.done, devices: result.devices_removed})) + (result.failed.length ? ". " + t("bulk.failed", {count: result.failed.length}) : "")}>{result.failed.length ? result.failed.map(f => (names.get(f.id) ?? f.id) + ": " + f.error).join("; ") : undefined}</Banner>}
 			<NodeNote node={result?.node}/>
 			{users.error && !users.data ? <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={users.reload}>{t("action.retry")}</Button>}>{say(users.error)}</StateBlock>
 			: !users.data ? <StateBlock kind="loading" title={t("common.loading")}/>
@@ -114,7 +116,12 @@ export function UsersPage({adding}: {adding: boolean}) {
 			</div>}
 		</Glass>
 		{form && <UserForm user={form === "new" ? null : form} defaultLimit={settings?.default_device_limit ?? 3} onClose={() => { setForm(null); if (adding) location.replace("#/users"); }} onSaved={(user, link, linkError) => { setForm(null); toast({tone: "success", title: t("form.created", {name: user.name})}); if (linkError) toast({tone: "warning", title: t("link.failed", {error: linkError})}); if (link) { handoff.current = {id: user.id, link}; location.hash = "#/users/" + user.id; } else users.reload(); }}/>}
-		<ConfirmDialog open={confirm !== null} onOpenChange={open => { if (!open) setConfirm(null); }} danger={confirm === "delete"} title={t(confirm === "delete" ? "bulk.deleteTitle" : "bulk.resetTitle", {count: picked.size})} body={t(confirm === "delete" ? "bulk.deleteBody" : "bulk.resetBody")} confirmLabel={t(confirm === "delete" ? "bulk.delete" : "bulk.resetUsage")} onConfirm={() => { if (confirm) void bulk(confirm); }}/>
+		<ConfirmDialog open={confirm === "delete" || confirm === "reset_usage"} onOpenChange={open => { if (!open) setConfirm(null); }} danger={confirm === "delete"} title={t(confirm === "delete" ? "bulk.deleteTitle" : "bulk.resetTitle", {count: picked.size})} body={t(confirm === "delete" ? "bulk.deleteBody" : "bulk.resetBody")} confirmLabel={t(confirm === "delete" ? "bulk.delete" : "bulk.resetUsage")} onConfirm={() => { if (confirm) void bulk(confirm); }}/>
+		<Dialog open={confirm === "reset_links"} onOpenChange={open => { if (!open) setConfirm(null); }} title={t("bulk.resetLinksTitle", {count: picked.size})} description={t("bulk.resetLinksBody")}>
+			<Checkbox label={t("bulk.removeDevices")} checked={removeDevices} onChange={setRemoveDevices}/>
+			<ErrorNote error={error}/>
+			<div className="vw-dialog-foot"><Button onClick={() => setConfirm(null)}>{t("action.cancel")}</Button><Button variant="danger" disabled={busy} onClick={() => void bulk("reset_links", undefined, removeDevices)}>{t("bulk.resetLinksConfirm")}</Button></div>
+		</Dialog>
 		{moving && <MoveDialog users={[...picked]} onClose={() => setMoving(false)} onDone={() => { setMoving(false); users.reload(); toast({tone: "success", title: t("move.done")}); }}/>}
 		{more && <BulkChange count={picked.size} busy={busy} error={error} onClose={() => setMore(false)} onApply={(action, value) => void bulk(action, value)}/>}
 	</>;
