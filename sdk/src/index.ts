@@ -39,7 +39,7 @@ function query(params: object): string {
 }
 
 export class Client {
-	/** `base` is the panel's address with its path prefix, for example "https://panel.example/veilway". `token` is an API token, sent as a Bearer header. A route the token's scope does not allow answers `forbidden`, and a route only a logged-in admin may use answers `unauthorized`. */
+	/** `base` is the panel's address with its admin prefix and `/api`, for example "https://panel.example.com/<prefix>/api". `token` is an API token, sent as a Bearer header. A route the token's scope does not allow answers `forbidden`, and a route only a logged-in admin may use answers `unauthorized`. */
 	constructor(private readonly fetch: Fetch, private readonly base: string, private readonly token: string) {}
 
 	private async send(method: string, path: string, body?: unknown): Promise<FetchResponse> {

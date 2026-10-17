@@ -7,7 +7,7 @@ A typed client for the admin API of the Veilway panel, for integrations that use
 ```ts
 import {Client, VeilwayError} from "@veilway/panel-sdk";
 
-const client = new Client(fetch, "https://panel.example/veilway", process.env.VEILWAY_TOKEN ?? "");
+const client = new Client(fetch, "https://panel.example.com/<prefix>/api", process.env.VEILWAY_TOKEN ?? "");
 const [user] = await client.listUsers({q: "ana"});
 try {
 	if (user) await client.updateUser(user.id, {note: "renewed"});
