@@ -651,7 +651,7 @@ impl Fake {
 		let node = Router::new()
 			.route("/v1/config", get(|State(fake): State<Arc<Fake>>| async move {
 				let generation = *fake.generation.lock().unwrap();
-				Json(json!({"revision": format!("rev{generation}"), "generation": generation, "document": fake.document.lock().unwrap().clone()}))
+				Json(json!({"revision": format!("rev{generation}"), "generation": generation, "document": redacted(fake.document.lock().unwrap().clone())}))
 			}).put(|State(fake): State<Arc<Fake>>, headers: HeaderMap, Json(document): Json<Value>| async move {
 				let mut generation = fake.generation.lock().unwrap();
 				if headers.get("if-match").unwrap() != &format!("\"rev{generation}\"") {return (StatusCode::CONFLICT, Json(json!({"error": {"code": "stale"}})))}
@@ -677,6 +677,16 @@ impl Fake {
 
 impl Drop for Fake {
 	fn drop(&mut self) {let _ = std::fs::remove_dir_all(&self.dir);}
+}
+
+/// What the node shows of a document: the key of a borrowed-site transport only as a marker made of its first bytes, as the real node shows every secret once it holds it.
+fn redacted(mut document: Value) -> Value {
+	for inbound in document["inbounds"].as_array_mut().into_iter().flatten() {
+		for transport in inbound["transports"].as_array_mut().into_iter().flatten().filter(|transport| transport["type"] == "faketls") {
+			if let Some(bytes) = transport["transport_key"].as_str().filter(|key| !key.starts_with("<redacted")).and_then(|key| STANDARD.decode(key).ok()) {transport["transport_key"] = json!(format!("<redacted:{}>", bytes.iter().take(4).map(|byte| format!("{byte:02x}")).collect::<String>()))}
+		}
+	}
+	document
 }
 
 fn node_document(pool: &str) -> Value {
@@ -2288,4 +2298,183 @@ async fn a_reset_of_a_link_is_one_unit() {
 	let (generation, devices, audited): (i64, i64, i64) = h.app.db.call(move |db| (db.query_row("select token_gen from users where id = ?", [id], |row| row.get(0)).unwrap(), db.query_row("select count(*) from devices where user_id = ?", [id], |row| row.get(0)).unwrap(), db.query_row("select count(*) from audit where action = 'link.reset'", [], |row| row.get(0)).unwrap())).await.unwrap();
 	assert_eq!((generation, devices, audited), (2, 0, 1));
 	assert_eq!(h.call(Method::POST, "/p/api/users/9999/subscription/reset", Some(&session), Some(json!({})), "10.0.0.1").await.status, StatusCode::NOT_FOUND, "a missing account changes nothing");
+}
+
+fn borrowed_inbounds(site: Value, key: &str) -> Value {
+	json!([{"tag": "Main", "type": "veilway", "private_key": "<redacted>", "address": ["10.66.0.1/24"], "transports": [{"type": "udp", "listen": "0.0.0.0:51820"}, {"type": "faketls", "listen": "0.0.0.0:443", "site": site, "transport_key": key}]}])
+}
+
+#[tokio::test]
+async fn a_borrowed_site_goes_to_the_node_and_into_a_profile_of_its_own_that_apps_read() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"node_host": "192.0.2.10"})).await;
+	let site = json!({"host": "www.example.com", "names": ["example.com"], "acknowledged": true});
+	let put = |value: Value, revision: u32| h.call(Method::PUT, "/p/api/config/inbounds", Some(&session), Some(json!({"revision": format!("rev{revision}"), "value": value})), "10.0.0.1");
+	let refused = put(borrowed_inbounds(json!({"host": "www.example.com", "acknowledged": false}), &STANDARD.encode([5u8; 32])), 1).await;
+	assert_eq!((refused.status, refused.json()["error"]["code"].clone()), (StatusCode::UNPROCESSABLE_ENTITY, json!("invalid_config")));
+	assert!(refused.json()["error"]["message"].as_str().unwrap().contains("site.acknowledged"), "the panel says which rule, before the node is asked");
+	assert!(fake.applied.lock().unwrap().is_empty(), "nothing reached the node");
+	let key = STANDARD.encode([5u8; 32]);
+	assert_eq!(put(borrowed_inbounds(site.clone(), &key), 1).await.status, StatusCode::OK);
+	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((derived["templates"].as_array().unwrap().len(), derived["templates"][1]["kind"].clone(), derived["templates"][1]["refused"].clone()), (2, json!("faketls"), json!([])));
+	let marked = borrowed_inbounds(site.clone(), "<redacted:05050505>");
+	assert_eq!(put(marked, 2).await.status, StatusCode::OK, "the key comes back as the node's marker, and the panel keeps what it made of the key");
+	let template = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json()["templates"][1].clone();
+	assert_eq!(template["profile"]["transports"][0]["transport_public_key"], STANDARD.encode(veilway_proto::proof::public_key(&[5u8; 32])));
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32])}})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	let (_, link) = h.user(&session, "ann", json!({})).await;
+	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
+	let answer = h.fetch(&link, &kids, 1, "fetch", None).await;
+	let Payload::Subscription(document) = opened(&answer, &[key]) else {panic!("a document {:?}", refusal_of(&answer, &[key]))};
+	assert_eq!(document.profiles.iter().map(|profile| profile.id.clone()).collect::<Vec<_>>(), ["main", "main-faketls"], "its own profile, so an app that does not know the type keeps the other");
+	let (plain, borrowed) = (&document.profiles[0], &document.profiles[1]);
+	assert!(plain.transports.iter().all(|transport| !matches!(transport, payload::Transport::FakeTls {..})));
+	assert_eq!((borrowed.transports.len(), borrowed.dropped.len(), borrowed.transport_public_key, borrowed.rating_cap), (1, 0, None, Some(payload::RatingCap::Detectable)));
+	let payload::Transport::FakeTls {key, candidates} = &borrowed.transports[0] else {panic!("the transport is faketls")};
+	assert_eq!((*key, candidates.len(), candidates[0].address.address().to_string(), candidates[0].sni.clone()), (veilway_proto::proof::public_key(&[5u8; 32]), 1, "192.0.2.10:443".to_string(), "www.example.com".to_string()));
+}
+
+#[tokio::test]
+async fn a_borrowed_site_that_cannot_be_emitted_is_named_on_the_node_page_and_not_published() {
+	let (_fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"node_host": "192.0.2.10"})).await;
+	let key = STANDARD.encode([5u8; 32]);
+	let inbounds = borrowed_inbounds(json!({"host": "www.example.com", "acknowledged": true}), &key);
+	assert_eq!(h.call(Method::PUT, "/p/api/config/inbounds", Some(&session), Some(json!({"revision": "rev1", "value": inbounds})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32]), "transport_public_key": STANDARD.encode(veilway_proto::proof::public_key(&[5u8; 32]))}})), "10.0.0.1").await.status, StatusCode::OK);
+	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((derived["templates"][1]["refused"][0]["code"].clone(), derived["templates"][1]["refused"][0]["transport"].clone(), derived["templates"][1]["profile"]["transports"].clone()), (json!("key_shared"), json!("0.0.0.0:443"), json!([])), "the public key of the profile's other transports is the same");
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK, "a refused transport blocks nothing else");
+	let published = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(published["profiles"].as_array().unwrap().iter().map(|profile| profile["id"].as_str().unwrap().to_string()).collect::<Vec<_>>(), ["main"]);
+}
+
+fn public_of(fill: u8) -> String {STANDARD.encode(veilway_proto::proof::public_key(&[fill; 32]))}
+
+async fn borrowed_node() -> (Arc<Fake>, Harness, Session) {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"node_host": "192.0.2.10"})).await;
+	(fake, h, session)
+}
+
+async fn put_inbounds(h: &Harness, session: &Session, revision: u32, inbounds: Value) -> Answer {h.call(Method::PUT, "/p/api/config/inbounds", Some(session), Some(json!({"revision": format!("rev{revision}"), "value": inbounds})), "10.0.0.1").await}
+
+fn site_of(host: &str) -> Value {json!({"host": host, "acknowledged": true})}
+
+#[tokio::test]
+async fn a_settings_update_never_takes_the_borrowed_site_keys_from_the_page() {
+	let (_fake, h, session) = borrowed_node().await;
+	assert_eq!(put_inbounds(&h, &session, 1, borrowed_inbounds(site_of("www.example.com"), &STANDARD.encode([5u8; 32]))).await.status, StatusCode::OK);
+	let mut old = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(old["faketls_keys"], json!({"Main": {"0.0.0.0:443": public_of(5)}}));
+	let mut forged = old.clone();
+	forged["faketls_keys"] = json!({"Main": {"0.0.0.0:443": public_of(9)}, "Other": {"0.0.0.0:444": public_of(9)}});
+	forged["provider_name"] = json!("Renamed");
+	let answer = h.call(Method::PUT, "/p/api/settings", Some(&session), Some(forged), "10.0.0.1").await;
+	assert_eq!(answer.status, StatusCode::OK, "{}", String::from_utf8_lossy(&answer.body));
+	assert_eq!((answer.json()["faketls_keys"].clone(), answer.json()["provider_name"].clone()), (json!({"Main": {"0.0.0.0:443": public_of(5)}}), json!("Renamed")), "the answer is what was stored");
+	assert_eq!(h.app.settings().faketls_keys, std::collections::BTreeMap::from([("Main".to_string(), std::collections::BTreeMap::from([("0.0.0.0:443".to_string(), public_of(5))]))]));
+	old.as_object_mut().unwrap().remove("faketls_keys");
+	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(old.clone()), "10.0.0.1").await.status, StatusCode::OK);
+	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(derived["templates"][1]["refused"], json!([]), "a page that sends none loses nothing");
+	assert_eq!(put_inbounds(&h, &session, 2, borrowed_inbounds(site_of("www.example.com"), &STANDARD.encode([6u8; 32]))).await.status, StatusCode::OK);
+	old["provider_name"] = json!("Stale page");
+	old["faketls_keys"] = json!({"Main": {"0.0.0.0:443": public_of(5)}});
+	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(old), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.app.settings().faketls_keys["Main"]["0.0.0.0:443"], public_of(6), "a page that read the key before it changed does not put the old one back");
+	let spec: Value = serde_json::from_str(&openapi::openapi()).unwrap();
+	assert_eq!(spec["components"]["schemas"]["Settings"]["properties"]["faketls_keys"]["readOnly"], json!(true));
+}
+
+#[tokio::test]
+async fn a_published_borrowed_site_profile_follows_its_key_and_listener_and_is_taken_down_with_the_transport() {
+	let (_fake, h, session) = borrowed_node().await;
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32])}})), "10.0.0.1").await.status, StatusCode::OK);
+	let ids = |h: &Harness| h.app.settings().profiles.iter().map(|profile| profile["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+	let faketls = |h: &Harness| h.app.settings().profiles.iter().find(|profile| profile["id"] == "main-faketls").map(|profile| profile["transports"][0].clone());
+	assert_eq!(put_inbounds(&h, &session, 1, borrowed_inbounds(site_of("www.example.com"), &STANDARD.encode([5u8; 32]))).await.status, StatusCode::OK);
+	assert_eq!(ids(&h), ["main"], "an apply publishes nothing that was not published");
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	let main = h.app.settings().profiles[0].clone();
+	assert_eq!(faketls(&h), Some(json!({"type": "faketls", "transport_public_key": public_of(5), "candidates": [{"address": "192.0.2.10:443", "sni": "www.example.com"}]})));
+	let mut moved = borrowed_inbounds(site_of("www.example.com"), &STANDARD.encode([6u8; 32]));
+	moved[0]["transports"][1]["listen"] = json!("0.0.0.0:8443");
+	assert_eq!(put_inbounds(&h, &session, 2, moved).await.status, StatusCode::OK);
+	assert_eq!(faketls(&h), Some(json!({"type": "faketls", "transport_public_key": public_of(6), "candidates": [{"address": "192.0.2.10:8443", "sni": "www.example.com"}]})), "the new key and the new listener, with no publish in between");
+	assert_eq!((ids(&h), h.app.settings().profiles[0].clone()), (vec!["main".to_string(), "main-faketls".to_string()], main.clone()), "the other profile is not touched");
+	let mut marked = borrowed_inbounds(site_of("www.example.com"), "<redacted:06060606>");
+	marked[0]["transports"][1]["listen"] = json!("0.0.0.0:8443");
+	assert_eq!(put_inbounds(&h, &session, 3, marked).await.status, StatusCode::OK);
+	assert_eq!(faketls(&h).unwrap()["transport_public_key"], public_of(6), "an apply that changes neither keeps it");
+	let plain = json!([{"tag": "Main", "type": "veilway", "private_key": "<redacted>", "address": ["10.66.0.1/24"], "transports": [{"type": "udp", "listen": "0.0.0.0:51820"}]}]);
+	assert_eq!(put_inbounds(&h, &session, 4, plain).await.status, StatusCode::OK);
+	assert_eq!((ids(&h), h.app.settings().relay_profiles.contains_key("main-faketls")), (vec!["main".to_string()], false), "a transport that is gone takes its profile down");
+}
+
+#[tokio::test]
+async fn a_token_cannot_add_a_borrowed_site_or_change_its_site_and_a_session_needs_a_recent_reauth() {
+	let (fake, h, session) = borrowed_node().await;
+	let full = h.token(&session, "full", json!({})).await;
+	let new = borrowed_inbounds(site_of("www.example.com"), &STANDARD.encode([5u8; 32]));
+	let by_token = |revision: u32, inbounds: Value| h.bearer(Method::PUT, "/p/api/config/inbounds", &full, Some(json!({"revision": format!("rev{revision}"), "value": inbounds})), "10.1.1.1");
+	let refused = by_token(1, new.clone()).await;
+	assert_eq!((refused.status, refused.json()["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("forbidden")));
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
+	let stale = put_inbounds(&h, &session, 1, new.clone()).await;
+	assert_eq!((stale.status, stale.json()["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("reauth_required")));
+	assert!(fake.applied.lock().unwrap().is_empty(), "nothing reached the node");
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
+	assert_eq!(put_inbounds(&h, &session, 1, new).await.status, StatusCode::OK);
+	let rekeyed = borrowed_inbounds(site_of("www.example.com"), &STANDARD.encode([6u8; 32]));
+	assert_eq!(by_token(2, rekeyed.clone()).await.status, StatusCode::OK, "the key is the node's rule to check and not the site's");
+	for site in [site_of("www.example.org"), json!({"host": "www.example.com", "acknowledged": false}), json!({"host": "www.example.com", "names": ["example.com"], "acknowledged": true})] {
+		let changed = by_token(3, borrowed_inbounds(site.clone(), &STANDARD.encode([6u8; 32]))).await;
+		assert_eq!((changed.status, changed.json()["error"]["code"].clone()), (StatusCode::FORBIDDEN, json!("forbidden")), "{site}");
+	}
+	let mut whole = h.call(Method::GET, "/p/api/config", Some(&session), None, "10.0.0.1").await.json()["document"].clone();
+	whole["inbounds"] = borrowed_inbounds(site_of("www.example.org"), &STANDARD.encode([6u8; 32]));
+	let through_all = h.bearer(Method::PUT, "/p/api/config", &full, Some(json!({"revision": "rev3", "document": whole})), "10.1.1.1").await;
+	assert_eq!(through_all.status, StatusCode::FORBIDDEN, "the whole document is no way round it");
+	assert_eq!(fake.applied.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn the_dry_runs_say_the_borrowed_site_rules_before_the_node_is_asked() {
+	let (_fake, h, session) = borrowed_node().await;
+	let mut document = node_document("10.66.0.1/24");
+	document["inbounds"] = borrowed_inbounds(json!({"host": "www.example.com", "acknowledged": false}), &STANDARD.encode([5u8; 32]));
+	for path in ["/p/api/config/diff", "/p/api/config/validate"] {
+		let answer = h.call(Method::POST, path, Some(&session), Some(json!({"document": document.clone()})), "10.0.0.1").await;
+		assert_eq!((answer.status, answer.json()["error"]["code"].clone()), (StatusCode::UNPROCESSABLE_ENTITY, json!("invalid_config")), "{path}");
+		assert!(answer.json()["error"]["message"].as_str().unwrap().contains("site.acknowledged"), "{path}");
+	}
+	document["inbounds"] = borrowed_inbounds(site_of("www.example.com"), "<redacted:05050505>");
+	let moved = h.call(Method::POST, "/p/api/config/diff", Some(&session), Some(json!({"document": document.clone()})), "10.0.0.1").await;
+	assert!(moved.json()["error"]["message"].as_str().unwrap().contains("expected the key in full"), "a marker for a key the node does not hold there");
+	document["inbounds"] = borrowed_inbounds(site_of("www.example.com"), &STANDARD.encode([5u8; 32]));
+	assert_eq!(h.call(Method::POST, "/p/api/config/diff", Some(&session), Some(json!({"document": document})), "10.0.0.1").await.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_profile_written_by_hand_under_the_id_of_a_borrowed_site_profile_is_not_replaced_by_publishing() {
+	let (_fake, h, session) = borrowed_node().await;
+	let by_hand = json!({"id": "main-faketls", "name": "Mine", "type": "veilway", "inbound_public_key": STANDARD.encode([7u8; 32]), "gateways": ["10.66.0.1"], "mtu": 1420, "transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820"]}]});
+	let main = h.app.settings().profiles[0].clone();
+	h.configure(&session, json!({"node_host": "192.0.2.10", "profiles": [main, by_hand.clone()]})).await;
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32])}})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(put_inbounds(&h, &session, 1, borrowed_inbounds(site_of("www.example.com"), &STANDARD.encode([5u8; 32]))).await.status, StatusCode::OK);
+	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((derived["templates"][1]["refused"][0]["code"].clone(), derived["templates"][1]["profile"]["transports"].clone()), (json!("profile_id"), json!([])));
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK, "a refused transport blocks nothing else");
+	let profiles = h.app.settings().profiles;
+	assert_eq!((profiles.len(), profiles.iter().find(|profile| profile["id"] == "main-faketls").cloned()), (2, Some(by_hand)), "the profile written by hand is still there, unchanged");
 }

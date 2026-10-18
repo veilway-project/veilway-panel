@@ -142,11 +142,14 @@ pub struct Settings {
 	/// The relays as they were when the profiles were published. A document carries the ones that reach its account.
 	#[serde(deserialize_with = "crate::nodecfg::checked_relays")]
 	pub published_relays: Vec<crate::nodecfg::Relay>,
+	/// The public half of the key of each `faketls` transport, by inbound tag and listen address. The node shows a key only as a marker once it holds it, so the panel makes the public half when the key is applied in full. Owned by the server: read-only in the API, and a settings update keeps the stored value whatever it carries.
+	#[schemars(extend("readOnly" = true))]
+	pub faketls_keys: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl Default for Settings {
 	fn default() -> Self {
-		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), published_relays: Vec::new()}
+		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), published_relays: Vec::new(), faketls_keys: BTreeMap::new()}
 	}
 }
 

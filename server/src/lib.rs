@@ -3,6 +3,7 @@ pub mod admin;
 pub mod app;
 pub mod auth;
 pub mod backup;
+pub mod borrowed;
 pub mod config;
 pub mod crypto;
 pub mod db;

@@ -480,9 +480,12 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 		if !(200..=599).contains(&page.status) || page.headers.len() > 16 || page.body.len() > 65_536 || page.headers.iter().any(|(name, value)| HeaderName::try_from(name.as_str()).is_err() || HeaderValue::from_str(value).is_err()) {return Err(Failure::bad("not_found is a status from 200 to 599, at most 16 valid headers and a body of at most 64 KB."))}
 	}
 	let (cache, saved) = (app.settings.clone(), input.clone());
-	let detail = app.db.call(move |db| -> Result<&'static str, Failure> {
+	let (detail, stored) = app.db.call(move |db| -> Result<(&'static str, Settings), Failure> {
+		let mut saved = saved;
 		let tx = db.transaction()?;
 		let before = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+		// The public halves of the borrowed-site keys are the server's: a page that read them earlier would write an old copy back over what an apply made since.
+		saved.faketls_keys = before.faketls_keys.clone();
 		crate::endpoints::in_use(&tx, &saved).map_err(Failure::conflict)?;
 		let known: Vec<i64> = tx.prepare("select id from users")?.query_map([], |row| row.get(0))?.collect::<Result<_, _>>()?;
 		if let Some(id) = saved.relays.iter().flat_map(|relay| relay.users.iter().copied()).find(|id| !known.contains(id)) {return Err(Failure::bad(format!("A relay names the account {id}, which does not exist. Take it off the relay first.")))}
@@ -492,12 +495,12 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 		let detail = if before.profiles != saved.profiles {"profiles changed"} else {""};
 		let stored = store_settings(&tx, &cache, move |settings| *settings = saved).map_err(Failure::internal)?;
 		tx.commit()?;
-		publish_settings(&cache, stored);
-		Ok(detail)
+		publish_settings(&cache, stored.clone());
+		Ok((detail, stored))
 	}).await??;
 	*app.not_found_page.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = input.not_found.clone();
 	app.db.audit(&ctx.actor, &ctx.source, "settings.update", "settings", detail).await;
-	ok(&input)
+	ok(&stored)
 }
 
 #[derive(Serialize, JsonSchema)]

@@ -108,8 +108,14 @@ async fn with_users(app: &Arc<App>, mut document: Value) -> Result<Value, Failur
 #[serde(deny_unknown_fields)]
 pub struct DocumentIn {pub document: Value}
 
+/// The refusal for the panel's own checks of the borrowed-site transports, in the shape of the node's report.
+fn invalid(found: &[String]) -> Failure {Failure::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", json!({"valid": false, "report": {"errors": found.iter().map(|text| json!({"path": text.split(':').next().unwrap_or_default(), "message": text.split_once(": ").map_or(text.as_str(), |(_, message)| message)})).collect::<Vec<_>>(), "warnings": [], "more_errors": 0, "more_warnings": 0}}).to_string())}
+
 /// Asks the node whether the document is valid, or what applying it would change. Nothing changes.
 pub async fn dry_run(app: Arc<App>, document: Value, path: &str) -> Result<Response, Failure> {
+	let (_, _, live) = running(&app).await?;
+	let found = crate::borrowed::problems(&document, &live);
+	if !found.is_empty() {return Err(invalid(&found))}
 	let (status, body) = call(&app, "POST", path, None, Some(&with_users(&app, document).await?)).await?;
 	Ok(json(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), &body))
 }
@@ -122,13 +128,33 @@ pub async fn diff(State(app): State<Arc<App>>, Body(input): Body<DocumentIn>) ->
 pub(crate) async fn apply(app: &Arc<App>, ctx: &Ctx, document: Value, revision: &str, target: &str) -> Result<Value, Failure> {
 	let document = with_users(app, document).await?;
 	let (_, _, before) = running(app).await?;
+	// The site of a borrowed-site transport has not agreed to it, so adding one or changing its site or acknowledgment is a person's act, as the guarded sections are. A token never passes.
+	if crate::borrowed::sensitive(&before, &document) {reauthed(app, ctx).await?}
+	let borrowed = crate::borrowed::problems(&document, &before);
+	if !borrowed.is_empty() {return Err(invalid(&borrowed))}
 	let (status, checked) = call(app, "POST", "/v1/config/validate", None, Some(&document)).await?;
 	if status != 200 || checked.get("valid") != Some(&Value::Bool(true)) {return Err(Failure::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", checked.to_string().chars().take(4000).collect::<String>()))}
 	let (status, applied) = call(app, "PUT", "/v1/config", Some(revision), Some(&document)).await?;
 	match status {
 		200 => {
 			node::clear_defaults(app, &document).await;
+			let (kept, published) = (document.clone(), app.settings().profiles);
+			// A profile of a borrowed site that was published is made again from what the node runs now, or taken down when it can no longer be emitted, so that no document carries the key or the listener it had before. One that was never published, and one written by hand, stay as they are.
+			let republished = app.update_settings(move |settings| {
+				crate::borrowed::remember(settings, &kept);
+				let templates = derive(settings, &kept, &[], None);
+				let ids: Vec<String> = settings.relay_profiles.keys().filter(|id| id.ends_with("-faketls") && settings.profiles.iter().any(|profile| profile["id"] == id.as_str() && profile["transports"].as_array().is_some_and(|list| !list.is_empty() && list.iter().all(|transport| transport["type"] == "faketls")))).cloned().collect();
+				for id in ids {
+					let fresh = templates.iter().find(|template| template["kind"] == "faketls" && template["profile"]["id"] == id.as_str() && template["missing"].as_array().is_some_and(Vec::is_empty) && template["profile"]["transports"].as_array().is_some_and(|list| !list.is_empty())).map(|template| template["profile"].clone());
+					match (fresh, settings.profiles.iter_mut().find(|profile| profile["id"] == id.as_str())) {
+						(Some(fresh), Some(slot)) => *slot = fresh,
+						_ => {settings.profiles.retain(|profile| profile["id"] != id.as_str()); settings.relay_profiles.remove(&id);}
+					}
+				}
+			}).await;
+			if let Err(error) = &republished {tracing::warn!("the public keys and profiles of the borrowed-site transports were not kept: {error}")}
 			let mut changed = vec![format!("generation {}", applied.get("generation").and_then(Value::as_u64).unwrap_or(0))];
+			if republished.is_ok() && app.settings().profiles != published {changed.push("borrowed-site profiles republished".into())}
 			for key in before.as_object().into_iter().chain(document.as_object()).flat_map(|object| object.keys()).filter(|key| !["users", "xray"].contains(&key.as_str())).collect::<BTreeSet<_>>() {changes(key, &before[key.as_str()], &document[key.as_str()], &mut changed)}
 			app.db.audit(&ctx.actor, &ctx.source, "config.apply", target, &changed.join(", ")).await;
 			Ok(applied)
@@ -216,6 +242,8 @@ pub fn carry(profile: &mut Value, tag: &str, reaching: &[(u8, &Relay)]) -> Vec<V
 	let mut trimmed = Vec::new();
 	for transport in profile["transports"].as_array_mut().into_iter().flatten() {
 		let (kind, list) = (transport["type"].as_str().unwrap_or_default().to_string(), if transport["endpoints"].is_array() {"endpoints"} else {"candidates"});
+		// A forwarder in front of the borrowed-site handshake would sit between the app and the node's answer, which is made to look like the site's own.
+		if kind == "faketls" {continue}
 		let Some(own) = transport[list].as_array().filter(|own| !own.is_empty()).cloned() else {continue};
 		let address_of = |entry: &Value| entry.as_str().or_else(|| entry["address"].as_str()).map(str::to_string);
 		let first_port = address_of(&own[0]).and_then(|address| address.rsplit_once(':')?.1.parse::<u16>().ok());
@@ -238,7 +266,7 @@ pub fn carry(profile: &mut Value, tag: &str, reaching: &[(u8, &Relay)]) -> Vec<V
 fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>) -> Vec<Value> {
 	let inbounds = document.get("inbounds").and_then(Value::as_array).cloned().unwrap_or_default();
 	let reached = reaching(relays, user);
-	inbounds.iter().filter(|inbound| inbound["type"] == "veilway").map(|inbound| {
+	inbounds.iter().filter(|inbound| inbound["type"] == "veilway").flat_map(|inbound| {
 		let (tag, host) = (inbound["tag"].as_str().unwrap_or_default().to_string(), settings.node_host.as_str());
 		let transports: Vec<&Value> = inbound["transports"].as_array().map(|list| list.iter().collect()).unwrap_or_default();
 		let obfs = transports.iter().any(|transport| transport["type"] == "udp-obfs");
@@ -255,14 +283,15 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 		let mut profile = json!({"id": tag.to_lowercase(), "name": tag, "type": "veilway", "gateways": gateways, "mtu": inbound["mtu"].as_u64().unwrap_or(if obfs {1390} else {1420}), "transports": listed});
 		// The Xray inbounds answer on this server's address like the profiles do, so no profile may claim more than Detectable. An override can lower it further and not raise it.
 		if document["xray"]["inbounds"].as_array().is_some_and(|list| !list.is_empty()) {profile["rating_cap"] = json!("detectable");}
-		if let Some(edits) = settings.profile_overrides.get(&tag).and_then(Value::as_object) {for (key, value) in edits {profile[key] = value.clone();}}
+		if let Some(edits) = settings.profile_overrides.get(&tag).and_then(Value::as_object) {for (key, value) in edits.iter().filter(|(key, _)| *key != crate::borrowed::ADDRESSES) {profile[key] = value.clone();}}
 		// Relays come after the overrides, so a transport an override wrote gets them too.
 		let trimmed = carry(&mut profile, &tag, &reached);
 		let mut missing = Vec::new();
 		if profile.get("inbound_public_key").is_none() {missing.push("inbound_public_key")}
 		if host.is_empty() {missing.push("node_host")}
 		if profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport["type"] == "tls" || transport["type"] == "ws" || transport["type"] == "fronted-shaped")) && profile.get("transport_public_key").is_none() {missing.push("transport_public_key")}
-		json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed})
+		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed});
+		std::iter::once(own).chain(crate::borrowed::template(settings, document, inbound, &gateways)).collect::<Vec<_>>()
 	}).collect()
 }
 
@@ -306,6 +335,7 @@ pub struct OverrideIn {
 
 pub async fn put_override(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(inbound): Path<String>, Body(input): Body<OverrideIn>) -> Result<Response, Failure> {
 	if inbound.is_empty() || inbound.len() > 64 || input.set.contains_key("device") || input.set.contains_key("id") || input.set.len() > 32 {return Err(Failure::bad("An override has at most 32 members and none of them is `id` or `device`."))}
+	if input.set.get(crate::borrowed::ADDRESSES).is_some_and(|list| !list.as_array().is_some_and(|list| list.len() < CANDIDATES_MAX && list.iter().all(|text| text.as_str().is_some_and(|text| text.parse::<SocketAddr>().map(|found| found.ip()).or_else(|_| text.parse::<IpAddr>()).is_ok_and(dialable))))) {return Err(Failure::bad(format!("{} is at most {} IP addresses that apps may dial, each with a port or without one.", crate::borrowed::ADDRESSES, CANDIDATES_MAX - 1)))}
 	let (tag, set) = (inbound.clone(), input.set);
 	app.update_settings(move |settings| if set.is_empty() {settings.profile_overrides.remove(&tag);} else {settings.profile_overrides.insert(tag, Value::Object(set));}).await.map_err(Failure::internal)?;
 	app.db.audit(&ctx.actor, &ctx.source, "profile.override", &inbound, "").await;
@@ -317,11 +347,14 @@ pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Exten
 	let (_, _, document) = running(&app).await?;
 	let current = app.settings();
 	let templates = derive(&current, &document, &[], None);
-	if let Some(bad) = templates.iter().find(|template| !template["missing"].as_array().is_some_and(Vec::is_empty)) {return Err(Failure::bad(format!("The profile of inbound {} still needs: {}.", bad["inbound"].as_str().unwrap_or_default(), bad["missing"])))}
-	let ids: Vec<Value> = templates.iter().map(|template| template["profile"]["id"].clone()).collect();
-	let fresh: Vec<Value> = templates.iter().map(|template| template["profile"].clone()).collect();
+	// A borrowed-site profile whose transports were all refused is not published, and what it said before is taken down. Its refusals are shown on the node page and block nothing else.
+	let empty = |template: &Value| template["kind"] == "faketls" && template["profile"]["transports"].as_array().is_none_or(Vec::is_empty);
+	if let Some(bad) = templates.iter().filter(|template| !empty(template)).find(|template| !template["missing"].as_array().is_some_and(Vec::is_empty)) {return Err(Failure::bad(format!("The profile of inbound {} still needs: {}.", bad["inbound"].as_str().unwrap_or_default(), bad["missing"])))}
+	// A profile written by hand under the id of a borrowed-site profile is refused by the template, and stays.
+	let ids: Vec<Value> = templates.iter().filter(|template| !template["refused"].as_array().into_iter().flatten().any(|refusal| refusal["code"] == "profile_id")).map(|template| template["profile"]["id"].clone()).collect();
+	let fresh: Vec<Value> = templates.iter().filter(|template| !empty(template)).map(|template| template["profile"].clone()).collect();
 	// Profiles are published without relays: each document adds the published relays that reach its account.
-	let carrying: BTreeMap<String, String> = templates.iter().map(|template| (template["profile"]["id"].as_str().unwrap_or_default().to_string(), template["inbound"].as_str().unwrap_or_default().to_string())).collect();
+	let carrying: BTreeMap<String, String> = templates.iter().filter(|template| !empty(template)).map(|template| (template["profile"]["id"].as_str().unwrap_or_default().to_string(), template["inbound"].as_str().unwrap_or_default().to_string())).collect();
 	let relays = current.relays.clone();
 	app.update_settings(move |settings| {
 		settings.profiles.retain(|profile| !ids.contains(&profile["id"]));

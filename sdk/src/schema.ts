@@ -2010,6 +2010,15 @@ export interface components {
              */
             endpoints: components["schemas"]["Endpoint"][];
             /**
+             * @description The public half of the key of each `faketls` transport, by inbound tag and listen address. The node shows a key only as a marker once it holds it, so the panel makes the public half when the key is applied in full. Owned by the server: read-only in the API, and a settings update keeps the stored value whatever it carries.
+             * @default {}
+             */
+            readonly faketls_keys: {
+                [key: string]: {
+                    [key: string]: string;
+                };
+            };
+            /**
              * Format: uint32
              * @description Days a retired gateway key keeps opening requests after a routine switch, 30 to 365.
              * @default 120

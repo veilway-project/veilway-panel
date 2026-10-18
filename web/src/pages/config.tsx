@@ -8,21 +8,22 @@ import {XrayForm, XraySheet} from "./xray.tsx";
 
 type Section = "inbounds" | "outbounds" | "exits" | "routing";
 type Item = Record<string, unknown>;
-type Row = {type: string, listen: string, path: string, at: number, cert: "self" | "files", name: string, certFile: string, keyFile: string, origin: string, proxyProtocol: boolean, http2: boolean, proxies: string[], header: string, preset: string, shape: Item, limits: Record<string, number | "">};
+type Row = {type: string, listen: string, path: string, at: number, cert: "self" | "files", name: string, certFile: string, keyFile: string, origin: string, proxyProtocol: boolean, http2: boolean, proxies: string[], header: string, preset: string, shape: Item, limits: Record<string, number | "">, siteHost: string, siteNames: string[], sitePort: number | "", siteAddress: string, acknowledged: boolean, siteKey: string};
+type BorrowedErrors = Partial<Record<"listen" | "host" | "names" | "port" | "address" | "ack" | "key", PanelKey>>;
 type StreamErrors = Partial<Record<"path" | "origin" | "certFile" | "keyFile" | "name" | "proxies" | "header", PanelKey>>;
 type Cond = {key: string, values: string};
 type Listed = {kind: "veilway" | "wireguard" | "xray", tag: string, index: number, item?: Item, xray?: XrayRow};
 type XrayRow = {tag: string, protocol: string, listen: string, port: number, security: string, clients: number, host: string, managed: boolean, certificate_missing: boolean};
 const TABS = ["exits", "routing", "outbounds"] as const;
-const TRANSPORTS = ["udp", "udp-obfs", "tls", "ws", "fronted", "fronted-shaped"];
+const TRANSPORTS = ["udp", "udp-obfs", "tls", "ws", "fronted", "fronted-shaped", "faketls"];
 const PATHED = ["tls", "ws", "fronted", "fronted-shaped"];
 const CONDITIONS = ["user", "group", "inbound", "link", "ip", "domain", "protocol", "port", "icmp_type", "icmp_code"];
 const NUMERIC = ["protocol", "port", "icmp_type", "icmp_code"];
 const TAG = /^[a-z0-9][a-z0-9_-]{0,63}$/, RESERVED = ["all", "any", "block", "reject", "drop", "local", "direct", "user", "users"], KEY = /^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/;
 // Loopback, private and link-local hosts, the ones the node's validator does not warn about. A host may come with brackets or a prefix length.
 // Each pool of a listener with its bounds, default and unit from the schema, and the pools each transport has: udp-obfs only sessions, tls no pools of the proxy path.
-const LIMITS: Record<string, [number, number, number, "sessions" | "connections" | "requests"]> = {sessions: [1, 1048576, 16384, "sessions"], undecided: [1, 65536, 512, "connections"], undecided_per_source: [1, 65536, 64, "connections"], relayed: [1, 65536, 1024, "connections"], proxy_connections: [2, 65536, 2048, "connections"], decoy_requests_per_source: [1, 65536, 16, "requests"], fronted_sessions: [1, 65536, 1024, "sessions"], shaped_sessions: [1, 65536, 256, "sessions"]};
-const POOLS: Record<string, string[]> = {"udp-obfs": ["sessions"], tls: ["sessions", "undecided", "undecided_per_source", "relayed"], ws: ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source"], fronted: ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source", "fronted_sessions"], "fronted-shaped": ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source", "fronted_sessions", "shaped_sessions"]};
+const LIMITS: Record<string, [number, number, number, "sessions" | "connections" | "requests"]> = {sessions: [1, 1048576, 16384, "sessions"], undecided: [1, 65536, 512, "connections"], undecided_per_source: [1, 65536, 64, "connections"], relayed: [1, 65536, 1024, "connections"], proxy_connections: [2, 65536, 2048, "connections"], decoy_requests_per_source: [1, 65536, 16, "requests"], fronted_sessions: [1, 65536, 1024, "sessions"], shaped_sessions: [1, 65536, 256, "sessions"], site_rate: [1, 1024, 16, "connections"]};
+const POOLS: Record<string, string[]> = {"udp-obfs": ["sessions"], tls: ["sessions", "undecided", "undecided_per_source", "relayed"], ws: ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source"], fronted: ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source", "fronted_sessions"], "fronted-shaped": ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source", "fronted_sessions", "shaped_sessions"], faketls: ["relayed", "site_rate"]};
 const REFUSED_HEADERS = ["upgrade", "connection", "sec-websocket-accept", "set-cookie", "content-length", "transfer-encoding", "content-type", "content-encoding", "trailer", "keep-alive"];
 // The presets of a fronted-shaped transport as method, place of the data and downstream mode, and the bounds of up.limit by place with the node's default.
 const SHAPE_PRESETS: Record<string, [string, string, string]> = {"post-stream": ["POST", "body", "sse"], "get-stream": ["GET", "query", "sse"], "put-poll": ["PUT", "body", "poll"], "get-poll": ["GET", "query", "poll"]};
@@ -202,7 +203,7 @@ function Review({section, running, value, moves, show, onClose, onDone}: {sectio
 
 const ceiling = (row: Row, key: string) => key === "undecided_per_source" ? Math.min(Number(row.limits.undecided) || 512, 65536) : LIMITS[key]![1];
 const outside = (row: Row, key: string) => typeof row.limits[key] === "number" && ((row.limits[key] as number) < LIMITS[key]![0] || (row.limits[key] as number) > ceiling(row, key));
-const toRow = (tr: Item, at: number): Row => { const tls = (tr.tls ?? {}) as Item, shape = (tr.shape ?? {}) as Item, up = (shape.up ?? {}) as Item, down = (shape.down ?? {}) as Item; return {limits: {...((tr.limits ?? {}) as Record<string, number>)}, proxyProtocol: ((tr.decoy ?? {}) as Item).proxy_protocol === true, http2: tr.http2 === "on", type: str(tr.type), listen: str(tr.listen), path: str(tr.path), at, cert: tls.cert !== undefined ? "files" : "self", name: str(tls.name), certFile: str(tls.cert), keyFile: str(tls.key), origin: str(((tr.decoy ?? {}) as Item).origin), proxies: Array.isArray(tr.trusted_proxies) && tr.trusted_proxies.length ? tr.trusted_proxies as string[] : [""], header: str(tr.client_address_header), preset: Object.keys(SHAPE_PRESETS).find(name => SHAPE_PRESETS[name]!.join(" ") === [str(up.method), str(up.in), str(down.mode)].join(" ")) ?? "custom", shape}; };
+const toRow = (tr: Item, at: number): Row => { const tls = (tr.tls ?? {}) as Item, site = (tr.site ?? {}) as Item, shape = (tr.shape ?? {}) as Item, up = (shape.up ?? {}) as Item, down = (shape.down ?? {}) as Item; return {limits: {...((tr.limits ?? {}) as Record<string, number>)}, proxyProtocol: ((tr.decoy ?? {}) as Item).proxy_protocol === true, http2: tr.http2 === "on", type: str(tr.type), listen: str(tr.listen), path: str(tr.path), at, cert: tls.cert !== undefined ? "files" : "self", name: str(tls.name), certFile: str(tls.cert), keyFile: str(tls.key), origin: str(((tr.decoy ?? {}) as Item).origin), proxies: Array.isArray(tr.trusted_proxies) && tr.trusted_proxies.length ? tr.trusted_proxies as string[] : [""], header: str(tr.client_address_header), preset: Object.keys(SHAPE_PRESETS).find(name => SHAPE_PRESETS[name]!.join(" ") === [str(up.method), str(up.in), str(down.mode)].join(" ")) ?? "custom", shape, siteHost: str(site.host), siteNames: Array.isArray(site.names) ? site.names.map(str) : [], sitePort: typeof site.port === "number" ? site.port : "", siteAddress: str(site.address), acknowledged: site.acknowledged === true, siteKey: str(tr.transport_key)}; };
 
 // The free members of a preset are drawn near their defaults: the spec's full ranges would allow a 250 ms gather or an hour-long stream.
 const between = (low: number, high: number) => low + Math.floor(Math.random() * (high - low + 1));
@@ -258,6 +259,25 @@ function streamProblems(row: Row, rows: Row[]) {
 	return {errors, warnings, shape: row.type === "fronted-shaped" ? shapeProblems(row) : []};
 }
 
+// The node's rules for a faketls transport, as messages for its fields. The site is a third party, so its names are held to the node's own rule for a DNS name, and the form asks for the acknowledgment the node refuses to run without.
+const dnsName = (name: string) => name.length <= 253 && /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/.test(name) && !/^(\d+|0x[0-9a-f]*)$/.test(name.split(".").pop()!);
+const wild = (host: string) => /^\[?(0\.0\.0\.0|::)\]?$/.test(host);
+const hostPort = (address: string) => ({host: address.slice(0, address.lastIndexOf(":")), port: address.slice(address.lastIndexOf(":") + 1)});
+function borrowedProblems(row: Row, rows: Row[], held: string[]) {
+	const errors: BorrowedErrors = {}, names = row.siteNames.map(name => name.trim()).filter(Boolean), address = row.siteAddress.trim(), here = hostPort(row.listen.trim()), there = hostPort(address), key = row.siteKey.trim();
+	const sharing = rows.find(other => other !== row && other.type !== "udp" && other.type !== "udp-obfs" && hostPort(other.listen.trim()).port === here.port && (hostPort(other.listen.trim()).host === here.host || wild(hostPort(other.listen.trim()).host) || wild(here.host)));
+	if (sharing) errors.listen = "borrowed.err.listen";
+	if (!dnsName(row.siteHost.trim())) errors.host = "borrowed.err.host";
+	if (names.length > 4 || names.some((name, i) => !dnsName(name) || name === row.siteHost.trim() || names.indexOf(name) !== i)) errors.names = "borrowed.err.names";
+	if (row.sitePort !== "" && !(Number.isInteger(row.sitePort) && row.sitePort >= 1 && row.sitePort <= 65535)) errors.port = "borrowed.err.port";
+	if (address && !(/^(\d{1,3}(\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+\]):[1-9]\d{0,4}$/.test(address) && Number(there.port) <= 65535)) errors.address = "borrowed.err.address";
+	else if (address && rows.some(other => other.type !== "udp" && other.type !== "udp-obfs" && hostPort(other.listen.trim()).port === there.port && (hostPort(other.listen.trim()).host === there.host || (wild(hostPort(other.listen.trim()).host) && (loopback(there.host) || wild(there.host))) || (wild(there.host) && loopback(hostPort(other.listen.trim()).host))))) errors.address = "borrowed.err.loop";
+	if (!row.acknowledged) errors.ack = "borrowed.err.ack";
+	if (!(KEY.test(key) || key.startsWith("<redacted"))) errors.key = "borrowed.err.key";
+	else if (held.includes(key)) errors.key = "borrowed.err.keyShared";
+	return errors;
+}
+
 // Two whole numbers, low first. Each end has its own field, and a range with both ends empty is left out so the node keeps its default.
 function RangeField({label, hint, unit, min, max, defaults, value, onChange}: {label: string, hint: string, unit: string, min: number, max: number, defaults: [number, number], value: unknown, onChange: (value: unknown) => void}) {
 	const {t} = useP(), [low = "", high = ""] = Array.isArray(value) ? value : [], set = (next: unknown[]) => onChange(next.every(item => item === "") ? undefined : next);
@@ -301,12 +321,18 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 	const idleWrong = (key: "tcp_idle_secs" | "udp_idle_secs") => typeof back[key] === "number" && !(key === "tcp_idle_secs" ? (back[key] as number) >= 10 && (back[key] as number) <= 86400 : (back[key] as number) >= 5 && (back[key] as number) <= 3600);
 	const setPolicy = (key: string, value: string, via = "") => { const next = {...un}; if (value === "via") next[key] = {via: via || targets(key)[0] || ""}; else if (value === (key === "icmp_echo" ? "local" : "reject")) delete next[key]; else next[key] = value; setBackend("unsupported", Object.keys(next).length ? next : undefined); };
 	const keys = Array.isArray(draft.transport_keys) ? draft.transport_keys as string[] : [], keyWrong = proved && !(KEY.test(keys[0] ?? "") || (keys[0] ?? "").startsWith("<redacted")), cookieWrong = upgraded && !/^[A-Za-z0-9_-]{1,32}$/.test(str(draft.upgrade_cookie));
+	const borrowed = rows.map((row, i) => veilway && row.type === "faketls" ? borrowedProblems(row, rows, [...keys, ...rows.filter((other, j) => j !== i && other.type === "faketls").map(other => other.siteKey.trim())].filter(Boolean)) : null), borrowedWrong = borrowed.some(problem => problem && Object.keys(problem).length > 0);
 	// The form writes the keys it shows and keeps every other key of the item and of each transport as it was.
 	const build = (): Item => section === "exits" ? back.type === "chain" ? {...draft, backend: {...back, links: lines(form.links)}} : draft : section === "outbounds" ? draft : {...Object.fromEntries(Object.entries(draft).filter(([key]) => key !== "upgrade_headers")), ...(headers.length ? {upgrade_headers: headers} : {}), address: lines(form.addresses), transports: rows.map(row => {
 		const was = list(draft.transports)[row.at], made: Item = {...(was?.type === row.type ? was : {}), type: row.type, listen: row.listen.trim()}, proxies = row.proxies.map(proxy => proxy.trim()).filter(Boolean);
 		const limits = Object.fromEntries(Object.entries(row.limits).filter(([key, value]) => value !== "" && (POOLS[row.type] ?? []).includes(key)));
 		if (row.path.trim()) made.path = row.path.trim(); else delete made.path;
 		if (Object.keys(limits).length && veilway) made.limits = limits; else delete made.limits;
+		if (row.type === "faketls" && veilway) {
+			for (const key of ["decoy", "tls", "trusted_proxies", "client_address_header", "shape", "http2"]) delete made[key];
+			const names = row.siteNames.map(name => name.trim()).filter(Boolean);
+			return {...made, site: {host: row.siteHost.trim(), ...(names.length ? {names} : {}), ...(row.sitePort !== "" ? {port: row.sitePort} : {}), ...(row.siteAddress.trim() ? {address: row.siteAddress.trim()} : {}), acknowledged: row.acknowledged}, transport_key: row.siteKey.trim()};
+		}
 		if (!veilway || !PATHED.includes(row.type)) return made;
 		made.decoy = {...Object.fromEntries(Object.entries((made.decoy ?? {}) as Item).filter(([key]) => key !== "proxy_protocol")), origin: row.origin.trim(), ...(row.proxyProtocol ? {proxy_protocol: true} : {})};
 		if (row.type === "tls") {if (row.http2) made.http2 = "on"; else delete made.http2}
@@ -317,7 +343,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 	const save = () => {
 		setTried(true);
 		if (json !== null && issues.length && issues[0]!.path === "json") return;
-		if (problems.some(problem => problem && (Object.keys(problem.errors).length || problem.shape.length)) || keyWrong || cookieWrong || headersWrong || paddingWrong("normal") || paddingWrong("wide") || rows.some(row => (POOLS[row.type] ?? []).some(key => outside(row, key))) || around || idleWrong("tcp_idle_secs") || idleWrong("udp_idle_secs") || (back.type === "netstack" && ["icmp_echo", "udp", "other"].some(key => policy(key) === "via" && !targets(key).includes(viaOf(key))))) return;
+		if (problems.some(problem => problem && (Object.keys(problem.errors).length || problem.shape.length)) || borrowedWrong || keyWrong || cookieWrong || headersWrong || paddingWrong("normal") || paddingWrong("wide") || rows.some(row => (POOLS[row.type] ?? []).some(key => outside(row, key))) || around || idleWrong("tcp_idle_secs") || idleWrong("udp_idle_secs") || (back.type === "netstack" && ["icmp_echo", "udp", "other"].some(key => policy(key) === "via" && !targets(key).includes(viaOf(key))))) return;
 		const made = build(), found = schema && typeof schema === "object" ? say(check(((schema.properties as Record<string, Item>)[section]?.items ?? true) as Schema, made, schema, section)) : [];
 		setIssues(clash ? [{path: "tag", text: t("config.tagTaken")}, ...found] : found);
 		if (!clash && !found.length) onSave(made, section === "inbounds" ? moved(rows.map(row => row.at)).map(move => t("review.moveTransport", {name: rows[move.to]!.type + " " + (rows[move.to]!.path || rows[move.to]!.listen), inbound: tag, from: number(move.from + 1), to: number(move.to + 1)})) : []);
@@ -338,11 +364,33 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 					<p className="vw-muted vw-small">{t("inbounds.transportHint")}</p>
 					{rows.map((row, i) => {
 						// A name only goes with the header place, and the downstream members only with event streams, so the shape keeps only what the node reads.
-						const problem = problems[i], up = (change: Partial<Row>) => setRows(rows.map((r, j) => j === i ? {...r, ...change} : r)), shown = (field: keyof StreamErrors, value: string) => problem?.errors[field] && (tried || value.trim()) ? t(problem.errors[field]!) : undefined, member = (part: "up" | "down", key: string, value: unknown) => { const sides = {up: {...(row.shape.up as Item)}, down: {...(row.shape.down as Item)}}; if (value === undefined || value === "") delete sides[part][key]; else sides[part][key] = value; if (sides.up.in !== "header") delete sides.up.name; if (sides.down.mode !== "sse") {delete sides.up.inflight; delete sides.down.gather; delete sides.down.life; delete sides.down.fallback;} up({shape: sides}); }, shapeUp = (row.shape.up ?? {}) as Item, shapeDown = (row.shape.down ?? {}) as Item;
+						const problem = problems[i], bproblem = borrowed[i], shownBorrowed = (field: keyof BorrowedErrors, value: string) => bproblem?.[field] && (tried || value.trim()) ? t(bproblem[field]!) : undefined, up = (change: Partial<Row>) => setRows(rows.map((r, j) => j === i ? {...r, ...change} : r)), shown = (field: keyof StreamErrors, value: string) => problem?.errors[field] && (tried || value.trim()) ? t(problem.errors[field]!) : undefined, member = (part: "up" | "down", key: string, value: unknown) => { const sides = {up: {...(row.shape.up as Item)}, down: {...(row.shape.down as Item)}}; if (value === undefined || value === "") delete sides[part][key]; else sides[part][key] = value; if (sides.up.in !== "header") delete sides.up.name; if (sides.down.mode !== "sse") {delete sides.up.inflight; delete sides.down.gather; delete sides.down.life; delete sides.down.fallback;} up({shape: sides}); }, shapeUp = (row.shape.up ?? {}) as Item, shapeDown = (row.shape.down ?? {}) as Item;
 						return <div key={i} className="p-transport-row" data-order-row>
 							{rows.length > 1 && <div className="p-row-tools">{reorder.handle(i)}<div className="p-cluster">{reorder.steps(i)}<IconButton icon="close" label={t("config.removeTransport", {number: i + 1})} onClick={() => setRows(rows.filter((_, j) => j !== i))}/></div></div>}
-							<SelectField label={t("config.transport", {number: i + 1})} value={row.type} onChange={type => up(type === "fronted-shaped" && type !== row.type ? {type, ...drawPreset("post-stream")} : {type})} options={(kind === "wireguard" ? ["udp", "ws"] : TRANSPORTS).map(type => ({value: type, label: type, detail: t(`config.transport.${type}` as PanelKey)}))}/>
+							<SelectField label={t("config.transport", {number: i + 1})} value={row.type} onChange={type => up(type === "fronted-shaped" && type !== row.type ? {type, ...drawPreset("post-stream")} : {type})} options={(kind === "wireguard" ? ["udp", "ws"] : TRANSPORTS).map(type => ({value: type, label: type === "faketls" ? t("borrowed.name") : type, detail: t(`config.transport.${type}` as PanelKey)}))}/>
 							<TextField label={t("config.listen")} placeholder={problem && row.type !== "tls" ? "127.0.0.1:8081" : "0.0.0.0:443"} value={row.listen} onChange={listen => up({listen})} technical/>
+							{row.type === "faketls" && veilway && <div className="p-stream">
+								<Banner tone="warning" title={t("borrowed.title")}>{t("borrowed.warning")}</Banner>
+								{bproblem?.listen && <Mark tone="danger">{t(bproblem.listen)}</Mark>}
+								<TextField label={t("borrowed.host")} hint={t("borrowed.hostHint")} placeholder="www.example.com" value={row.siteHost} onChange={siteHost => up({siteHost: siteHost.toLowerCase().trim()})} error={shownBorrowed("host", row.siteHost)} technical/>
+								<fieldset className="p-proxies">
+									<legend className="vw-label">{t("borrowed.names")}</legend>
+									<p className="vw-muted vw-small">{t("borrowed.namesHint")}</p>
+									{row.siteNames.map((name, k) => <div key={k} className="p-proxy"><TextField label={t("borrowed.nameN", {number: k + 1})} placeholder="example.com" value={name} onChange={value => up({siteNames: row.siteNames.map((n, m) => m === k ? value.toLowerCase().trim() : n)})} technical/><IconButton icon="close" label={t("borrowed.removeName", {number: k + 1})} onClick={() => up({siteNames: row.siteNames.filter((_, m) => m !== k)})}/></div>)}
+									{bproblem?.names && (tried || row.siteNames.some(name => name.trim())) && <Mark tone="danger">{t(bproblem.names)}</Mark>}
+									{row.siteNames.length < 4 && <div><Button size="sm" icon="plus" onClick={() => up({siteNames: [...row.siteNames, ""]})}>{t("borrowed.addName")}</Button></div>}
+								</fieldset>
+								<div className="p-pair">
+									<NumberField label={t("borrowed.port")} hint={t("borrowed.portHint")} unit="TCP" min={1} max={65535} placeholder="443" value={row.sitePort} onChange={sitePort => up({sitePort})} error={bproblem?.port ? t(bproblem.port) : undefined} optional/>
+									<TextField label={t("borrowed.address")} hint={t("borrowed.addressHint")} placeholder="192.0.2.10:443" value={row.siteAddress} onChange={siteAddress => up({siteAddress: siteAddress.trim()})} error={shownBorrowed("address", row.siteAddress)} technical optional/>
+								</div>
+								<div className="p-proxy">
+									<SecretField label={t("borrowed.key")} hint={t(row.siteKey.startsWith("<redacted") ? "borrowed.keyKeep" : "borrowed.keyNew")} value={row.siteKey} onChange={value => up({siteKey: value.trim()})} error={shownBorrowed("key", row.siteKey)} autoComplete="off"/>
+									<Button onClick={() => up({siteKey: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))})}>{t("borrowed.keyPick")}</Button>
+								</div>
+								<Checkbox label={t("borrowed.acknowledge")} checked={row.acknowledged} onChange={acknowledged => up({acknowledged})}/>
+								{bproblem?.ack && tried && <Mark tone="danger">{t(bproblem.ack)}</Mark>}
+							</div>}
 							{PATHED.includes(row.type) && !problem && <TextField label={t("config.path")} placeholder="/a-long-random-path" value={row.path} onChange={path => up({path})} technical/>}
 							{problem && <div className="p-stream">
 								<TextField label={t("config.path")} hint={t("stream.pathHint")} placeholder="/a-long-random-path" value={row.path} onChange={path => up({path})} error={shown("path", row.path)} technical/>
@@ -392,7 +440,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 							{veilway && POOLS[row.type] && <details className="p-details p-wide" open={(POOLS[row.type] ?? []).some(key => outside(row, key)) || undefined}>
 								<summary>{t("config.advancedLimits")}</summary>
 								<p className="vw-muted vw-small">{t("limit.lead")}</p>
-								<div className="p-pair">{POOLS[row.type]!.map(key => <NumberField key={key} label={t(`limit.${key}` as PanelKey)} unit={t(`unit.${LIMITS[key]![3]}`)} min={LIMITS[key]![0]} max={ceiling(row, key)} placeholder={String(key === "proxy_connections" ? 2 * (Number(row.limits.fronted_sessions) || 1024) : key === "undecided_per_source" ? Math.min(64, ceiling(row, key)) : LIMITS[key]![2])} value={row.limits[key] ?? ""} onChange={value => up({limits: {...row.limits, [key]: value}})} error={outside(row, key) ? t("limit.range", {min: number(LIMITS[key]![0]), max: number(ceiling(row, key))}) : undefined} optional/>)}</div>
+								<div className="p-pair">{POOLS[row.type]!.map(key => <NumberField key={key} label={t((row.type === "faketls" && key === "relayed" ? "limit.relayedSite" : `limit.${key}`) as PanelKey)} unit={t(`unit.${LIMITS[key]![3]}`)} min={LIMITS[key]![0]} max={ceiling(row, key)} placeholder={String(key === "proxy_connections" ? 2 * (Number(row.limits.fronted_sessions) || 1024) : row.type === "faketls" && key === "relayed" ? 256 : key === "undecided_per_source" ? Math.min(64, ceiling(row, key)) : LIMITS[key]![2])} value={row.limits[key] ?? ""} onChange={value => up({limits: {...row.limits, [key]: value}})} error={outside(row, key) ? t("limit.range", {min: number(LIMITS[key]![0]), max: number(ceiling(row, key))}) : undefined} optional/>)}</div>
 							</details>}
 						</div>;
 					})}
