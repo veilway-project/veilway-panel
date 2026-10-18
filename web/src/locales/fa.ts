@@ -954,6 +954,8 @@ export const fa: Record<PanelKey, string> = {
 	"disguise.headersHint": "هر سطر یکی، به همین ترتیب. پاسخی که نشست را باز می‌کند این‌ها را از وب‌سایت شما رونوشت می‌کند تا شبیه پاسخ خود سایت باشد. خالی یعنی Server و Date برای tls و هیچ برای ws.",
 	"stream.proxyProtocol": "فرستادن سرآیند PROXY protocol به پوشش",
 	"stream.proxyProtocolHint": "فقط وقتی روشن کنید که وب‌سایت شما روی آن درگاه PROXY protocol نسخهٔ ۲ می‌خواهد.",
+	"stream.http2": "پیشنهاد HTTP/2",
+	"stream.http2Hint": "خاموش، گره مثل وب‌سایت پوشش فقط HTTP/1.1 دارد. روشن، کسی که گره را می‌سنجد HTTP/2 می‌بیند، در حالی که شاید وب‌سایت پوشش آن را نداشته باشد.",
 	"stream.err.headersMany": "حداکثر ۱۶ سرآیند بیاورید.",
 	"stream.err.headerRefused": "نود این سرآیند را خودش می‌نویسد یا خواندن پاسخ را تغییر می‌دهد: Upgrade، Connection، Sec-WebSocket-Accept، Set-Cookie، Content-Length، Transfer-Encoding، Content-Type، Content-Encoding، Trailer و Keep-Alive مجاز نیستند.",
 	"exit.unsupported": "ترافیکی که اتصال بیرونی نمی‌برد",

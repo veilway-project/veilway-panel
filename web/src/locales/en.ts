@@ -953,6 +953,8 @@ export const en = {
 	"disguise.headersHint": "One per line, in this order. The answer that opens a session copies these from your web site, so it looks like the site's own. Empty means Server and Date for tls and none for ws.",
 	"stream.proxyProtocol": "Send the PROXY protocol header to the decoy",
 	"stream.proxyProtocolHint": "Turn on only if your web site expects PROXY protocol version 2 on that port.",
+	"stream.http2": "Offer HTTP/2",
+	"stream.http2Hint": "Off keeps the node on HTTP/1.1, like the decoy site. On lets a prober see HTTP/2 from the node, which the decoy may not offer.",
 	"stream.err.headersMany": "List at most 16 header fields.",
 	"stream.err.headerRefused": "The node writes this field itself or it changes how the answer is read: not Upgrade, Connection, Sec-WebSocket-Accept, Set-Cookie, Content-Length, Transfer-Encoding, Content-Type, Content-Encoding, Trailer or Keep-Alive.",
 	"exit.unsupported": "Traffic the outbound cannot carry",

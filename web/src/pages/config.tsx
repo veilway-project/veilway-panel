@@ -8,7 +8,7 @@ import {XrayForm, XraySheet} from "./xray.tsx";
 
 type Section = "inbounds" | "outbounds" | "exits" | "routing";
 type Item = Record<string, unknown>;
-type Row = {type: string, listen: string, path: string, at: number, cert: "self" | "files", name: string, certFile: string, keyFile: string, origin: string, proxyProtocol: boolean, proxies: string[], header: string, preset: string, shape: Item, limits: Record<string, number | "">};
+type Row = {type: string, listen: string, path: string, at: number, cert: "self" | "files", name: string, certFile: string, keyFile: string, origin: string, proxyProtocol: boolean, http2: boolean, proxies: string[], header: string, preset: string, shape: Item, limits: Record<string, number | "">};
 type StreamErrors = Partial<Record<"path" | "origin" | "certFile" | "keyFile" | "name" | "proxies" | "header", PanelKey>>;
 type Cond = {key: string, values: string};
 type Listed = {kind: "veilway" | "wireguard" | "xray", tag: string, index: number, item?: Item, xray?: XrayRow};
@@ -202,7 +202,7 @@ function Review({section, running, value, moves, show, onClose, onDone}: {sectio
 
 const ceiling = (row: Row, key: string) => key === "undecided_per_source" ? Math.min(Number(row.limits.undecided) || 512, 65536) : LIMITS[key]![1];
 const outside = (row: Row, key: string) => typeof row.limits[key] === "number" && ((row.limits[key] as number) < LIMITS[key]![0] || (row.limits[key] as number) > ceiling(row, key));
-const toRow = (tr: Item, at: number): Row => { const tls = (tr.tls ?? {}) as Item, shape = (tr.shape ?? {}) as Item, up = (shape.up ?? {}) as Item, down = (shape.down ?? {}) as Item; return {limits: {...((tr.limits ?? {}) as Record<string, number>)}, proxyProtocol: ((tr.decoy ?? {}) as Item).proxy_protocol === true, type: str(tr.type), listen: str(tr.listen), path: str(tr.path), at, cert: tls.cert !== undefined ? "files" : "self", name: str(tls.name), certFile: str(tls.cert), keyFile: str(tls.key), origin: str(((tr.decoy ?? {}) as Item).origin), proxies: Array.isArray(tr.trusted_proxies) && tr.trusted_proxies.length ? tr.trusted_proxies as string[] : [""], header: str(tr.client_address_header), preset: Object.keys(SHAPE_PRESETS).find(name => SHAPE_PRESETS[name]!.join(" ") === [str(up.method), str(up.in), str(down.mode)].join(" ")) ?? "custom", shape}; };
+const toRow = (tr: Item, at: number): Row => { const tls = (tr.tls ?? {}) as Item, shape = (tr.shape ?? {}) as Item, up = (shape.up ?? {}) as Item, down = (shape.down ?? {}) as Item; return {limits: {...((tr.limits ?? {}) as Record<string, number>)}, proxyProtocol: ((tr.decoy ?? {}) as Item).proxy_protocol === true, http2: tr.http2 === "on", type: str(tr.type), listen: str(tr.listen), path: str(tr.path), at, cert: tls.cert !== undefined ? "files" : "self", name: str(tls.name), certFile: str(tls.cert), keyFile: str(tls.key), origin: str(((tr.decoy ?? {}) as Item).origin), proxies: Array.isArray(tr.trusted_proxies) && tr.trusted_proxies.length ? tr.trusted_proxies as string[] : [""], header: str(tr.client_address_header), preset: Object.keys(SHAPE_PRESETS).find(name => SHAPE_PRESETS[name]!.join(" ") === [str(up.method), str(up.in), str(down.mode)].join(" ")) ?? "custom", shape}; };
 
 // The free members of a preset are drawn near their defaults: the spec's full ranges would allow a 250 ms gather or an hour-long stream.
 const between = (low: number, high: number) => low + Math.floor(Math.random() * (high - low + 1));
@@ -309,6 +309,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 		if (Object.keys(limits).length && veilway) made.limits = limits; else delete made.limits;
 		if (!veilway || !PATHED.includes(row.type)) return made;
 		made.decoy = {...Object.fromEntries(Object.entries((made.decoy ?? {}) as Item).filter(([key]) => key !== "proxy_protocol")), origin: row.origin.trim(), ...(row.proxyProtocol ? {proxy_protocol: true} : {})};
+		if (row.type === "tls") {if (row.http2) made.http2 = "on"; else delete made.http2}
 		if (row.type === "tls") return {...made, tls: row.cert === "files" ? {cert: row.certFile.trim(), key: row.keyFile.trim()} : {self_signed: true, ...(row.name ? {name: row.name} : {})}};
 		if (row.header) made.client_address_header = row.header; else delete made.client_address_header;
 		return {...made, trusted_proxies: proxies, ...(row.type === "fronted-shaped" ? {shape: row.shape} : {})};
@@ -375,6 +376,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 								</>}
 								<TextField label={t("stream.origin")} hint={t("stream.originHint")} placeholder="http://127.0.0.1:8080" value={row.origin} onChange={origin => up({origin: origin.trim()})} error={shown("origin", row.origin)} technical/>
 								<Switch label={t("stream.proxyProtocol")} hint={t("stream.proxyProtocolHint")} checked={row.proxyProtocol} onChange={proxyProtocol => up({proxyProtocol})}/>
+								{row.type === "tls" && <Switch label={t("stream.http2")} hint={t("stream.http2Hint")} checked={row.http2} onChange={http2 => up({http2})}/>}
 								{row.type !== "tls" && <>
 									<fieldset className="p-proxies">
 										<legend className="vw-label">{t("stream.proxies")}</legend>
