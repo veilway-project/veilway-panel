@@ -3,7 +3,7 @@ import {useEffect, useState} from "react";
 import {api, type Relay, type Template} from "../api.ts";
 import {ErrorNote, Mark, useLoad, useP} from "../kit.tsx";
 
-const KINDS = ["udp", "udp-obfs", "tls", "ws", "fronted"] as const;
+const KINDS = ["udp", "udp-obfs", "tls", "ws", "fronted", "fronted-shaped"] as const;
 // A profile lists at most 16 candidates per transport and the node keeps one of its own.
 const MOST = 15;
 // A panel can hold thousands of accounts, so a search offers this many at most.
@@ -63,6 +63,7 @@ export function RelaysEditor({value, onChange}: {value: Relay[], onChange: (rela
 				<div className="p-relay-carry" role="group" aria-label={t("relays.transports")}>
 					<span className="vw-label">{t("relays.transports")}</span>
 					<div className="p-cluster">{KINDS.map(kind => <Checkbox key={kind} label={kind} checked={kinds.includes(kind)} disabled={kinds.length === 1 && kinds.includes(kind)} onChange={on => edit(i, {transports: pick([...KINDS], relay.transports, kind, on)})}/>)}</div>
+					<p className="vw-small vw-muted">{t("relays.noFaketls")}</p>
 					<div className="p-relay-ports">{KINDS.filter(kind => kinds.includes(kind)).map(kind => <NumberField key={kind} label={t("relays.port", {kind})} unit={kind.startsWith("udp") ? "UDP" : "TCP"} placeholder={t("relays.samePort")} min={1} max={65535} value={relay.ports[kind] ?? ""} onChange={port => { const ports = {...relay.ports}; if (port === "") delete ports[kind]; else ports[kind] = port; edit(i, {ports}); }}/>)}</div>
 				</div>
 				{tags.length > 1 && <div className="p-relay-carry" role="group" aria-label={t("relays.inbounds")}>
@@ -81,7 +82,7 @@ export function RelaysEditor({value, onChange}: {value: Relay[], onChange: (rela
 						{audience.length === 0 && <p className="vw-small vw-muted">{t("relays.whoEmpty")}</p>}
 					</>}
 				</div>
-				{kinds.some(kind => kind === "udp" || kind === "udp-obfs") && kinds.some(kind => kind === "tls" || kind === "ws" || kind === "fronted") && <p className="vw-small p-relay-warn">{t("relays.note.mixed")}</p>}
+				{kinds.some(kind => kind === "udp" || kind === "udp-obfs") && kinds.some(kind => kind === "tls" || kind === "ws" || kind === "fronted" || kind === "fronted-shaped") && <p className="vw-small p-relay-warn">{t("relays.note.mixed")}</p>}
 				<details className="p-details">
 					<summary>{t("relays.works")}</summary>
 					<ul className="p-relay-notes vw-small vw-muted">
@@ -89,6 +90,7 @@ export function RelaysEditor({value, onChange}: {value: Relay[], onChange: (rela
 						{kinds.includes("tls") && <li>{t("relays.note.tls")}</li>}
 						{kinds.includes("ws") && <li>{t("relays.note.ws")}</li>}
 						{kinds.includes("fronted") && <li>{t("relays.note.fronted")}</li>}
+						{kinds.includes("fronted-shaped") && <li>{t("relays.note.frontedShaped")}</li>}
 					</ul>
 				</details>
 				<Switch label={t("relays.enabled")} checked={relay.enabled} onChange={on => edit(i, {enabled: on})}/>

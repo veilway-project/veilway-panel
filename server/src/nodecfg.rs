@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::{collections::{BTreeMap, BTreeSet}, net::{IpAddr, SocketAddr}, sync::{Arc, RwLock}};
-use veilway_proto::subscription::payload::{dialable, CANDIDATES_MAX};
+use veilway_proto::subscription::{is_host, payload::{dialable, CANDIDATES_MAX}};
 
 /// `veilway schema` of the core, kept next to the manifest. The node's own validation stays the authority: this is for an editor.
 const SCHEMA: &str = include_str!("../config.schema.json");
@@ -19,7 +19,7 @@ const GUARDED: [&str; 5] = ["links", "tunnels", "log", "dns", "notices"];
 /// Sections the document may leave out, which a null removes.
 const OPTIONAL: [&str; 6] = ["dns", "log", "notices", "replay", "links", "tunnels"];
 /// The transports a relay can carry, by their type in a profile.
-const RELAYED: [&str; 5] = ["udp", "udp-obfs", "tls", "ws", "fronted"];
+const RELAYED: [&str; 6] = ["udp", "udp-obfs", "tls", "ws", "fronted", "fronted-shaped"];
 /// Every transport keeps at least one candidate of its own, so this many relays always fit in the payload's 16.
 pub const RELAYS_MAX: usize = CANDIDATES_MAX - 1;
 
@@ -34,7 +34,7 @@ pub struct Relay {
 	/// The tags of the `veilway` inbounds it carries. Empty for all of them.
 	#[serde(default)]
 	pub inbounds: Vec<String>,
-	/// The transport types it carries: udp, udp-obfs, tls, ws, fronted. Empty for all of them.
+	/// The transport types it carries: udp, udp-obfs, tls, ws, fronted, fronted-shaped. Empty for all of them.
 	#[serde(default)]
 	pub transports: Vec<String>,
 	/// The relay's port per transport type, where it is not the node's own port.
@@ -61,7 +61,7 @@ pub fn checked_relays<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<
 		let name = relay.name.trim();
 		if name.is_empty() || name != relay.name || name.chars().count() > 32 || relays[..index].iter().any(|other| other.name == relay.name) {return fail(format!("relay {}: the name is 1 to 32 characters, without spaces around it, and no other relay has it.", index + 1))}
 		if !relay.address.parse::<IpAddr>().is_ok_and(dialable) {return fail(format!("relay {name}: the address is an IP address that apps may dial, not a host name and not a loopback, link-local or multicast address."))}
-		if relay.transports.len() > RELAYED.len() || relay.transports.iter().enumerate().any(|(i, kind)| !RELAYED.contains(&kind.as_str()) || relay.transports[..i].contains(kind)) || relay.ports.iter().any(|(kind, port)| !RELAYED.contains(&kind.as_str()) || *port == 0) {return fail(format!("relay {name}: transports and ports name udp, udp-obfs, tls, ws or fronted once each, and a port is 1 to 65535."))}
+		if relay.transports.len() > RELAYED.len() || relay.transports.iter().enumerate().any(|(i, kind)| !RELAYED.contains(&kind.as_str()) || relay.transports[..i].contains(kind)) || relay.ports.iter().any(|(kind, port)| !RELAYED.contains(&kind.as_str()) || *port == 0) {return fail(format!("relay {name}: transports and ports name udp, udp-obfs, tls, ws, fronted or fronted-shaped once each, and a port is 1 to 65535."))}
 		if relay.inbounds.len() > 16 || relay.inbounds.iter().enumerate().any(|(i, tag)| tag.is_empty() || tag.len() > 64 || relay.inbounds[..i].contains(tag)) {return fail(format!("relay {name}: inbounds is at most 16 different tags of 1 to 64 characters."))}
 		if relay.groups.len() > 64 || relay.groups.iter().any(|group| !name_ok(group, true)) || relay.users.len() > 1000 {return fail(format!("relay {name}: groups is at most 64 group names and users at most 1000 account ids."))}
 	}
@@ -271,12 +271,20 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 		let transports: Vec<&Value> = inbound["transports"].as_array().map(|list| list.iter().collect()).unwrap_or_default();
 		let obfs = transports.iter().any(|transport| transport["type"] == "udp-obfs");
 		let gateways: Vec<Value> = inbound["address"].as_array().into_iter().flatten().filter_map(|address| address.as_str()?.split('/').next().map(|ip| json!(ip))).collect();
+		let mut refused: Vec<Value> = Vec::new();
 		let listed: Vec<Value> = transports.iter().filter_map(|transport| {
 			let endpoint = host_port(host, transport["listen"].as_str()?)?;
 			Some(match transport["type"].as_str()? {
 				kind @ ("udp" | "udp-obfs") => json!({"type": kind, "endpoints": [endpoint]}),
-				kind @ ("tls" | "ws") if transport.get("decoy").is_some() => json!({"type": kind, "path": transport["path"], "candidates": [{"address": endpoint, "sni": host, "host": host}]}),
-				kind @ "fronted-shaped" if transport.get("decoy").is_some() => json!({"type": kind, "path": transport["path"], "candidates": [{"address": endpoint, "sni": host, "host": host}], "shape": transport["shape"]}),
+				kind @ ("tls" | "ws" | "fronted-shaped") if transport.get("decoy").is_some() => {
+					let Some(name) = [transport["tls"]["name"].as_str(), transport["decoy"]["origin"].as_str().and_then(|origin| origin.split("://").last()?.split(['/', ':']).next()), Some(host)].into_iter().flatten().find(|name| is_host(name)) else {
+						refused.push(json!({"transport": transport["listen"], "code": "no_name", "reason": "apps need a host name to send and check: the certificate names none, the decoy's origin is not a host name, and the node's address is an IP address"}));
+						return None;
+					};
+					let mut stream = json!({"type": kind, "path": transport["path"], "candidates": [{"address": endpoint, "sni": name, "host": name}]});
+					if kind == "fronted-shaped" {stream["shape"] = transport["shape"].clone()}
+					stream
+				}
 				_ => return None,
 			})
 		}).collect();
@@ -290,7 +298,7 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 		if profile.get("inbound_public_key").is_none() {missing.push("inbound_public_key")}
 		if host.is_empty() {missing.push("node_host")}
 		if profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport["type"] == "tls" || transport["type"] == "ws" || transport["type"] == "fronted-shaped")) && profile.get("transport_public_key").is_none() {missing.push("transport_public_key")}
-		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed});
+		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed, "refused": refused});
 		std::iter::once(own).chain(crate::borrowed::template(settings, document, inbound, &gateways)).collect::<Vec<_>>()
 	}).collect()
 }
@@ -347,8 +355,8 @@ pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Exten
 	let (_, _, document) = running(&app).await?;
 	let current = app.settings();
 	let templates = derive(&current, &document, &[], None);
-	// A borrowed-site profile whose transports were all refused is not published, and what it said before is taken down. Its refusals are shown on the node page and block nothing else.
-	let empty = |template: &Value| template["kind"] == "faketls" && template["profile"]["transports"].as_array().is_none_or(Vec::is_empty);
+	// A profile whose transports were all refused is not published, and what it said before is taken down. Its refusals are shown on the Profiles page and block nothing else.
+	let empty = |template: &Value| template["profile"]["transports"].as_array().is_none_or(Vec::is_empty) && (template["kind"] == "faketls" || template["refused"].as_array().is_some_and(|list| !list.is_empty()));
 	if let Some(bad) = templates.iter().filter(|template| !empty(template)).find(|template| !template["missing"].as_array().is_some_and(Vec::is_empty)) {return Err(Failure::bad(format!("The profile of inbound {} still needs: {}.", bad["inbound"].as_str().unwrap_or_default(), bad["missing"])))}
 	// A profile written by hand under the id of a borrowed-site profile is refused by the template, and stays.
 	let ids: Vec<Value> = templates.iter().filter(|template| !template["refused"].as_array().into_iter().flatten().any(|refusal| refusal["code"] == "profile_id")).map(|template| template["profile"]["id"].clone()).collect();
@@ -370,7 +378,7 @@ pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Exten
 mod tests {
 	use super::*;
 
-	fn document() -> Value {json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "udp", "listen": "0.0.0.0:51820"}, {"type": "tls", "listen": "0.0.0.0:443", "decoy": "127.0.0.1:8443", "path": "/a-long-enough-path"}]}, {"tag": "Other", "type": "veilway", "address": ["10.67.0.1/24"], "transports": [{"type": "udp-obfs", "listen": "0.0.0.0:51821"}]}]})}
+	fn document() -> Value {json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "udp", "listen": "0.0.0.0:51820"}, {"type": "tls", "listen": "0.0.0.0:443", "tls": {"self_signed": true, "name": "node.example.org"}, "decoy": "127.0.0.1:8443", "path": "/a-long-enough-path"}]}, {"tag": "Other", "type": "veilway", "address": ["10.67.0.1/24"], "transports": [{"type": "udp-obfs", "listen": "0.0.0.0:51821"}]}]})}
 
 	fn relay(extra: Value) -> Relay {
 		let mut relay = json!({"name": "edge", "address": "198.51.100.7", "enabled": true});
@@ -396,7 +404,7 @@ mod tests {
 		assert_eq!(derived(vec![])[0][0]["endpoints"], json!(["192.0.2.10:51820"]));
 		let all = derived(vec![relay(json!({}))]);
 		assert_eq!((all[0][0]["endpoints"].clone(), all[1][0]["endpoints"].clone()), (json!(["192.0.2.10:51820", "198.51.100.7:51820"]), json!(["192.0.2.10:51821", "198.51.100.7:51821"])));
-		assert_eq!(all[0][1]["candidates"], json!([{"address": "192.0.2.10:443", "sni": "192.0.2.10", "host": "192.0.2.10"}, {"address": "198.51.100.7:443", "sni": "192.0.2.10", "host": "192.0.2.10"}]), "the name the app checks stays the node's");
+		assert_eq!(all[0][1]["candidates"], json!([{"address": "192.0.2.10:443", "sni": "node.example.org", "host": "node.example.org"}, {"address": "198.51.100.7:443", "sni": "node.example.org", "host": "node.example.org"}]), "the name the app checks stays the node's");
 		let matched = derived(vec![relay(json!({"inbounds": ["Main"], "transports": ["tls"], "ports": {"tls": 8443}}))]);
 		assert_eq!((matched[0][0]["endpoints"].as_array().unwrap().len(), matched[0][1]["candidates"][1]["address"].clone(), matched[1][0]["endpoints"].as_array().unwrap().len()), (1, json!("198.51.100.7:8443"), 1));
 		let off = derived(vec![relay(json!({"enabled": false})), relay(json!({"name": "none", "inbounds": ["Missing"]}))]);
@@ -454,10 +462,10 @@ mod tests {
 	#[test]
 	fn a_fronted_shaped_transport_carries_its_shape_into_the_profile() {
 		let shape = json!({"up": {"method": "POST", "in": "body"}, "down": {"mode": "sse"}});
-		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "fronted-shaped", "listen": "127.0.0.1:8443", "path": "/a-long-enough-path", "decoy": {"origin": "http://127.0.0.1:8080"}, "trusted_proxies": ["127.0.0.1"], "shape": shape.clone()}]}]});
+		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "fronted-shaped", "listen": "127.0.0.1:8443", "path": "/a-long-enough-path", "decoy": {"origin": "http://origin.example.org:8080"}, "trusted_proxies": ["127.0.0.1"], "shape": shape.clone()}]}]});
 		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
 		let template = derive(&settings, &document, &[], None).remove(0);
-		assert_eq!(template["profile"]["transports"], json!([{"type": "fronted-shaped", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:8443", "sni": "192.0.2.10", "host": "192.0.2.10"}], "shape": shape}]), "the shape is the node's object, as the subscription format wants it");
+		assert_eq!(template["profile"]["transports"], json!([{"type": "fronted-shaped", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:8443", "sni": "origin.example.org", "host": "origin.example.org"}], "shape": shape}]), "the shape is the node's object, as the subscription format wants it");
 		assert_eq!(template["missing"], json!(["inbound_public_key", "transport_public_key"]), "a fronted-shaped transport needs the transport public key like tls and ws");
 	}
 
@@ -465,10 +473,38 @@ mod tests {
 	fn relays_are_validated_when_settings_are_read() {
 		let read = |relays: Value| serde_json::from_value::<Settings>(json!({"relays": relays})).map(|settings| settings.relays.len()).map_err(|error| error.to_string());
 		assert_eq!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["tls"], "ports": {"tls": 443}}])), Ok(1));
-		for bad in [json!({"name": "a", "address": "relay.example.org", "enabled": true}), json!({"name": "a", "address": "127.0.0.1", "enabled": true}), json!({"name": " a", "address": "198.51.100.7", "enabled": true}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["quic"]}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "ports": {"udp": 0}}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["udp", "udp"]}), json!({"name": "a", "address": "198.51.100.7"})] {assert!(read(json!([bad])).is_err(), "{bad}")}
+		assert_eq!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["fronted-shaped"], "ports": {"fronted-shaped": 9443}}])), Ok(1), "a fronted-shaped relay is carried like a fronted one");
+		for bad in [json!({"name": "a", "address": "relay.example.org", "enabled": true}), json!({"name": "a", "address": "127.0.0.1", "enabled": true}), json!({"name": " a", "address": "198.51.100.7", "enabled": true}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["quic"]}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "ports": {"udp": 0}}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["udp", "udp"]}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["faketls"]}), json!({"name": "a", "address": "198.51.100.7"})] {assert!(read(json!([bad])).is_err(), "{bad}")}
 		assert!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true}, {"name": "a", "address": "198.51.100.8", "enabled": true}])).is_err(), "names are unique");
 		assert!(read(json!((0..=RELAYS_MAX).map(|i| json!({"name": format!("r{i}"), "address": "198.51.100.7", "enabled": true})).collect::<Vec<_>>())).unwrap_err().contains("at most 15"));
 		assert_eq!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true, "groups": ["office"], "users": [7]}])), Ok(1), "audiences are optional and an old relay without them is for everyone");
 		assert!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true, "groups": ["Bad Group"]}])).is_err());
+	}
+
+	#[test]
+	fn a_fronted_shaped_relay_is_a_candidate_with_the_nodes_shape() {
+		let shape = json!({"up": {"method": "POST", "in": "body"}, "down": {"mode": "sse"}});
+		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "fronted-shaped", "listen": "127.0.0.1:8443", "path": "/a-long-enough-path", "decoy": {"origin": "http://origin.example.org:8080"}, "trusted_proxies": ["127.0.0.1"], "shape": shape.clone()}]}]});
+		let relays = vec![relay(json!({"transports": ["fronted-shaped"], "ports": {"fronted-shaped": 9443}}))];
+		let settings = Settings {node_host: "192.0.2.10".into(), relays: relays.clone(), ..Settings::default()};
+		let template = derive(&settings, &document, &relays, None).remove(0);
+		assert_eq!(template["profile"]["transports"], json!([{"type": "fronted-shaped", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:8443", "sni": "origin.example.org", "host": "origin.example.org"}, {"address": "198.51.100.7:9443", "sni": "origin.example.org", "host": "origin.example.org"}], "shape": shape}]), "the relay's candidate keeps the node's names and shape");
+	}
+
+	#[test]
+	fn a_stream_transport_without_a_name_is_refused_and_the_others_stay() {
+		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "udp", "listen": "0.0.0.0:51820"}, {"type": "ws", "listen": "0.0.0.0:443", "decoy": {"origin": "http://127.0.0.1:8080"}, "path": "/a-long-enough-path"}]}]});
+		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
+		let template = derive(&settings, &document, &[], None).remove(0);
+		assert_eq!(template["profile"]["transports"], json!([{"type": "udp", "endpoints": ["192.0.2.10:51820"]}]), "an address is never a name, so the ws transport is left out");
+		assert_eq!((template["refused"][0]["transport"].clone(), template["refused"][0]["code"].clone(), template["refused"].as_array().unwrap().len()), (json!("0.0.0.0:443"), json!("no_name"), 1));
+	}
+
+	#[test]
+	fn the_certificate_name_comes_before_the_decoy_host() {
+		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "tls", "listen": "0.0.0.0:443", "tls": {"self_signed": true, "name": "node.example.org"}, "decoy": {"origin": "http://decoy.example.net:8080"}, "path": "/a-long-enough-path"}]}]});
+		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
+		let template = derive(&settings, &document, &[], None).remove(0);
+		assert_eq!((template["profile"]["transports"][0]["candidates"].clone(), template["refused"].clone()), (json!([{"address": "192.0.2.10:443", "sni": "node.example.org", "host": "node.example.org"}]), json!([])));
 	}
 }

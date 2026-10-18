@@ -126,6 +126,8 @@ export function LinesField({label, hint, value, onChange, rows = 3, optional = t
 }
 
 export const lines = (text: string) => text.split("\n").map(line => line.trim()).filter(Boolean);
+// A DNS name as the node reads it: lowercase, no wildcard, and a last label that is not an address.
+export const dnsName = (name: string) => name.length <= 253 && /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/.test(name) && !/^(\d+|0x[0-9a-f]*)$/.test(name.split(".").pop()!);
 export const toDay = (seconds: number | null | undefined) => seconds ? new Date(seconds * 1000).toISOString().slice(0, 10) : "";
 // The end of the chosen day in UTC, so a user set to expire on a day can use all of it.
 export const fromDay = (day: string) => day ? Math.floor(Date.parse(day + "T23:59:59Z") / 1000) : null;

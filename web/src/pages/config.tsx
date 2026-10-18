@@ -2,8 +2,9 @@ import {Banner, Button, Checkbox, DataTable, Dialog, Field, Glass, Icon, IconBut
 import {useEffect, useState} from "react";
 import {api, ApiError, type Diff, type Report, type Running} from "../api.ts";
 import {check, type Issue, type Schema} from "../check.ts";
-import {ErrorNote, Issues, lines, LinesField, Mark, moved, PageHead, useGuard, useLoad, useP, useReorder, useSay} from "../kit.tsx";
+import {dnsName, ErrorNote, Issues, lines, LinesField, Mark, moved, PageHead, useGuard, useLoad, useP, useReorder, useSay} from "../kit.tsx";
 import type {PanelKey} from "../locales/en.ts";
+import {drawPreset, presetOf, ShapeFields, shapeProblems} from "../shape.tsx";
 import {XrayForm, XraySheet} from "./xray.tsx";
 
 type Section = "inbounds" | "outbounds" | "exits" | "routing";
@@ -25,11 +26,6 @@ const TAG = /^[a-z0-9][a-z0-9_-]{0,63}$/, RESERVED = ["all", "any", "block", "re
 const LIMITS: Record<string, [number, number, number, "sessions" | "connections" | "requests"]> = {sessions: [1, 1048576, 16384, "sessions"], undecided: [1, 65536, 512, "connections"], undecided_per_source: [1, 65536, 64, "connections"], relayed: [1, 65536, 1024, "connections"], proxy_connections: [2, 65536, 2048, "connections"], decoy_requests_per_source: [1, 65536, 16, "requests"], fronted_sessions: [1, 65536, 1024, "sessions"], shaped_sessions: [1, 65536, 256, "sessions"], site_rate: [1, 1024, 16, "connections"]};
 const POOLS: Record<string, string[]> = {"udp-obfs": ["sessions"], tls: ["sessions", "undecided", "undecided_per_source", "relayed"], ws: ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source"], fronted: ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source", "fronted_sessions"], "fronted-shaped": ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source", "fronted_sessions", "shaped_sessions"], faketls: ["relayed", "site_rate"]};
 const REFUSED_HEADERS = ["upgrade", "connection", "sec-websocket-accept", "set-cookie", "content-length", "transfer-encoding", "content-type", "content-encoding", "trailer", "keep-alive"];
-// The presets of a fronted-shaped transport as method, place of the data and downstream mode, and the bounds of up.limit by place with the node's default.
-const SHAPE_PRESETS: Record<string, [string, string, string]> = {"post-stream": ["POST", "body", "sse"], "get-stream": ["GET", "query", "sse"], "put-poll": ["PUT", "body", "poll"], "get-poll": ["GET", "query", "poll"]};
-const SHAPE_LIMITS: Record<string, [number, number, number]> = {body: [1024, 65536, 65536], query: [1024, 8000, 4000], path: [1024, 8000, 4000], header: [1024, 4096, 3000]};
-// Header fields the client or a web server in front writes or reads. A shape may not name one of them, nor any Sec- or Proxy- field.
-const SHAPE_HEADERS_REFUSED = ["host", "content-length", "content-type", "transfer-encoding", "connection", "upgrade", "accept", "range", "expect", "te", "trailer", "user-agent", "origin", "referer", "accept-encoding", "accept-language", "cache-control", "pragma", "keep-alive", "x-forwarded-for", "forwarded", "via", "cookie", "authorization"];
 // What an exit does with traffic its outbound cannot carry, and the default of each kind. Only ping may be answered by the node, and only UDP may leave from the node's own address.
 const POLICIES: Record<string, string[]> = {icmp_echo: ["local", "reject", "drop", "direct", "via"], udp: ["reject", "drop", "direct", "via"], other: ["reject", "drop", "via"]};
 const PICKED = ["user", "group", "inbound", "link"];
@@ -203,36 +199,8 @@ function Review({section, running, value, moves, show, onClose, onDone}: {sectio
 
 const ceiling = (row: Row, key: string) => key === "undecided_per_source" ? Math.min(Number(row.limits.undecided) || 512, 65536) : LIMITS[key]![1];
 const outside = (row: Row, key: string) => typeof row.limits[key] === "number" && ((row.limits[key] as number) < LIMITS[key]![0] || (row.limits[key] as number) > ceiling(row, key));
-const toRow = (tr: Item, at: number): Row => { const tls = (tr.tls ?? {}) as Item, site = (tr.site ?? {}) as Item, shape = (tr.shape ?? {}) as Item, up = (shape.up ?? {}) as Item, down = (shape.down ?? {}) as Item; return {limits: {...((tr.limits ?? {}) as Record<string, number>)}, proxyProtocol: ((tr.decoy ?? {}) as Item).proxy_protocol === true, http2: tr.http2 === "on", type: str(tr.type), listen: str(tr.listen), path: str(tr.path), at, cert: tls.cert !== undefined ? "files" : "self", name: str(tls.name), certFile: str(tls.cert), keyFile: str(tls.key), origin: str(((tr.decoy ?? {}) as Item).origin), proxies: Array.isArray(tr.trusted_proxies) && tr.trusted_proxies.length ? tr.trusted_proxies as string[] : [""], header: str(tr.client_address_header), preset: Object.keys(SHAPE_PRESETS).find(name => SHAPE_PRESETS[name]!.join(" ") === [str(up.method), str(up.in), str(down.mode)].join(" ")) ?? "custom", shape, siteHost: str(site.host), siteNames: Array.isArray(site.names) ? site.names.map(str) : [], sitePort: typeof site.port === "number" ? site.port : "", siteAddress: str(site.address), acknowledged: site.acknowledged === true, siteKey: str(tr.transport_key)}; };
+const toRow = (tr: Item, at: number): Row => { const tls = (tr.tls ?? {}) as Item, site = (tr.site ?? {}) as Item, shape = (tr.shape ?? {}) as Item; return {limits: {...((tr.limits ?? {}) as Record<string, number>)}, proxyProtocol: ((tr.decoy ?? {}) as Item).proxy_protocol === true, http2: tr.http2 === "on", type: str(tr.type), listen: str(tr.listen), path: str(tr.path), at, cert: tls.cert !== undefined ? "files" : "self", name: str(tls.name), certFile: str(tls.cert), keyFile: str(tls.key), origin: str(((tr.decoy ?? {}) as Item).origin), proxies: Array.isArray(tr.trusted_proxies) && tr.trusted_proxies.length ? tr.trusted_proxies as string[] : [""], header: str(tr.client_address_header), preset: presetOf(shape), shape, siteHost: str(site.host), siteNames: Array.isArray(site.names) ? site.names.map(str) : [], sitePort: typeof site.port === "number" ? site.port : "", siteAddress: str(site.address), acknowledged: site.acknowledged === true, siteKey: str(tr.transport_key)}; };
 
-// The free members of a preset are drawn near their defaults: the spec's full ranges would allow a 250 ms gather or an hour-long stream.
-const between = (low: number, high: number) => low + Math.floor(Math.random() * (high - low + 1));
-const within = (value: unknown, low: number, high: number) => Number.isInteger(value) && (value as number) >= low && (value as number) <= high;
-const drawPreset = (preset: string) => {
-	const [method, place, mode] = SHAPE_PRESETS[preset]!, cap = SHAPE_LIMITS[place]![2], sse = mode === "sse";
-	return {preset, shape: {up: {method, in: place, gather: [between(10, 30), between(40, 60)], limit: between(Math.floor(cap * 0.75), cap)}, down: {mode, ...(sse ? {gather: [between(0, 5), between(10, 20)], life: [between(120, 400), between(600, 900)]} : {})}}};
-};
-// The node's rules for a fronted-shaped transport, as messages for its fields. A preset's values pass; this catches what the custom members and the JSON view can write.
-function shapeProblems(row: Row) {
-	const up = (row.shape.up ?? {}) as Item, down = (row.shape.down ?? {}) as Item, sse = down.mode === "sse", method = str(up.method), place = str(up.in), name = str(up.name), found: PanelKey[] = [];
-	const range = (value: unknown, low: number, high: number) => Array.isArray(value) && value.length === 2 && value.every(item => within(item, low, high)) && value[0] <= value[1];
-	const places = method === "GET" ? ["query", "path", "header"] : ["POST", "PUT", "PATCH"].includes(method) ? ["body"] : ["body", "query", "path", "header"], [low, high] = SHAPE_LIMITS[place] ?? SHAPE_LIMITS.body!;
-	if (!/^[A-Z]{3,16}$/.test(method) || ["CONNECT", "TRACE", "HEAD", "OPTIONS"].includes(method)) found.push("shape.err.method");
-	if (!places.includes(place)) found.push("shape.err.place");
-	if (place === "header" ? !/^[A-Za-z0-9-]{1,32}$/.test(name) : up.name !== undefined) found.push("shape.err.name");
-	else if (name && (SHAPE_HEADERS_REFUSED.includes(name.toLowerCase()) || /^(sec|proxy)-/i.test(name))) found.push("shape.err.nameRefused");
-	else if (name && name.toLowerCase() === row.header.toLowerCase()) found.push("shape.err.nameHeader");
-	if (up.limit !== undefined && !within(up.limit, low, high)) found.push("shape.err.limit");
-	if (up.inflight !== undefined && !(within(up.inflight, 1, 4) && (sse || up.inflight === 1))) found.push("shape.err.inflight");
-	if (!["poll", "sse"].includes(str(down.mode))) found.push("shape.err.mode");
-	if (up.gather !== undefined && !range(up.gather, 0, 250)) found.push("shape.err.range");
-	if (down.gather !== undefined && !sse) found.push("shape.err.sse");
-	else if (down.gather !== undefined && !range(down.gather, 0, 250)) found.push("shape.err.range");
-	if (down.life !== undefined && !sse) found.push("shape.err.sse");
-	else if (down.life !== undefined && !range(down.life, 30, 3600)) found.push("shape.err.range");
-	if (down.fallback !== undefined && (!sse || typeof down.fallback !== "boolean")) found.push(sse ? "shape.err.fallback" : "shape.err.sse");
-	return [...new Set(found)];
-}
 // The checks the node's validator runs on a tls, ws or fronted transport of a veilway inbound, so a mistake shows at its field before the review. Errors stop the review; warnings repeat the node's own.
 function streamProblems(row: Row, rows: Row[]) {
 	const errors: StreamErrors = {}, warnings: PanelKey[] = [], proxies = row.proxies.map(proxy => proxy.trim()).filter(Boolean), host = row.listen.trim().slice(0, row.listen.trim().lastIndexOf(":")), origin = row.origin.trim().replace(/^http:\/\//, "").replace(/\/$/, "").replace(/:\d+$/, "");
@@ -256,11 +224,10 @@ function streamProblems(row: Row, rows: Row[]) {
 	if (row.header && !/^[A-Za-z0-9-]{1,64}$/.test(row.header)) errors.header = "stream.err.header";
 	if (!row.header) warnings.push("stream.warn.header");
 	if (!loopback(host)) warnings.push("stream.warn.listen");
-	return {errors, warnings, shape: row.type === "fronted-shaped" ? shapeProblems(row) : []};
+	return {errors, warnings, shape: row.type === "fronted-shaped" ? shapeProblems(row.shape, row.header) : []};
 }
 
 // The node's rules for a faketls transport, as messages for its fields. The site is a third party, so its names are held to the node's own rule for a DNS name, and the form asks for the acknowledgment the node refuses to run without.
-const dnsName = (name: string) => name.length <= 253 && /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/.test(name) && !/^(\d+|0x[0-9a-f]*)$/.test(name.split(".").pop()!);
 const wild = (host: string) => /^\[?(0\.0\.0\.0|::)\]?$/.test(host);
 const hostPort = (address: string) => ({host: address.slice(0, address.lastIndexOf(":")), port: address.slice(address.lastIndexOf(":") + 1)});
 function borrowedProblems(row: Row, rows: Row[], held: string[]) {
@@ -276,19 +243,6 @@ function borrowedProblems(row: Row, rows: Row[], held: string[]) {
 	if (!(KEY.test(key) || key.startsWith("<redacted"))) errors.key = "borrowed.err.key";
 	else if (held.includes(key)) errors.key = "borrowed.err.keyShared";
 	return errors;
-}
-
-// Two whole numbers, low first. Each end has its own field, and a range with both ends empty is left out so the node keeps its default.
-function RangeField({label, hint, unit, min, max, defaults, value, onChange}: {label: string, hint: string, unit: string, min: number, max: number, defaults: [number, number], value: unknown, onChange: (value: unknown) => void}) {
-	const {t} = useP(), [low = "", high = ""] = Array.isArray(value) ? value : [], set = (next: unknown[]) => onChange(next.every(item => item === "") ? undefined : next);
-	return <fieldset className="p-proxies">
-		<legend className="vw-label">{label}</legend>
-		<p className="vw-muted vw-small">{hint}</p>
-		<div className="p-pair">
-			<NumberField label={t("shape.from")} unit={unit} min={min} max={max} placeholder={String(defaults[0])} value={low} onChange={from => set([from, high])} optional/>
-			<NumberField label={t("shape.to")} unit={unit} min={min} max={max} placeholder={String(defaults[1])} value={high} onChange={to => set([low, to])} optional/>
-		</div>
-	</fieldset>;
 }
 
 // The item's own object beside the form fields. It opens on the form's state, and every edit that parses goes back into the fields, so either side shows the other's change.
@@ -364,7 +318,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 					<p className="vw-muted vw-small">{t("inbounds.transportHint")}</p>
 					{rows.map((row, i) => {
 						// A name only goes with the header place, and the downstream members only with event streams, so the shape keeps only what the node reads.
-						const problem = problems[i], bproblem = borrowed[i], shownBorrowed = (field: keyof BorrowedErrors, value: string) => bproblem?.[field] && (tried || value.trim()) ? t(bproblem[field]!) : undefined, up = (change: Partial<Row>) => setRows(rows.map((r, j) => j === i ? {...r, ...change} : r)), shown = (field: keyof StreamErrors, value: string) => problem?.errors[field] && (tried || value.trim()) ? t(problem.errors[field]!) : undefined, member = (part: "up" | "down", key: string, value: unknown) => { const sides = {up: {...(row.shape.up as Item)}, down: {...(row.shape.down as Item)}}; if (value === undefined || value === "") delete sides[part][key]; else sides[part][key] = value; if (sides.up.in !== "header") delete sides.up.name; if (sides.down.mode !== "sse") {delete sides.up.inflight; delete sides.down.gather; delete sides.down.life; delete sides.down.fallback;} up({shape: sides}); }, shapeUp = (row.shape.up ?? {}) as Item, shapeDown = (row.shape.down ?? {}) as Item;
+						const problem = problems[i], bproblem = borrowed[i], shownBorrowed = (field: keyof BorrowedErrors, value: string) => bproblem?.[field] && (tried || value.trim()) ? t(bproblem[field]!) : undefined, up = (change: Partial<Row>) => setRows(rows.map((r, j) => j === i ? {...r, ...change} : r)), shown = (field: keyof StreamErrors, value: string) => problem?.errors[field] && (tried || value.trim()) ? t(problem.errors[field]!) : undefined;
 						return <div key={i} className="p-transport-row" data-order-row>
 							{rows.length > 1 && <div className="p-row-tools">{reorder.handle(i)}<div className="p-cluster">{reorder.steps(i)}<IconButton icon="close" label={t("config.removeTransport", {number: i + 1})} onClick={() => setRows(rows.filter((_, j) => j !== i))}/></div></div>}
 							<SelectField label={t("config.transport", {number: i + 1})} value={row.type} onChange={type => up(type === "fronted-shaped" && type !== row.type ? {type, ...drawPreset("post-stream")} : {type})} options={(kind === "wireguard" ? ["udp", "ws"] : TRANSPORTS).map(type => ({value: type, label: type === "faketls" ? t("borrowed.name") : type, detail: t(`config.transport.${type}` as PanelKey)}))}/>
@@ -394,27 +348,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 							{PATHED.includes(row.type) && !problem && <TextField label={t("config.path")} placeholder="/a-long-random-path" value={row.path} onChange={path => up({path})} technical/>}
 							{problem && <div className="p-stream">
 								<TextField label={t("config.path")} hint={t("stream.pathHint")} placeholder="/a-long-random-path" value={row.path} onChange={path => up({path})} error={shown("path", row.path)} technical/>
-								{row.type === "fronted-shaped" && <fieldset className="p-mirror">
-									<legend className="vw-label">{t("shape.legend")}</legend>
-									<p className="vw-muted vw-small">{t("shape.lead")}</p>
-									<SelectField label={t("shape.preset")} hint={t("shape.presetHint")} value={row.preset} onChange={preset => up(preset === "custom" ? {preset} : drawPreset(preset))} options={[...Object.keys(SHAPE_PRESETS), "custom"].map(name => ({value: name, label: name, detail: t(`shape.preset.${name}` as PanelKey)}))}/>
-									{row.preset !== "custom" ? <p className="vw-muted vw-small">{t("shape.drawn")}</p> : <>
-										<TextField label={t("shape.method")} hint={t("shape.methodHint")} placeholder="POST" value={str(shapeUp.method)} onChange={value => member("up", "method", value.trim().toUpperCase())} technical/>
-										<SelectField label={t("shape.in")} hint={t("shape.inHint")} value={str(shapeUp.in)} onChange={value => member("up", "in", value)} options={["body", "query", "path", "header"].map(place => ({value: place, label: t(`shape.in.${place}` as PanelKey)}))}/>
-										{shapeUp.in === "header" && <TextField label={t("shape.name")} hint={t("shape.nameHint")} placeholder="X-Trace" value={str(shapeUp.name)} onChange={value => member("up", "name", value.trim())} technical/>}
-										<NumberField label={t("shape.limit")} hint={t("shape.limitHint")} unit={t("config.bytes")} min={1024} max={SHAPE_LIMITS[str(shapeUp.in)]?.[1] ?? 65536} placeholder={String(SHAPE_LIMITS[str(shapeUp.in)]?.[2] ?? 65536)} value={typeof shapeUp.limit === "number" ? shapeUp.limit : ""} onChange={value => member("up", "limit", value)} optional/>
-										{shapeDown.mode === "sse" && <NumberField label={t("shape.inflight")} hint={t("shape.inflightHint")} unit={t("unit.requests")} min={1} max={4} placeholder="2" value={typeof shapeUp.inflight === "number" ? shapeUp.inflight : ""} onChange={value => member("up", "inflight", value)} optional/>}
-										<RangeField label={t("shape.gather")} hint={t("shape.gatherHint")} unit={t("unit.milliseconds")} min={0} max={250} defaults={[10, 60]} value={shapeUp.gather} onChange={value => member("up", "gather", value)}/>
-										<SelectField label={t("shape.mode")} value={str(shapeDown.mode)} onChange={value => member("down", "mode", value)} options={["poll", "sse"].map(mode => ({value: mode, label: mode, detail: t(`shape.mode.${mode}` as PanelKey)}))}/>
-										{shapeDown.mode === "sse" && <>
-											<RangeField label={t("shape.downGather")} hint={t("shape.downGatherHint")} unit={t("unit.milliseconds")} min={0} max={250} defaults={[0, 20]} value={shapeDown.gather} onChange={value => member("down", "gather", value)}/>
-											<RangeField label={t("shape.life")} hint={t("shape.lifeHint")} unit={t("unit.seconds")} min={30} max={3600} defaults={[120, 900]} value={shapeDown.life} onChange={value => member("down", "life", value)}/>
-											<Switch label={t("shape.fallback")} hint={t("shape.fallbackHint")} checked={shapeDown.fallback !== false} onChange={on => member("down", "fallback", on ? undefined : false)}/>
-										</>}
-									</>}
-									{problem.shape.map(key => <Mark key={key} tone="danger">{t(key)}</Mark>)}
-									<p className="vw-muted vw-small">{t("shape.oldApps")}</p>
-								</fieldset>}
+								{row.type === "fronted-shaped" && <ShapeFields preset={row.preset} shape={row.shape} problems={problem.shape} onChange={up}/>}
 								{row.type === "tls" && <>
 									<RadioGroup label={t("stream.cert")} value={row.cert} onChange={cert => up({cert: cert === "files" ? "files" : "self"})} options={[{value: "self", label: t("stream.cert.self"), detail: t("stream.cert.selfDetail")}, {value: "files", label: t("stream.cert.files"), detail: t("stream.cert.filesDetail")}]}/>
 									{row.cert === "self" ? <TextField label={t("stream.certName")} hint={t("stream.certNameHint")} placeholder="www.example.com" value={row.name} onChange={name => up({name: name.toLowerCase().trim()})} error={shown("name", row.name)} technical optional/> : <div className="p-pair">

@@ -2357,6 +2357,35 @@ async fn a_borrowed_site_that_cannot_be_emitted_is_named_on_the_node_page_and_no
 
 fn public_of(fill: u8) -> String {STANDARD.encode(veilway_proto::proof::public_key(&[fill; 32]))}
 
+#[tokio::test]
+async fn a_fronted_shaped_relay_is_accepted_with_the_nodes_shape_and_faketls_is_refused() {
+	let (_fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"node_host": "192.0.2.10"})).await;
+	let shape = json!({"up": {"method": "POST", "in": "body"}, "down": {"mode": "sse"}});
+	let inbounds = json!([{"tag": "Main", "type": "veilway", "private_key": "<redacted>", "address": ["10.66.0.1/24"], "transports": [{"type": "udp", "listen": "0.0.0.0:51820"}, {"type": "fronted-shaped", "listen": "127.0.0.1:8443", "path": "/a-long-enough-path", "decoy": {"origin": "http://origin.example.org:8080"}, "trusted_proxies": ["127.0.0.1"], "shape": shape.clone()}]}]);
+	assert_eq!(h.call(Method::PUT, "/p/api/config/inbounds", Some(&session), Some(json!({"revision": "rev1", "value": inbounds})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32]), "transport_public_key": public_of(5)}})), "10.0.0.1").await.status, StatusCode::OK);
+	let relay = json!({"name": "edge", "address": "198.51.100.7", "transports": ["fronted-shaped"], "ports": {"fronted-shaped": 9443}, "enabled": true});
+	let site = json!({"name": "site", "address": "198.51.100.8", "transports": ["faketls"], "enabled": true});
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/preview", Some(&session), Some(json!({"relays": [site]})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "faketls is never carried by a relay");
+	let preview = h.call(Method::POST, "/p/api/profiles/preview", Some(&session), Some(json!({"relays": [relay.clone()]})), "10.0.0.1").await.json();
+	assert_eq!(preview["templates"][0]["profile"]["transports"][1]["candidates"][1]["address"], json!("198.51.100.7:9443"));
+	assert_eq!(preview["templates"][0]["profile"]["transports"][1]["shape"], shape, "the relay's candidate keeps the node's shape");
+	let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	settings["relays"] = json!([relay]);
+	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(settings), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	let (_, link) = h.user(&session, "ann", json!({})).await;
+	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
+	let answer = h.fetch(&link, &kids, 1, "fetch", None).await;
+	let Payload::Subscription(document) = opened(&answer, &[key]) else {panic!("a document {:?}", refusal_of(&answer, &[key]))};
+	let payload::Transport::FrontedShaped(stream, carried) = &document.profiles[0].transports[1] else {panic!("the transport is fronted-shaped")};
+	assert_eq!(stream.candidates.iter().map(|candidate| (candidate.address.address().to_string(), candidate.sni.clone(), candidate.host.clone())).collect::<Vec<_>>(), [("192.0.2.10:8443".to_string(), Some("origin.example.org".to_string()), "origin.example.org".to_string()), ("198.51.100.7:9443".to_string(), Some("origin.example.org".to_string()), "origin.example.org".to_string())], "the relay keeps the node's name and its own address");
+	assert_eq!(carried, &veilway_proto::shape::Shape::parse(shape.to_string().as_bytes()).unwrap(), "the shape is the node's, read by the core");
+}
+
 async fn borrowed_node() -> (Arc<Fake>, Harness, Session) {
 	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
 	let h = Harness::with_socket(Some(socket)).await;

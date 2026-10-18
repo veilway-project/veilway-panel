@@ -1,19 +1,29 @@
 import {Banner, Button, Checkbox, Field, IconButton, NumberField, Segmented, SelectField, TextField} from "@veilway/ui";
 import {useMemo, useState} from "react";
-import {Mark, useP} from "../kit.tsx";
+import {dnsName, Mark, useP} from "../kit.tsx";
+import {drawPreset, presetOf, ShapeFields, shapeProblems} from "../shape.tsx";
 
 // The profiles of the settings, as the subscription format writes them ("A profile" and "Transports of a profile" of the format page). The text stays the one value: the form edits the parsed list and writes it back, so the JSON view always shows what is saved, and members the form does not know are kept.
 type Obj = Record<string, unknown>;
 type Check = (key: string) => string | undefined;
-const TYPES = ["udp", "udp-obfs", "tls", "ws", "fronted"];
-const STREAM = ["tls", "ws", "fronted"];
+const TYPES = ["udp", "udp-obfs", "tls", "ws", "fronted", "fronted-shaped", "faketls"];
+const STREAM = ["tls", "ws", "fronted", "fronted-shaped"];
+const UNPINNED = ["fronted", "fronted-shaped"];
+// The members a faketls transport or candidate does not take, as the subscription format lists them.
+const BORROWED_NOT = ["path", "host", "verify_name", "ech", "pins", "self_signed", "http2", "shape"];
 const KEY = /^[A-Za-z0-9+/]{43}=$/;
+// The zero key and the points of small order of X25519, lowest byte first. The top bit of the last byte is not read, so a key is compared without it.
+const SMALL_ORDER = ["00".repeat(32), "01" + "00".repeat(31), "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800", "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157", "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"];
 const HOST = /^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const obj = (value: unknown): Obj => value && typeof value === "object" && !Array.isArray(value) ? value as Obj : {};
 const arr = (value: unknown): unknown[] => Array.isArray(value) ? value : [];
 const str = (value: unknown) => typeof value === "string" ? value : "";
 const textOf = (value: unknown) => typeof value === "string" ? value : str(obj(value).default);
-const isKey = (text: string) => KEY.test(text) && atob(text).split("").some(c => c !== "\0");
+const isKey = (text: string) => {
+	if (!KEY.test(text)) return false;
+	const hex = [...atob(text)].map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+	return !SMALL_ORDER.some(point => hex.slice(0, 62) === point.slice(0, 62) && (parseInt(hex.slice(62), 16) & 0x7f) === parseInt(point.slice(62), 16));
+};
 const isIp = (text: string) => /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/.test(text) || (text.includes(":") && !text.includes("%") && (() => { try { return new URL(`http://[${text}]/`).hostname !== ""; } catch { return false; } })());
 // "192.0.2.10:51820" or "[2001:db8::10]:51820" as address and port, and back.
 const split = (dial: string): [string, string] => { const at = dial.lastIndexOf(":"), v6 = dial.startsWith("["); return at < 0 || (!v6 && dial.indexOf(":") !== at) ? [dial, ""] : [dial.slice(v6 ? 1 : 0, v6 ? dial.lastIndexOf("]") : at), dial.slice(at + 1)]; };
@@ -35,6 +45,21 @@ function problems(list: unknown[], t: ReturnType<typeof useP>["t"]) {
 		if (transports.length < 1 || transports.length > 8) put("transports", t("hand.problem.transports"));
 		transports.forEach((tr, j) => {
 			const type = str(tr.type), here = `transports.${j}.`;
+			if (type === "faketls") {
+				const key = str(tr.transport_public_key), keys = transports.filter(other => str(other.type) === "faketls").map(other => str(other.transport_public_key)), candidates = arr(tr.candidates).map(obj);
+				if (!isKey(key)) put(here + "transport_public_key", t("hand.problem.borrowedKey"));
+				else if (key === str(p.transport_public_key)) put(here + "transport_public_key", t("hand.problem.borrowedKeyOfProfile"));
+				else if (keys.filter(one => one === key).length > 1) put(here + "transport_public_key", t("hand.problem.borrowedKeyTwice"));
+				if (BORROWED_NOT.some(name => tr[name] !== undefined)) put(here + "member", t("hand.problem.borrowedMember"));
+				if (candidates.length < 1 || candidates.length > 16) put(here + "candidates", t("hand.problem.candidates"));
+				candidates.forEach((c, k) => {
+					const spot = here + "candidates." + k + ".";
+					if (!dialable(str(c.address))) put(spot + "address", t("hand.problem.dial"));
+					if (!dnsName(str(c.sni))) put(spot + "sni", t("hand.problem.site"));
+					if (BORROWED_NOT.some(name => c[name] !== undefined)) put(spot + "member", t("hand.problem.borrowedMember"));
+				});
+				return;
+			}
 			if (!STREAM.includes(type)) {
 				const endpoints = arr(tr.endpoints).map(str);
 				if (endpoints.length < 1 || endpoints.length > 16) put(here + "endpoints", t("hand.problem.endpoints"));
@@ -44,6 +69,7 @@ function problems(list: unknown[], t: ReturnType<typeof useP>["t"]) {
 			const path = str(tr.path), candidates = arr(tr.candidates).map(obj);
 			if (path.length < 12 || path.length > 256 || !/^\/[A-Za-z0-9._~/-]*$/.test(path) || path.split("/").includes("..")) put(here + "path", t("hand.problem.path"));
 			if (candidates.length < 1 || candidates.length > 16) put(here + "candidates", t("hand.problem.candidates"));
+			if (type === "fronted-shaped") shapeProblems(obj(tr.shape), "").forEach(key => put(here + "shape." + key, t(key)));
 			candidates.forEach((c, k) => {
 				const spot = here + "candidates." + k + ".", sni = str(c.sni), pins = arr(c.pins).map(str), self = c.self_signed === true;
 				if (!dialable(str(c.address))) put(spot + "address", t("hand.problem.dial"));
@@ -51,7 +77,7 @@ function problems(list: unknown[], t: ReturnType<typeof useP>["t"]) {
 				if (!HOST.test(str(c.host))) put(spot + "host", t("hand.problem.host"));
 				if (self ? c.verify_name !== undefined : !sni !== (c.verify_name !== undefined) || (c.verify_name !== undefined && !HOST.test(str(c.verify_name)))) put(spot + "verify_name", t(self ? "hand.problem.verifySelf" : "hand.problem.verify"));
 				if (type === "tls" && (pins.length < 1 || pins.length > 4)) put(spot + "pins", t("hand.problem.pinsNeeded"));
-				if (type === "fronted" && c.pins !== undefined) put(spot + "pins", t("hand.problem.pinsFronted"));
+				if (UNPINNED.includes(type) && c.pins !== undefined) put(spot + "pins", t("hand.problem.pinsFronted"));
 				pins.forEach((pin, m) => { if (!KEY.test(pin)) put(spot + "pins." + m, t("hand.problem.pin")); });
 			});
 		});
@@ -115,18 +141,34 @@ function ProfileCard({index, profile, open, count, check, onChange, onRemove}: {
 
 // One transport. Switching between the datagram types and the stream types keeps what still fits and drops the members the new type refuses.
 function TransportBlock({index, transport, check, onChange, onRemove, onMove}: {index: number, transport: unknown, check: Check, onChange: (next: Obj) => void, onRemove: () => void, onMove?: () => void}) {
-	const {t} = useP(), tr = obj(transport), type = str(tr.type), endpoints = arr(tr.endpoints).map(str), candidates = arr(tr.candidates).map(obj), known = TYPES.includes(type);
+	const {t} = useP(), tr = obj(transport), type = str(tr.type), endpoints = arr(tr.endpoints).map(str), candidates = arr(tr.candidates).map(obj), known = TYPES.includes(type), shape = obj(tr.shape), [preset, setPreset] = useState(() => presetOf(shape));
 	const retype = (next: string) => {
+		if (next === "faketls") return onChange({type: next, candidates: (candidates.length ? candidates : [{address: "", sni: ""}]).map(c => ({address: str(c.address), sni: str(c.sni)}))});
 		if (!STREAM.includes(next)) return onChange({type: next, endpoints: endpoints.length ? endpoints : [""]});
-		const kept = (candidates.length ? candidates : [{address: "", sni: "", host: ""}]).map(c => Object.fromEntries(Object.entries(c).filter(([k]) => !(k === "self_signed" && next !== "tls") && !(k === "pins" && next === "fronted"))));
-		onChange({type: next, path: str(tr.path), candidates: kept});
+		const kept = (candidates.length ? candidates : [{address: "", sni: "", host: ""}]).map(c => Object.fromEntries(Object.entries(c).filter(([k]) => !(k === "self_signed" && next !== "tls") && !(k === "pins" && UNPINNED.includes(next)))));
+		if (next !== "fronted-shaped") return onChange({type: next, path: str(tr.path), candidates: kept});
+		const drawn = drawPreset("post-stream");
+		setPreset(drawn.preset);
+		onChange({type: next, path: str(tr.path), candidates: kept, shape: drawn.shape});
 	};
 	const setCandidate = (k: number, key: string, value: unknown) => onChange({...tr, candidates: candidates.map((c, m) => m !== k ? c : value === undefined ? Object.fromEntries(Object.entries(c).filter(([name]) => name !== key)) : {...c, [key]: value})});
 	return <fieldset className="p-mirror">
 		<legend className="p-row"><strong>{t("hand.transport", {number: index + 1})}</strong><span className="p-cluster">{onMove && <Button size="sm" variant="quiet" onClick={onMove}>{t("hand.moveUp")}</Button>}<IconButton icon="close" label={t("hand.removeTransport", {number: index + 1})} onClick={onRemove}/></span></legend>
 		{!known ? <p className="vw-muted vw-small">{t("hand.unknownType", {type})}</p> : <>
 			<SelectField label={t("hand.type")} hint={t(`hand.type.${type as "udp"}`)} value={type} onChange={retype} options={TYPES.map(value => ({value, label: value}))}/>
-			{!STREAM.includes(type) ? <div className="p-stack">
+			{type === "faketls" ? <div className="p-stack">
+				<Banner tone="warning" title={t("borrowed.title")}>{t("hand.alpha")}</Banner>
+				{check("member") && <p className="p-hand-error">{check("member")}</p>}
+				<TextField label={t("hand.borrowedKey")} hint={t("hand.borrowedKeyHint")} value={str(tr.transport_public_key)} onChange={v => onChange({...tr, transport_public_key: v.trim()})} error={check("transport_public_key")} technical/>
+				{check("candidates") && <p className="p-hand-error">{check("candidates")}</p>}
+				{candidates.map((c, k) => { const at = (key: string) => check(`candidates.${k}.${key}`); return <div key={k} className="p-hand-candidate p-stack">
+					<div className="p-row"><span className="vw-label">{t("hand.candidate", {number: k + 1})}</span>{candidates.length > 1 && <IconButton icon="close" label={t("hand.removeCandidate", {number: k + 1})} onClick={() => onChange({...tr, candidates: candidates.filter((_, m) => m !== k)})}/>}</div>
+					<DialRow label={t("hand.address")} value={str(c.address)} error={at("address")} onChange={next => setCandidate(k, "address", next)}/>
+					<TextField label={t("hand.site")} hint={t("hand.siteHint")} placeholder="www.example.com" value={str(c.sni)} onChange={v => setCandidate(k, "sni", v.trim().toLowerCase())} error={at("sni")} technical/>
+					{at("member") && <p className="p-hand-error">{at("member")}</p>}
+				</div>; })}
+				{candidates.length < 16 && <div><Button size="sm" icon="plus" onClick={() => onChange({...tr, candidates: [...candidates, {address: "", sni: ""}]})}>{t("hand.addCandidate")}</Button></div>}
+			</div> : !STREAM.includes(type) ? <div className="p-stack">
 				{check("endpoints") && <p className="p-hand-error">{check("endpoints")}</p>}
 				{endpoints.map((dial, k) => <DialRow key={k} label={t("hand.endpoint", {number: k + 1})} value={dial} error={check("endpoints." + k)} onChange={next => onChange({...tr, endpoints: endpoints.map((old, m) => m === k ? next : old)})} onRemove={endpoints.length > 1 ? () => onChange({...tr, endpoints: endpoints.filter((_, m) => m !== k)}) : undefined}/>)}
 				{endpoints.length < 16 && <div><Button size="sm" icon="plus" onClick={() => onChange({...tr, endpoints: [...endpoints, ""]})}>{t("hand.addEndpoint")}</Button></div>}
@@ -142,7 +184,7 @@ function TransportBlock({index, transport, check, onChange, onRemove, onMove}: {
 						{(!self && !sni) || c.verify_name !== undefined ? <TextField label={t("hand.verify")} hint={t("hand.verifyHint")} value={str(c.verify_name)} onChange={v => setCandidate(k, "verify_name", v.trim().toLowerCase() || undefined)} error={at("verify_name")} technical/> : null}
 					</div>
 					{type === "tls" && <Checkbox label={t("hand.selfSigned")} checked={self} onChange={on => setCandidate(k, "self_signed", on || undefined)}/>}
-					{type !== "fronted" ? <div className="p-stack">
+					{!UNPINNED.includes(type) ? <div className="p-stack">
 						<span className="vw-label">{t(type === "tls" ? "hand.pinsNeeded" : "hand.pinsOptional")}</span>
 						{at("pins") && <p className="p-hand-error">{at("pins")}</p>}
 						{pins.map((pin, m) => <div key={m} className="p-hand-line"><TextField label={t("hand.pin", {number: m + 1})} value={pin} onChange={v => setCandidate(k, "pins", pins.map((old, n) => n === m ? v.trim() : old))} error={at("pins." + m)} technical/><IconButton icon="close" label={t("hand.removePin", {number: m + 1})} onClick={() => setCandidate(k, "pins", pins.length > 1 ? pins.filter((_, n) => n !== m) : undefined)}/></div>)}
@@ -150,6 +192,7 @@ function TransportBlock({index, transport, check, onChange, onRemove, onMove}: {
 					</div> : at("pins") && <p className="p-hand-error">{at("pins")}</p>}
 				</div>; })}
 				{candidates.length < 16 && <div><Button size="sm" icon="plus" onClick={() => onChange({...tr, candidates: [...candidates, {address: "", sni: "", host: ""}]})}>{t("hand.addCandidate")}</Button></div>}
+				{type === "fronted-shaped" && <ShapeFields preset={preset} shape={shape} problems={shapeProblems(shape, "")} onChange={next => { setPreset(next.preset); onChange({...tr, shape: next.shape}); }}/>}
 			</div>}
 		</>}
 	</fieldset>;
