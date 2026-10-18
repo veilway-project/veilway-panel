@@ -1864,7 +1864,7 @@ export interface components {
              */
             prefer: boolean;
             /**
-             * @description The transport types it carries: udp, udp-obfs, tls, ws, fronted. Empty for all of them.
+             * @description The transport types it carries: udp, udp-obfs, tls, ws, fronted, fronted-shaped. Empty for all of them.
              * @default []
              */
             transports: string[];
