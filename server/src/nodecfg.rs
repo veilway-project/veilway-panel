@@ -1,5 +1,5 @@
 //! The node's config through its control API: the schema, the document as a whole and by section, dry runs, the one path that applies a change, and the profile templates derived from the inbounds.
-use crate::{app::{store_settings, App, Settings}, auth::reauthed, crypto::now, http::{json, ok, Body, Ctx, Failure}, node, subs::UserRow, users::name_ok};
+use crate::{app::{store_settings, App, Settings}, auth::reauthed, crypto::now, http::{json, ok, Body, Ctx, Failure}, node, subs::UserRow, users::name_ok, xray::{self, addresses, Exposure}};
 use axum::{extract::{Path, State}, http::{header::CONTENT_TYPE, HeaderValue, StatusCode}, response::{IntoResponse, Response}, Extension};
 use rusqlite::Connection;
 use schemars::JsonSchema;
@@ -142,7 +142,7 @@ pub(crate) async fn apply(app: &Arc<App>, ctx: &Ctx, document: Value, revision: 
 			// A profile of a borrowed site that was published is made again from what the node runs now, or taken down when it can no longer be emitted, so that no document carries the key or the listener it had before. One that was never published, and one written by hand, stay as they are.
 			let republished = app.update_settings(move |settings| {
 				crate::borrowed::remember(settings, &kept);
-				let templates = derive(settings, &kept, &[], None);
+				let templates = derive(settings, &kept, &[], None, &Exposure::default());
 				let ids: Vec<String> = settings.relay_profiles.keys().filter(|id| id.ends_with("-faketls") && settings.profiles.iter().any(|profile| profile["id"] == id.as_str() && profile["transports"].as_array().is_some_and(|list| !list.is_empty() && list.iter().all(|transport| transport["type"] == "faketls")))).cloned().collect();
 				for id in ids {
 					let fresh = templates.iter().find(|template| template["kind"] == "faketls" && template["profile"]["id"] == id.as_str() && template["missing"].as_array().is_some_and(Vec::is_empty) && template["profile"]["transports"].as_array().is_some_and(|list| !list.is_empty())).map(|template| template["profile"].clone());
@@ -263,7 +263,7 @@ pub fn carry(profile: &mut Value, tag: &str, reaching: &[(u8, &Relay)]) -> Vec<V
 }
 
 /// One template per `veilway` inbound, with the overrides laid over it and the relays that reach `user` carried in. `user` is the account's id and groups, or None for the relays that reach everyone. `missing` lists what a profile still needs from the operator, since the node never reveals a public key and does not know its own public address.
-fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>) -> Vec<Value> {
+fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, exposure: &Exposure) -> Vec<Value> {
 	let inbounds = document.get("inbounds").and_then(Value::as_array).cloned().unwrap_or_default();
 	let reached = reaching(relays, user);
 	inbounds.iter().filter(|inbound| inbound["type"] == "veilway").flat_map(|inbound| {
@@ -289,9 +289,9 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 			})
 		}).collect();
 		let mut profile = json!({"id": tag.to_lowercase(), "name": tag, "type": "veilway", "gateways": gateways, "mtu": inbound["mtu"].as_u64().unwrap_or(if obfs {1390} else {1420}), "transports": listed});
-		// The Xray inbounds answer on this server's address like the profiles do, so no profile may claim more than Detectable. An override can lower it further and not raise it.
-		if document["xray"]["inbounds"].as_array().is_some_and(|list| !list.is_empty()) {profile["rating_cap"] = json!("detectable");}
 		if let Some(edits) = settings.profile_overrides.get(&tag).and_then(Value::as_object) {for (key, value) in edits.iter().filter(|(key, _)| *key != crate::borrowed::ADDRESSES) {profile[key] = value.clone();}}
+		// The Xray inbounds answer on the addresses a profile names, so one that shares an address may not claim more than Detectable. An override of `unsafe` is the operator's own choice and stays.
+		if exposure.shares(&addresses(&profile)) && profile["rating_cap"] != "unsafe" {profile["rating_cap"] = json!("detectable");}
 		// Relays come after the overrides, so a transport an override wrote gets them too.
 		let trimmed = carry(&mut profile, &tag, &reached);
 		let mut missing = Vec::new();
@@ -303,10 +303,18 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 	}).collect()
 }
 
+/// The templates with each profile's rating decided by the Xray inbounds it shares an address with. The names the profiles carry are looked up first, so the derivation itself does no lookup.
+pub async fn rated(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, hosts: &[(String, String)]) -> Vec<Value> {
+	let names: Vec<String> = derive(settings, document, relays, user, &Exposure::default()).iter().flat_map(|template| addresses(&template["profile"])).collect();
+	let exposure = xray::exposure(document, hosts, &settings.node_host, names).await;
+	derive(settings, document, relays, user, &exposure)
+}
+
 pub async fn derived_profiles(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let (revision, _, document) = running(&app).await?;
 	let settings = app.settings();
-	ok(&json!({"revision": revision, "templates": derive(&settings, &document, &settings.relays, None)}))
+	let hosts = app.db.call(|db| xray::inbound_hosts(db)).await??;
+	ok(&json!({"revision": revision, "templates": rated(&settings, &document, &settings.relays, None, &hosts).await}))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -326,7 +334,8 @@ pub async fn preview_profiles(State(app): State<Arc<App>>, Body(input): Body<Pre
 		None => None,
 	};
 	let groups: Vec<String> = account.as_ref().map(|user| serde_json::from_str(&user.groups).unwrap_or_default()).unwrap_or_default();
-	ok(&json!({"revision": revision, "templates": derive(&app.settings(), &document, &input.relays, account.as_ref().map(|user| (user.id, groups.as_slice())))}))
+	let hosts = app.db.call(|db| xray::inbound_hosts(db)).await??;
+	ok(&json!({"revision": revision, "templates": rated(&app.settings(), &document, &input.relays, account.as_ref().map(|user| (user.id, groups.as_slice())), &hosts).await}))
 }
 
 /// Takes a deleted account out of the audiences of the saved and the published relays, in the transaction that deletes it. SQLite gives a new account the id of the last one deleted, so no relay may keep it.
@@ -354,7 +363,8 @@ pub async fn put_override(State(app): State<Arc<App>>, Extension(ctx): Extension
 pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {
 	let (_, _, document) = running(&app).await?;
 	let current = app.settings();
-	let templates = derive(&current, &document, &[], None);
+	let hosts = app.db.call(|db| xray::inbound_hosts(db)).await??;
+	let templates = rated(&current, &document, &[], None, &hosts).await;
 	// A profile whose transports were all refused is not published, and what it said before is taken down. Its refusals are shown on the Profiles page and block nothing else.
 	let empty = |template: &Value| template["profile"]["transports"].as_array().is_none_or(Vec::is_empty) && (template["kind"] == "faketls" || template["refused"].as_array().is_some_and(|list| !list.is_empty()));
 	if let Some(bad) = templates.iter().filter(|template| !empty(template)).find(|template| !template["missing"].as_array().is_some_and(Vec::is_empty)) {return Err(Failure::bad(format!("The profile of inbound {} still needs: {}.", bad["inbound"].as_str().unwrap_or_default(), bad["missing"])))}
@@ -389,7 +399,7 @@ mod tests {
 	fn derived(relays: Vec<Relay>) -> Vec<Value> {
 		let mut settings = Settings {node_host: "192.0.2.10".into(), relays, ..Settings::default()};
 		settings.profile_overrides.insert("Main".into(), json!({"transport_public_key": "key"}));
-		derive(&settings, &document(), &settings.relays, None).into_iter().map(|template| template["profile"]["transports"].clone()).collect()
+		derive(&settings, &document(), &settings.relays, None, &Exposure::default()).into_iter().map(|template| template["profile"]["transports"].clone()).collect()
 	}
 
 	fn for_account(relays: &[Relay], id: i64, groups: &[&str]) -> Vec<String> {
@@ -418,7 +428,7 @@ mod tests {
 		let many: Vec<Relay> = (0..RELAYS_MAX).map(|i| relay(json!({"name": format!("r{i}"), "address": format!("198.51.100.{}", i + 1), "prefer": i == 3}))).collect();
 		let mut settings = Settings {node_host: "192.0.2.10".into(), relays: many, ..Settings::default()};
 		settings.profile_overrides.insert("Main".into(), json!({"transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820", "192.0.2.11:51820"]}]}));
-		let endpoints = derive(&settings, &document(), &settings.relays, None)[0]["profile"]["transports"][0]["endpoints"].as_array().unwrap().clone();
+		let endpoints = derive(&settings, &document(), &settings.relays, None, &Exposure::default())[0]["profile"]["transports"][0]["endpoints"].as_array().unwrap().clone();
 		assert_eq!((endpoints.len(), endpoints[0].clone(), endpoints[1].clone(), endpoints[2].clone()), (CANDIDATES_MAX, json!("198.51.100.4:51820"), json!("192.0.2.10:51820"), json!("192.0.2.11:51820")), "the node's own are kept and the preferred relay leads");
 	}
 
@@ -439,7 +449,7 @@ mod tests {
 		let mut settings = Settings {node_host: "192.0.2.10".into(), relays: relays.clone(), ..Settings::default()};
 		settings.profile_overrides.insert("Main".into(), json!({"transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820", "192.0.2.11:51820"]}]}));
 		let groups = vec!["office".to_string()];
-		let template = derive(&settings, &document(), &relays, Some((7, &groups)))[0].clone();
+		let template = derive(&settings, &document(), &relays, Some((7, &groups)), &Exposure::default())[0].clone();
 		let endpoints = template["profile"]["transports"][0]["endpoints"].as_array().unwrap().clone();
 		assert_eq!((endpoints.len(), endpoints[2].clone(), endpoints[3].clone()), (CANDIDATES_MAX, json!("198.51.100.91:51820"), json!("198.51.100.90:51820")), "the account's relay leads the ones it gets, then its group's");
 		assert_eq!(template["trimmed"], json!([{"transport": "udp", "relay": "all12"}]), "the preview names what the cap cut");
@@ -450,10 +460,10 @@ mod tests {
 		let relays = vec![relay(json!({"name": "all", "address": "198.51.100.8"})), relay(json!({"name": "ann", "address": "198.51.100.9", "users": [7]})), relay(json!({"name": "other-inbound", "address": "198.51.100.10", "inbounds": ["Other"]}))];
 		let settings = Settings {node_host: "192.0.2.10".into(), relays: relays.clone(), ..Settings::default()};
 		let groups: Vec<String> = Vec::new();
-		let published = derive(&settings, &document(), &[], None)[0]["profile"].clone();
+		let published = derive(&settings, &document(), &[], None, &Exposure::default())[0]["profile"].clone();
 		let mut carried = published.clone();
 		carry(&mut carried, "Main", &reaching(&relays, Some((7, &groups))));
-		assert_eq!(carried["transports"], derive(&settings, &document(), &relays, Some((7, &groups)))[0]["profile"]["transports"], "the stored base plus the account's relays is the preview for the account");
+		assert_eq!(carried["transports"], derive(&settings, &document(), &relays, Some((7, &groups)), &Exposure::default())[0]["profile"]["transports"], "the stored base plus the account's relays is the preview for the account");
 		let mut stranger = published.clone();
 		carry(&mut stranger, "Main", &reaching(&relays, Some((8, &groups))));
 		assert_eq!(stranger["transports"][0]["endpoints"], json!(["192.0.2.10:51820", "198.51.100.8:51820"]), "an account without its own relay gets only the relays for everyone");
@@ -464,7 +474,7 @@ mod tests {
 		let shape = json!({"up": {"method": "POST", "in": "body"}, "down": {"mode": "sse"}});
 		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "fronted-shaped", "listen": "127.0.0.1:8443", "path": "/a-long-enough-path", "decoy": {"origin": "http://origin.example.org:8080"}, "trusted_proxies": ["127.0.0.1"], "shape": shape.clone()}]}]});
 		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
-		let template = derive(&settings, &document, &[], None).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
 		assert_eq!(template["profile"]["transports"], json!([{"type": "fronted-shaped", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:8443", "sni": "origin.example.org", "host": "origin.example.org"}], "shape": shape}]), "the shape is the node's object, as the subscription format wants it");
 		assert_eq!(template["missing"], json!(["inbound_public_key", "transport_public_key"]), "a fronted-shaped transport needs the transport public key like tls and ws");
 	}
@@ -487,7 +497,7 @@ mod tests {
 		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "fronted-shaped", "listen": "127.0.0.1:8443", "path": "/a-long-enough-path", "decoy": {"origin": "http://origin.example.org:8080"}, "trusted_proxies": ["127.0.0.1"], "shape": shape.clone()}]}]});
 		let relays = vec![relay(json!({"transports": ["fronted-shaped"], "ports": {"fronted-shaped": 9443}}))];
 		let settings = Settings {node_host: "192.0.2.10".into(), relays: relays.clone(), ..Settings::default()};
-		let template = derive(&settings, &document, &relays, None).remove(0);
+		let template = derive(&settings, &document, &relays, None, &Exposure::default()).remove(0);
 		assert_eq!(template["profile"]["transports"], json!([{"type": "fronted-shaped", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:8443", "sni": "origin.example.org", "host": "origin.example.org"}, {"address": "198.51.100.7:9443", "sni": "origin.example.org", "host": "origin.example.org"}], "shape": shape}]), "the relay's candidate keeps the node's names and shape");
 	}
 
@@ -495,7 +505,7 @@ mod tests {
 	fn a_stream_transport_without_a_name_is_refused_and_the_others_stay() {
 		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "udp", "listen": "0.0.0.0:51820"}, {"type": "ws", "listen": "0.0.0.0:443", "decoy": {"origin": "http://127.0.0.1:8080"}, "path": "/a-long-enough-path"}]}]});
 		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
-		let template = derive(&settings, &document, &[], None).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
 		assert_eq!(template["profile"]["transports"], json!([{"type": "udp", "endpoints": ["192.0.2.10:51820"]}]), "an address is never a name, so the ws transport is left out");
 		assert_eq!((template["refused"][0]["transport"].clone(), template["refused"][0]["code"].clone(), template["refused"].as_array().unwrap().len()), (json!("0.0.0.0:443"), json!("no_name"), 1));
 	}
@@ -504,7 +514,7 @@ mod tests {
 	fn the_certificate_name_comes_before_the_decoy_host() {
 		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "tls", "listen": "0.0.0.0:443", "tls": {"self_signed": true, "name": "node.example.org"}, "decoy": {"origin": "http://decoy.example.net:8080"}, "path": "/a-long-enough-path"}]}]});
 		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
-		let template = derive(&settings, &document, &[], None).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
 		assert_eq!((template["profile"]["transports"][0]["candidates"].clone(), template["refused"].clone()), (json!([{"address": "192.0.2.10:443", "sni": "node.example.org", "host": "node.example.org"}]), json!([])));
 	}
 }

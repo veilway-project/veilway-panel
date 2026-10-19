@@ -30,7 +30,7 @@ export function XraySheet({xray, onAdd, onChanged}: {xray: XrayState, onAdd: () 
 				<Button size="sm" variant="quiet" aria-label={t("xray.editName", {tag: inbound.tag})} disabled={inbound.port === undefined} onClick={() => setEditing(inbound as XrayInbound)}>{t("user.edit")}</Button>
 			</li>)}</ul>}
 			<div><Button icon="plus" onClick={onAdd}>{t("xray.add")}</Button></div>
-		</> : <span className="vw-code" dir="ltr">scripts/veilway.sh addon xray install</span>}
+		</> : <span className="vw-code" dir="ltr">sudo bash veilway.sh addon xray install</span>}
 	</Glass>;
 }
 

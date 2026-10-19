@@ -2,12 +2,12 @@
 use crate::{admin::Done, app::{publish_settings, store_settings, App}, auth::reauthed, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, nodecfg, subs::UserRow, users::{self, name_ok, NodeState}};
 use axum::{extract::{Path, State}, http::StatusCode, response::Response, Extension};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use ipnet::IpNet;
-use std::{net::IpAddr, sync::Arc};
+use std::{collections::{BTreeSet, HashMap}, net::IpAddr, sync::Arc, time::Duration};
 
 const PROTOCOLS: [&str; 3] = ["vless", "trojan", "shadowsocks"];
 
@@ -62,11 +62,7 @@ pub struct XrayOut {pub installed: bool, pub release: Option<String>, pub inboun
 
 pub async fn get(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let ((installed, release), (_, _, document)) = (addon(&app).await, nodecfg::running(&app).await?);
-	let made = app.db.call(|db| -> rusqlite::Result<Vec<(String, String)>> {
-		let mut statement = db.prepare("select tag, host from xray_inbounds")?;
-		let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect();
-		rows
-	}).await??;
+	let made = app.db.call(|db| inbound_hosts(db)).await??;
 	let node_host = host_of(&app, &document, "").await;
 	let inbounds = document["xray"]["inbounds"].as_array().into_iter().flatten().map(|inbound| {
 		let (tag, listen) = (inbound["tag"].as_str().unwrap_or_default().to_string(), inbound["listen"].as_str().unwrap_or_default().to_string());
@@ -122,13 +118,79 @@ fn decoy_ok(decoy: Option<String>) -> Result<String, Failure> {
 	if local {Ok(text)} else {Err(refused())}
 }
 
-/// Adds an inbound with a credential for every user the node carries, and applies the config on the node. The inbound answers on the server's address, which the native profiles use too, so it makes all of them easier to identify: every profile is capped at Detectable in the signed document.
+/// The host each Xray inbound the panel made names in its links, by tag.
+pub fn inbound_hosts(db: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+	let mut statement = db.prepare("select tag, host from xray_inbounds")?;
+	let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect();
+	rows
+}
+
+/// The address without its port, with the brackets of an IPv6 address taken off.
+fn bare_host(address: &str) -> &str {
+	match address.strip_prefix('[') {Some(bracketed) => bracketed.split(']').next().unwrap_or_default(), None => address.rsplit_once(':').map_or(address, |(host, _)| host)}
+}
+
+/// Every address and host name a profile names in the candidates and endpoints of its transports, without ports. Read before the relays are carried in, so relays do not count.
+pub fn addresses(profile: &Value) -> Vec<String> {
+	let mut found = Vec::new();
+	for transport in profile["transports"].as_array().into_iter().flatten() {
+		for candidate in transport["candidates"].as_array().into_iter().flatten() {
+			found.extend([candidate.as_str(), candidate["address"].as_str(), candidate["sni"].as_str(), candidate["host"].as_str()].into_iter().flatten().map(|text| bare_host(text).to_string()));
+		}
+		found.extend(transport["endpoints"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|text| bare_host(text).to_string()));
+	}
+	found
+}
+
+/// Where the Xray inbounds answer, for the rating of the profiles: every profile when one listens on every address, otherwise the listen IPs and the host names the inbounds' links carry. `resolved` holds what the profiles' names looked up to. A name with no answer counts as shared, since an unknown address is treated as shared.
+#[derive(Default)]
+pub struct Exposure {all: bool, ips: Vec<IpAddr>, names: Vec<String>, resolved: HashMap<String, Vec<IpAddr>>}
+
+impl Exposure {
+	/// Whether a profile that names these addresses shares one with an Xray inbound.
+	pub fn shares(&self, addresses: &[String]) -> bool {
+		self.all || !self.ips.is_empty() && addresses.iter().any(|address| {
+			let host = bare_host(address).to_ascii_lowercase();
+			match host.parse::<IpAddr>() {
+				Ok(ip) => self.ips.contains(&ip),
+				Err(_) => self.names.contains(&host) || self.resolved.get(&host).is_none_or(|found| found.is_empty() || found.iter().any(|ip| self.ips.contains(ip)))
+			}
+		})
+	}
+}
+
+/// The exposure of a document. `hosts` are the inbounds' own host names by tag, and `node_host` stands in for one that is not set. Every name in `names` is looked up at once, and each lookup waits at most two seconds.
+pub async fn exposure(document: &Value, hosts: &[(String, String)], node_host: &str, names: Vec<String>) -> Exposure {
+	let mut exposure = Exposure::default();
+	for inbound in document["xray"]["inbounds"].as_array().into_iter().flatten() {
+		match bare_host(inbound["listen"].as_str().unwrap_or_default()).parse::<IpAddr>() {
+			Ok(ip) if !ip.is_unspecified() => exposure.ips.push(ip),
+			_ => exposure.all = true,
+		}
+		let tag = inbound["tag"].as_str().unwrap_or_default();
+		let host = hosts.iter().find(|(held, host)| held == tag && !host.is_empty()).map_or(node_host, |(_, host)| host.as_str()).to_ascii_lowercase();
+		if let Ok(ip) = host.parse::<IpAddr>() {exposure.ips.push(ip)} else if !host.is_empty() {exposure.names.push(host)}
+	}
+	let mut lookups = tokio::task::JoinSet::new();
+	for name in names.iter().map(|name| bare_host(name).to_ascii_lowercase()).filter(|name| name.parse::<IpAddr>().is_err()).collect::<BTreeSet<_>>() {
+		lookups.spawn(async move {
+			let found = tokio::time::timeout(Duration::from_secs(2), tokio::net::lookup_host((name.clone(), 0))).await;
+			(name, found.ok().and_then(Result::ok).map(|found| found.map(|address| address.ip()).collect::<Vec<_>>()))
+		});
+	}
+	while let Some(joined) = lookups.join_next().await {
+		if let Ok((name, Some(found))) = joined {exposure.resolved.insert(name, found);}
+	}
+	exposure
+}
+
+/// Adds an inbound with a credential for every user the node carries, and applies the config on the node. A profile that shares an address with the inbound is capped at Detectable in the stored profiles, which publishing derives the same way.
 pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<InboundIn>) -> Result<Response, Failure> {
 	if !name_ok(&input.tag, false) {return Err(Failure::bad("tag is 1 to 64 characters of a-z, 0-9, dash and underscore, starting with a letter or digit."))}
 	if !PROTOCOLS.contains(&input.protocol.as_str()) {return Err(Failure::bad("protocol is vless, trojan or shadowsocks."))}
 	let (listen, tls, host) = checked(&input.protocol, input.port, input.listen.as_deref(), &input.cert, &input.key, input.host)?;
 	if app.keys.is_none() {return Err(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))}
-	if !addon(&app).await.0 {return Err(Failure::new(StatusCode::CONFLICT, "addon_missing", "The Xray add-on is not installed on the node. Run scripts/veilway.sh addon xray install on the server."))}
+	if !addon(&app).await.0 {return Err(Failure::new(StatusCode::CONFLICT, "addon_missing", "The Xray add-on is not installed on the node. Run sudo bash veilway.sh addon xray install on the server."))}
 	let _turn = app.node_lock.lock().await;
 	let (revision, _, mut document) = nodecfg::running(&app).await?;
 	let mut inbounds = document["xray"]["inbounds"].as_array().cloned().unwrap_or_default();
@@ -144,14 +206,19 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	inbounds.push(inbound);
 	document["xray"] = json!({"inbounds": inbounds});
 	let sealed = server_key.as_ref().and_then(|key| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&input.tag), key.as_bytes())));
+	let mut hosts = app.db.call(|db| inbound_hosts(db)).await??;
+	hosts.push((input.tag.clone(), host.clone()));
+	let templates = nodecfg::rated(&app.settings(), &document, &[], None, &hosts).await;
+	let shared: Vec<Value> = templates.iter().filter(|template| template["profile"]["rating_cap"] == "detectable").map(|template| template["profile"]["id"].clone()).collect();
+	let derived: Vec<Value> = templates.iter().map(|template| template["profile"]["id"].clone()).collect();
 	let (tag, protocol, cache) = (input.tag.clone(), input.protocol.clone(), app.settings.clone());
-	// The profiles share this address with the inbound, so none of them may claim more than Detectable. Publishing the profiles again derives the same cap, and removing the last inbound lifts it there.
+	// A profile no inbound derives has no known address, so it is capped as well.
 	let touched = app.db.call(move |db| -> Result<Vec<(Value, Value)>, String> {
 		let tx = db.transaction().map_err(|error| error.to_string())?;
 		tx.execute("delete from xray_inbounds where tag = ?", [&tag]).map_err(|error| error.to_string())?;
 		tx.execute("insert into xray_inbounds (tag, protocol, host, created, server_key) values (?, ?, ?, ?, ?)", params![tag, protocol, host, now(), sealed]).map_err(|error| error.to_string())?;
 		let mut touched = Vec::new();
-		let stored = store_settings(&tx, &cache, |settings| for profile in settings.profiles.iter_mut().filter(|profile| profile["type"] == "veilway" && profile["rating_cap"] != "unsafe") {
+		let stored = store_settings(&tx, &cache, |settings| for profile in settings.profiles.iter_mut().filter(|profile| profile["type"] == "veilway" && profile["rating_cap"] != "unsafe" && (shared.contains(&profile["id"]) || !derived.contains(&profile["id"]))) {
 			touched.push((profile["id"].clone(), profile["rating_cap"].clone()));
 			profile["rating_cap"] = json!("detectable");
 		})?;
@@ -159,6 +226,8 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 		publish_settings(&cache, stored);
 		Ok(touched)
 	}).await?.map_err(Failure::internal)?;
+	let capped: Vec<String> = touched.iter().filter_map(|(id, _)| id.as_str().map(str::to_string)).collect();
+	let detail = if capped.is_empty() {format!("{} on port {}, no profile shares its address", input.protocol, input.port)} else {format!("{} on port {}, profiles capped at detectable: {}", input.protocol, input.port, capped.join(", "))};
 	if let Err(error) = nodecfg::apply(&app, &ctx, document, &revision, &format!("xray:{}", input.tag)).await {
 		let (tag, cache) = (input.tag.clone(), app.settings.clone());
 		let undone = app.db.call(move |db| -> Result<(), String> {
@@ -175,7 +244,7 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 		if let Err(failed) = undone {tracing::error!("a refused Xray inbound could not be taken back: {failed}")}
 		return Err(error)
 	}
-	app.db.audit(&ctx.actor, &ctx.source, "xray.create", &input.tag, &format!("{} on port {}, profiles capped at detectable", input.protocol, input.port)).await;
+	app.db.audit(&ctx.actor, &ctx.source, "xray.create", &input.tag, &detail).await;
 	ok(&Done {ok: true})
 }
 
@@ -319,4 +388,55 @@ pub async fn rotate(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 		Ok(())
 	}).await??;
 	ok(&Rotated {ok: true, node: users::push(&app).await})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn document(listen: &str) -> Value {json!({"xray": {"inbounds": [{"tag": "Xray", "protocol": "vless", "listen": listen}]}})}
+
+	fn names(list: &[&str]) -> Vec<String> {list.iter().map(|name| name.to_string()).collect()}
+
+	#[tokio::test]
+	async fn an_inbound_on_every_address_caps_every_profile() {
+		for listen in ["0.0.0.0:443", "[::]:443", ""] {
+			let exposure = exposure(&document(listen), &[], "192.0.2.10", Vec::new()).await;
+			assert!(exposure.shares(&names(&["198.51.100.9:443"])), "{listen}");
+		}
+	}
+
+	#[tokio::test]
+	async fn no_inbound_caps_nothing() {
+		assert!(!Exposure::default().shares(&names(&["localhost:443"])));
+	}
+
+	#[tokio::test]
+	async fn a_separate_address_and_host_leave_other_profiles_uncapped() {
+		let hosts = vec![("Xray".to_string(), "xray.example.net".to_string())];
+		let exposure = exposure(&document("192.0.2.20:443"), &hosts, "192.0.2.10", names(&["192.0.2.10", "localhost"])).await;
+		assert!(!exposure.shares(&names(&["192.0.2.10:443"])));
+		assert!(!exposure.shares(&names(&["localhost:443"])));
+	}
+
+	#[tokio::test]
+	async fn the_same_address_or_host_name_caps() {
+		let hosts = vec![("Xray".to_string(), "xray.example.net".to_string())];
+		let exposure = exposure(&document("192.0.2.20:443"), &hosts, "192.0.2.10", names(&["192.0.2.20", "XRAY.example.net"])).await;
+		assert!(exposure.shares(&names(&["192.0.2.20:8443"])));
+		assert!(exposure.shares(&names(&["xray.example.net:443"])));
+		assert!(!exposure.shares(&names(&["[2001:db8::20]:443"])));
+	}
+
+	#[tokio::test]
+	async fn a_name_that_resolves_to_the_xray_address_caps() {
+		let exposure = exposure(&document("127.0.0.1:443"), &[], "192.0.2.10", names(&["localhost"])).await;
+		assert!(exposure.shares(&names(&["localhost:443"])));
+	}
+
+	#[tokio::test]
+	async fn a_name_that_does_not_resolve_caps() {
+		let exposure = exposure(&document("192.0.2.20:443"), &[], "192.0.2.10", names(&["no-such-name.invalid"])).await;
+		assert!(exposure.shares(&names(&["no-such-name.invalid:443"])));
+	}
 }

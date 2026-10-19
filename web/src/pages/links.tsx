@@ -48,16 +48,16 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 		{links.error && !links.data && <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={links.reload}>{t("action.retry")}</Button>}>{say(links.error)}</StateBlock>}
 		<div className="p-columns p-node-cards">
 			<Glass className="p-node-card p-sheet-new">
-				<div className="p-sheet-head"><div><strong className="vw-code vw-h3">{status?.public_addresses?.[0] ?? t("side.thisNode")}</strong><span className="vw-small vw-muted">{t("nodes.this")}</span></div><Mark tone={reachable ? "success" : "danger"}>{reachable ? t("side.running") : t("side.unreachable")}</Mark></div>
+				<div className="p-sheet-head"><div><strong className="vw-h3"><bdi className="vw-code" dir="ltr">{status?.public_addresses?.[0] ?? t("side.thisNode")}</bdi></strong><span className="vw-small vw-muted">{t("nodes.this")}</span></div><Mark tone={reachable ? "success" : "danger"}>{reachable ? t("side.running") : t("side.unreachable")}</Mark></div>
 				<dl>
 					<div><dt>{t("nodes.online")}</dt><dd className="vw-num">{online === undefined ? t("users.usageUnknown") : number(online)}</dd></div>
-					{status?.generation !== undefined && <div><dt>{t("side.config")}</dt><dd className="vw-num">{t("side.configNo", {generation: number(status.generation)})}</dd></div>}
+					{status?.generation !== undefined && <div><dt>{t("side.config")}</dt><dd className="vw-num" title={t("side.configHint")}>{t("side.configNo", {generation: number(status.generation)})}</dd></div>}
 					{status?.uptime_secs !== undefined && <div><dt>{t("side.uptime")}</dt><dd className="vw-num">{span(status.uptime_secs)}</dd></div>}
 					{status?.version && <div><dt>{t("nodes.version")}</dt><dd className="vw-code">{status.version}</dd></div>}
 				</dl>
 			</Glass>
 			{(links.data?.links ?? []).map(l => <Glass key={l.id} className="p-node-card">
-				<div className="p-sheet-head"><div><strong className="vw-code vw-h3">{l.tag}</strong><span className="vw-small vw-muted" title={t(l.half === "exit" ? "links.half.exit" : "links.half.entry")}>{t(l.half === "exit" ? "nodes.half.exit" : "nodes.half.entry")}</span></div><Mark tone={STATE_TONE[l.state]}>{["up", "connecting", "unreachable", "refused", "ended"].includes(l.state) ? t(`links.state.${l.state as "up"}`) : l.state}</Mark></div>
+				<div className="p-sheet-head"><div><strong className="vw-h3"><bdi className="vw-code" dir="ltr">{l.tag}</bdi></strong><span className="vw-small vw-muted" title={t(l.half === "exit" ? "links.half.exit" : "links.half.entry")}>{t(l.half === "exit" ? "nodes.half.exit" : "nodes.half.entry")}</span></div><Mark tone={STATE_TONE[l.state]}>{["up", "connecting", "unreachable", "refused", "ended"].includes(l.state) ? t(`links.state.${l.state as "up"}`) : l.state}</Mark></div>
 				<dl>
 					<div><dt>{t(l.state === "up" ? "nodes.upFor" : "nodes.stateFor")}</dt><dd className="vw-num">{span(l.state_secs)}</dd></div>
 					<div><dt>{t("links.col.traffic")}</dt><dd className="vw-num">{bytes(l.traffic.up_bytes + l.traffic.down_bytes).text}</dd></div>
@@ -66,7 +66,7 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 				{manage(l.tag)}
 			</Glass>)}
 			{links.data && idle.map(link => <Glass key={link.tag} className="p-node-card">
-				<div className="p-sheet-head"><div><strong className="vw-code vw-h3">{link.tag}</strong><span className="vw-small vw-muted">{t(exitHalf(link) ? "nodes.half.exit" : "nodes.half.entry")}</span></div><Mark tone="muted">{t(link.enabled === false ? "links.off" : "links.notRunning")}</Mark></div>
+				<div className="p-sheet-head"><div><strong className="vw-h3"><bdi className="vw-code" dir="ltr">{link.tag}</bdi></strong><span className="vw-small vw-muted">{t(exitHalf(link) ? "nodes.half.exit" : "nodes.half.entry")}</span></div><Mark tone="muted">{t(link.enabled === false ? "links.off" : "links.notRunning")}</Mark></div>
 				{manage(link.tag)}
 			</Glass>)}
 		</div>

@@ -5,7 +5,7 @@ import {AdminsTab} from "./admins.tsx";
 import {BackupTab} from "./backup.tsx";
 import {ErrorNote, PageHead, TotpShown, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 
-export type Prefs = {locale: "en" | "fa", scheme: "system" | "dark" | "light"};
+export type Prefs = {locale: "en" | "fa", scheme: "system" | "dark" | "light", direction: "auto" | "ltr" | "rtl"};
 
 const TABS = ["sessions", "security", "admins", "audit", "backup", "display"];
 
@@ -22,6 +22,7 @@ export function AccountPage({tab, username, prefs, onPrefs, onLogout}: {tab: str
 			{id: "display", label: t("account.tab.display"), content: <Glass className="p-panel p-form">
 				<div className="p-field-row"><span className="vw-label">{t("display.scheme")}</span><Segmented label={t("display.scheme")} value={prefs.scheme} onChange={scheme => onPrefs({...prefs, scheme: scheme as Prefs["scheme"]})} options={[{value: "system", label: t("display.system")}, {value: "dark", label: t("display.dark")}, {value: "light", label: t("display.light")}]}/></div>
 				<div className="p-field-row"><span className="vw-label">{t("display.language")}</span><Segmented label={t("display.language")} value={prefs.locale} onChange={locale => onPrefs({...prefs, locale: locale as Prefs["locale"]})} options={[{value: "en", label: "English"}, {value: "fa", label: "فارسی"}]}/></div>
+				<div className="p-field-row"><span className="vw-label">{t("display.direction")}</span><Segmented label={t("display.direction")} value={prefs.direction} onChange={direction => onPrefs({...prefs, direction: direction as Prefs["direction"]})} options={[{value: "auto", label: t("display.directionAuto")}, {value: "ltr", label: t("display.directionLtr")}, {value: "rtl", label: t("display.directionRtl")}]}/></div>
 			</Glass>}
 		]}/>
 	</>;

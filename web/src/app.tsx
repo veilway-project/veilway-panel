@@ -31,9 +31,11 @@ export function App() {
 	const [prefs, setPrefs] = useState<Prefs>(() => {
 		const query = new URLSearchParams(location.search), stored = (() => { try { return JSON.parse(localStorage.getItem(PREFS) ?? "{}") as Partial<Prefs>; } catch { return {}; } })();
 		const locale = query.get("lang") ?? stored.locale, scheme = query.get("scheme") ?? stored.scheme;
-		return {locale: locale === "fa" ? "fa" : "en", scheme: scheme === "dark" || scheme === "light" ? scheme : "system"};
+		return {locale: locale === "fa" ? "fa" : "en", scheme: scheme === "dark" || scheme === "light" ? scheme : "system", direction: stored.direction === "ltr" || stored.direction === "rtl" ? stored.direction : "auto"};
 	});
 	const settings = useMemo(() => ({...DEFAULT_SETTINGS, locale: prefs.locale, scheme: prefs.scheme}), [prefs]);
+	// UiProvider sets the direction of the language on every change; an explicit choice is written after it, since parent effects run after child effects.
+	useEffect(() => { if (prefs.direction !== "auto") document.documentElement.dir = prefs.direction; });
 	const change = (next: Prefs) => { setPrefs(next); try { localStorage.setItem(PREFS, JSON.stringify(next)); } catch { /* the choice lasts for this visit only */ } };
 	return <UiProvider settings={settings} extra={PACKS}><ToastProvider><GuardProvider><Root prefs={prefs} onPrefs={change}/></GuardProvider></ToastProvider></UiProvider>;
 }
@@ -135,7 +137,7 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 						{status?.version && <span className="p-node-host vw-small vw-muted">{t("side.version", {version: status.version})}</span>}
 						{node.data?.reachable && <dl className="p-node-meta">
 							<div><dt>{t("side.online")}</dt><dd className="vw-num">{online === undefined ? "" : t("count.users", {count: online})}</dd></div>
-							{status?.generation !== undefined && <div><dt>{t("side.config")}</dt><dd className="vw-num">{t("side.configNo", {generation: number(status.generation)})}</dd></div>}
+							{status?.generation !== undefined && <div><dt>{t("side.config")}</dt><dd className="vw-num" title={t("side.configHint")}>{t("side.configNo", {generation: number(status.generation)})}</dd></div>}
 							{list.length > 0 && <div><dt>{t("side.links")}</dt><dd className="vw-num">{t("side.linksUp", {up: number(up), total: number(list.length)})}</dd></div>}
 							{status?.uptime_secs !== undefined && <div><dt>{t("side.uptime")}</dt><dd className="vw-num">{(span => t(span.key, {count: span.count}))(ago(status.uptime_secs))}</dd></div>}
 						</dl>}

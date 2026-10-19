@@ -38,7 +38,7 @@ export function TunnelCards({running, onChanged, onAdd}: {running: Running, onCh
 				{tunnels.map((tunnel, index) => {
 					const seen = counters.find(row => row.name === tunnel.tag), refused = seen ? REFUSED.map(why => [why, seen[`refused_${why}`]] as const) : [], lost = refused.reduce((sum, [, count]) => sum + count, 0);
 					return <Glass key={tunnel.tag} className="p-node-card">
-						<div className="p-sheet-head"><div><strong className="vw-code vw-h3">{tunnel.tag}</strong><span className="vw-small vw-muted vw-code" dir="ltr">{tunnel.protocol + " " + tunnel.listen + " > " + tunnel.target}</span></div><Mark tone={tunnel.enabled === false ? "muted" : seen ? "success" : "warning"}>{t(tunnel.enabled === false ? "links.off" : seen ? "tunnels.listening" : "tunnels.notRunning")}</Mark></div>
+						<div className="p-sheet-head"><div><strong className="vw-h3"><bdi className="vw-code" dir="ltr">{tunnel.tag}</bdi></strong><span className="vw-small vw-muted"><bdi className="vw-code" dir="ltr">{tunnel.protocol + " " + tunnel.listen + " > " + tunnel.target}</bdi></span></div><Mark tone={tunnel.enabled === false ? "muted" : seen ? "success" : "warning"}>{t(tunnel.enabled === false ? "links.off" : seen ? "tunnels.listening" : "tunnels.notRunning")}</Mark></div>
 						<dl>
 							<div><dt>{t("tunnels.exit")}</dt><dd className="vw-code">{tunnel.exit}</dd></div>
 							<div><dt>{t("tunnels.open")}</dt><dd className="vw-num">{seen ? t("tunnels.openOf", {open: number(seen.open), max: number(tunnel.max_connections ?? DEFAULT_CONNECTIONS)}) : t("users.usageUnknown")}</dd></div>
