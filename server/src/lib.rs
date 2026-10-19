@@ -21,6 +21,7 @@ pub mod statics;
 pub mod subs;
 pub mod updater;
 pub mod users;
+pub mod via;
 pub mod web;
 pub mod xray;
 

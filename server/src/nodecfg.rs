@@ -114,7 +114,7 @@ fn invalid(found: &[String]) -> Failure {Failure::new(StatusCode::UNPROCESSABLE_
 /// Asks the node whether the document is valid, or what applying it would change. Nothing changes.
 pub async fn dry_run(app: Arc<App>, document: Value, path: &str) -> Result<Response, Failure> {
 	let (_, _, live) = running(&app).await?;
-	let found = crate::borrowed::problems(&document, &live);
+	let found = [crate::borrowed::problems(&document, &live), crate::via::problems(&document, &live)].concat();
 	if !found.is_empty() {return Err(invalid(&found))}
 	let (status, body) = call(&app, "POST", path, None, Some(&with_users(&app, document).await?)).await?;
 	Ok(json(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), &body))
@@ -130,8 +130,8 @@ pub(crate) async fn apply(app: &Arc<App>, ctx: &Ctx, document: Value, revision: 
 	let (_, _, before) = running(app).await?;
 	// The site of a borrowed-site transport has not agreed to it, so adding one or changing its site or acknowledgment is a person's act, as the guarded sections are. A token never passes.
 	if crate::borrowed::sensitive(&before, &document) {reauthed(app, ctx).await?}
-	let borrowed = crate::borrowed::problems(&document, &before);
-	if !borrowed.is_empty() {return Err(invalid(&borrowed))}
+	let found = [crate::borrowed::problems(&document, &before), crate::via::problems(&document, &before)].concat();
+	if !found.is_empty() {return Err(invalid(&found))}
 	let (status, checked) = call(app, "POST", "/v1/config/validate", None, Some(&document)).await?;
 	if status != 200 || checked.get("valid") != Some(&Value::Bool(true)) {return Err(Failure::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", checked.to_string().chars().take(4000).collect::<String>()))}
 	let (status, applied) = call(app, "PUT", "/v1/config", Some(revision), Some(&document)).await?;

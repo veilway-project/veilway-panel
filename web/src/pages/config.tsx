@@ -39,6 +39,25 @@ export const loadSchema = () => schemaCache ??= api("get", "/config/schema").the
 export const loadRunning = () => api("get", "/config") as Promise<Running>;
 const str = (value: unknown) => typeof value === "string" ? value : "";
 const list = (value: unknown) => Array.isArray(value) ? value as Item[] : [];
+// The reason a Through choice cannot be saved, read from the outbounds as they would be saved. `from` is the outbound that goes through, or empty for a link, which nothing can go back to. Mirrors `server/src/via.rs`.
+export function viaProblem(from: string, via: string, outbounds: Item[]): PanelKey | undefined {
+	const seen = new Set([from]);
+	let at = via, hops = 1;
+	while (true) {
+		const item = outbounds.find(other => str(other.tag) === at);
+		if (item?.type !== "socks5") return "via.notSocks";
+		if (seen.has(at)) return "via.loop";
+		seen.add(at);
+		if (!str(item.via)) return undefined;
+		if (++hops > 8) return "via.hops";
+		at = str(item.via);
+	}
+}
+
+// The outbounds that dial through another one, which an exit may not send UDP around. Mirrors `server/src/via.rs`.
+export function viaChained(document: Item): string[] {
+	return list(document.outbounds).filter(item => str(item.via)).map(item => str(item.tag));
+}
 
 // Says what a check found in the reader's language. The node's own reports are English only and are shown as they come.
 export function useIssueText() {
@@ -117,7 +136,7 @@ function SectionTab({section}: {section: Exclude<Section, "inbounds">}) {
 			<DataTable caption={t(`node.tab.${section}`)} rows={items.map((item, index) => ({item, index}))} rowKey={row => str(row.item.tag) || String(row.index)} empty={<StateBlock kind="empty" title={t(`config.empty.${section}`)} action={<Button variant="primary" icon="plus" onClick={() => edit(null)}>{t(`config.add.${section}`)}</Button>}>{t(`config.emptyBody.${section}`)}</StateBlock>} columns={[
 				{id: "tag", header: t("config.col.tag"), cell: ({item}) => <span className="p-user"><span className="vw-code">{str(item.tag)}</span><span className="vw-muted vw-small">{section === "exits" ? [str(item.name), str(item.country)].filter(Boolean).join(", ") : str(item.type)}</span></span>},
 				...(section === "outbounds" ? [
-					{id: "target", header: t("config.col.target"), cell: ({item}: {item: Item}) => item.type === "socks5" ? <span className="vw-code">{str(item.server)}</span> : <span className="vw-muted">{item.bind ? t("config.bind", {address: str(item.bind)}) : t("config.fromNode")}</span>}
+					{id: "target", header: t("config.col.target"), cell: ({item}: {item: Item}) => item.type === "socks5" ? <span className="p-user"><span className="vw-code">{str(item.server)}</span>{str(item.via) && <span className="vw-muted vw-small">{t("config.viaName", {outbound: str(item.via)})}</span>}</span> : <span className="vw-muted">{item.bind ? t("config.bind", {address: str(item.bind)}) : t("config.fromNode")}</span>}
 				] : [
 					{id: "backend", header: t("config.col.backend"), cell: ({item}: {item: Item}) => { const backend = (item.backend ?? {}) as Item; return backend.type === "netstack" ? t("config.backend.netstackVia", {outbound: str(backend.outbound)}) : backend.type === "chain" ? t("config.backend.chainVia", {links: (backend.links as string[] | undefined ?? []).join(", ")}) : t(`config.backend.${backend.type === "l3" ? "l3" : "block"}`); }}
 				]),
@@ -125,7 +144,7 @@ function SectionTab({section}: {section: Exclude<Section, "inbounds">}) {
 			]}/>
 		</Glass>}
 		{section !== "routing" && <p className="vw-muted vw-small">{t("config.reviewNote")}</p>}
-		{editing && section !== "routing" && <ItemForm section={section} hidden={proposed !== undefined} socks={list(document.outbounds).filter(item => item.type === "socks5").map(item => str(item.tag))} exits={list(document.exits)} item={editing.index === null ? null : items[editing.index]!} taken={items.filter((_, i) => i !== editing.index).map(item => str(item.tag))} outbounds={tags("outbounds")} schema={schema.data} onSave={item => propose(editing.index === null ? [...items, item] : items.map((old, i) => i === editing.index ? item : old))} onClose={() => setEditing(null)}/>}
+		{editing && section !== "routing" && <ItemForm section={section} hidden={proposed !== undefined} socks={list(document.outbounds).filter(item => item.type === "socks5").map(item => str(item.tag))} exits={list(document.exits)} chain={list(document.outbounds)} chained={viaChained(document)} item={editing.index === null ? null : items[editing.index]!} taken={items.filter((_, i) => i !== editing.index).map(item => str(item.tag))} outbounds={tags("outbounds")} schema={schema.data} onSave={item => propose(editing.index === null ? [...items, item] : items.map((old, i) => i === editing.index ? item : old))} onClose={() => setEditing(null)}/>}
 		{proposed !== undefined && <Review section={section} running={running} value={proposed} moves={moves} show={{kind: section === "routing" ? "rules" : section, count: section === "routing" ? list((value as Item).rules).length : items.length, go: index => { setJson(false); setProposed(undefined); requestAnimationFrame(() => { const row = window.document.querySelectorAll<HTMLElement>(".p-panel tbody tr")[index]; row?.scrollIntoView({block: "center"}); row?.querySelector<HTMLElement>("td:last-child button:last-child")?.focus(); }); }}} onClose={() => setProposed(undefined)} onDone={() => { setProposed(undefined); setEditing(null); config.reload(); }}/>}
 	</div>;
 }
@@ -258,7 +277,7 @@ function ItemJson({value, onChange}: {value: Item, onChange: (item: Item | null,
 	return <Field label={t("config.itemJson")} hint={t("config.itemJsonHint")} error={wrong || undefined}>{ids => <textarea {...ids} className="vw-input vw-code p-textarea p-json" dir="ltr" spellCheck={false} rows={14} value={text} onChange={event => edit(event.target.value)}/>}</Field>;
 }
 
-function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = [], schema, onSave, onClose}: {section: Exclude<Section, "routing">, hidden: boolean, item: Item | null, taken: string[], outbounds: string[], socks?: string[], exits?: Item[], schema: Schema | null, onSave: (item: Item, notes: string[]) => void, onClose: () => void}) {
+function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = [], chain = [], chained = [], schema, onSave, onClose}: {section: Exclude<Section, "routing">, hidden: boolean, item: Item | null, taken: string[], outbounds: string[], socks?: string[], exits?: Item[], chain?: Item[], chained?: string[], schema: Schema | null, onSave: (item: Item, notes: string[]) => void, onClose: () => void}) {
 	const {t, number} = useP(), say = useIssueText(), read = (from: Item) => ({draft: from, addresses: ((from.address as string[] | undefined) ?? []).join("\n"), links: ((((from.backend ?? {}) as Item).links as string[] | undefined) ?? []).join("\n"), rows: list(from.transports).map(toRow), headers: ((from.upgrade_headers as string[] | undefined) ?? []).join("\n")});
 	const [form, setForm] = useState(() => read(item ?? BLANK[section])), [json, setJson] = useState<string | null>(null), [issues, setIssues] = useState<{path: string, text: string}[]>([]), [tried, setTried] = useState(false);
 	const {draft, rows} = form, patch = (change: Partial<typeof form>) => setForm({...form, ...change}), setRows = (next: Row[]) => patch({rows: next});
@@ -276,6 +295,8 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 	const setPolicy = (key: string, value: string, via = "") => { const next = {...un}; if (value === "via") next[key] = {via: via || targets(key)[0] || ""}; else if (value === (key === "icmp_echo" ? "local" : "reject")) delete next[key]; else next[key] = value; setBackend("unsupported", Object.keys(next).length ? next : undefined); };
 	const keys = Array.isArray(draft.transport_keys) ? draft.transport_keys as string[] : [], keyWrong = proved && !(KEY.test(keys[0] ?? "") || (keys[0] ?? "").startsWith("<redacted")), cookieWrong = upgraded && !/^[A-Za-z0-9_-]{1,32}$/.test(str(draft.upgrade_cookie));
 	const borrowed = rows.map((row, i) => veilway && row.type === "faketls" ? borrowedProblems(row, rows, [...keys, ...rows.filter((other, j) => j !== i && other.type === "faketls").map(other => other.siteKey.trim())].filter(Boolean)) : null), borrowedWrong = borrowed.some(problem => problem && Object.keys(problem).length > 0);
+	const others = chain.filter(other => str(other.tag) !== str(item?.tag)), through = others.filter(other => other.type === "socks5" && str(other.tag) !== tag).map(other => str(other.tag)), viaWrong = section === "outbounds" && kind === "socks5" && str(draft.via) ? viaProblem(tag, str(draft.via), [...others, draft]) : undefined;
+	const udpChained = section === "exits" && back.type === "netstack" && chained.includes(str(back.outbound));
 	// The form writes the keys it shows and keeps every other key of the item and of each transport as it was.
 	const build = (): Item => section === "exits" ? back.type === "chain" ? {...draft, backend: {...back, links: lines(form.links)}} : draft : section === "outbounds" ? draft : {...Object.fromEntries(Object.entries(draft).filter(([key]) => key !== "upgrade_headers")), ...(headers.length ? {upgrade_headers: headers} : {}), address: lines(form.addresses), transports: rows.map(row => {
 		const was = list(draft.transports)[row.at], made: Item = {...(was?.type === row.type ? was : {}), type: row.type, listen: row.listen.trim()}, proxies = row.proxies.map(proxy => proxy.trim()).filter(Boolean);
@@ -297,7 +318,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 	const save = () => {
 		setTried(true);
 		if (json !== null && issues.length && issues[0]!.path === "json") return;
-		if (problems.some(problem => problem && (Object.keys(problem.errors).length || problem.shape.length)) || borrowedWrong || keyWrong || cookieWrong || headersWrong || paddingWrong("normal") || paddingWrong("wide") || rows.some(row => (POOLS[row.type] ?? []).some(key => outside(row, key))) || around || idleWrong("tcp_idle_secs") || idleWrong("udp_idle_secs") || (back.type === "netstack" && ["icmp_echo", "udp", "other"].some(key => policy(key) === "via" && !targets(key).includes(viaOf(key))))) return;
+		if (problems.some(problem => problem && (Object.keys(problem.errors).length || problem.shape.length)) || borrowedWrong || keyWrong || cookieWrong || headersWrong || paddingWrong("normal") || paddingWrong("wide") || rows.some(row => (POOLS[row.type] ?? []).some(key => outside(row, key))) || around || viaWrong || (udpChained && policy("udp") === "direct") || idleWrong("tcp_idle_secs") || idleWrong("udp_idle_secs") || (back.type === "netstack" && ["icmp_echo", "udp", "other"].some(key => policy(key) === "via" && !targets(key).includes(viaOf(key))))) return;
 		const made = build(), found = schema && typeof schema === "object" ? say(check(((schema.properties as Record<string, Item>)[section]?.items ?? true) as Schema, made, schema, section)) : [];
 		setIssues(clash ? [{path: "tag", text: t("config.tagTaken")}, ...found] : found);
 		if (!clash && !found.length) onSave(made, section === "inbounds" ? moved(rows.map(row => row.at)).map(move => t("review.moveTransport", {name: rows[move.to]!.type + " " + (rows[move.to]!.path || rows[move.to]!.listen), inbound: tag, from: number(move.from + 1), to: number(move.to + 1)})) : []);
@@ -404,13 +425,14 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 				</details>}
 			</>}
 			{section === "outbounds" && <>
-				<SelectField label={t("config.type")} value={kind} onChange={value => set("type", value)} options={[{value: "direct", label: t("config.outbound.direct"), detail: t("config.outbound.directDetail")}, {value: "socks5", label: t("config.outbound.socks5"), detail: t("config.outbound.socks5Detail")}]}/>
+				<SelectField label={t("config.type")} value={kind} onChange={value => { const copy: Item = {...draft, type: value}; if (value === "direct") delete copy.via; patch({draft: copy}); }} options={[{value: "direct", label: t("config.outbound.direct"), detail: t("config.outbound.directDetail")}, {value: "socks5", label: t("config.outbound.socks5"), detail: t("config.outbound.socks5Detail")}]}/>
 				{kind === "socks5" ? <>
 					<TextField label={t("config.server")} hint={t("config.serverHint")} placeholder="192.0.2.10:1080" value={str(draft.server)} onChange={value => set("server", value.trim())} technical/>
 					<div className="p-pair">
 						<SecretField label={t("config.username")} value={str(draft.username)} onChange={value => set("username", value)} autoComplete="off" optional/>
 						<SecretField label={t("config.password")} value={str(draft.password)} onChange={value => set("password", value)} autoComplete="off" optional/>
 					</div>
+					<SelectField label={t("config.via")} hint={t("config.viaHint") + " " + t("via.plain")} value={str(draft.via)} onChange={value => set("via", value)} error={viaWrong ? t(viaWrong) : undefined} options={[{value: "", label: t("config.viaDirect")}, ...[...through, ...(str(draft.via) && !through.includes(str(draft.via)) ? [str(draft.via)] : [])].map(tag => ({value: tag, label: tag}))]}/>
 				</> : <TextField label={t("config.bindLabel")} hint={t("config.bindHint")} value={str(draft.bind)} onChange={value => set("bind", value.trim())} technical optional/>}
 			</>}
 			{section === "exits" && <>
@@ -424,7 +446,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 					<legend className="vw-label">{t("exit.unsupported")}</legend>
 					<p className="vw-muted vw-small">{t("exit.unsupportedLead")}</p>
 					{["icmp_echo", "udp", "other"].filter(key => !(key === "udp" && direct)).map(key => <div key={key} className="p-stack">
-						<SelectField label={t(`exit.kind.${key}` as PanelKey)} value={policy(key)} onChange={value => setPolicy(key, value)} options={POLICIES[key]!.filter(word => word !== "via" || targets(key).length || policy(key) === "via").map(word => ({value: word, label: t(`exit.policy.${word}` as PanelKey), detail: t(`exit.policy.${word}Detail` as PanelKey)}))}/>
+						<SelectField label={t(`exit.kind.${key}` as PanelKey)} value={policy(key)} onChange={value => setPolicy(key, value)} options={POLICIES[key]!.filter(word => (word !== "via" || targets(key).length || policy(key) === "via") && (word !== "direct" || key !== "udp" || !udpChained || policy(key) === "direct")).map(word => ({value: word, label: t(`exit.policy.${word}` as PanelKey), detail: t(`exit.policy.${word}Detail` as PanelKey)}))} error={key === "udp" && udpChained && policy(key) === "direct" ? t("exit.err.chainedUdp") : undefined}/>
 						{policy(key) === "via" && <SelectField label={t("exit.via")} hint={t(key === "udp" ? "exit.viaUdpHint" : "exit.viaL3Hint")} value={viaOf(key)} onChange={value => setPolicy(key, "via", value)} error={targets(key).includes(viaOf(key)) ? undefined : t("exit.viaMissing")} options={[...(targets(key).includes(viaOf(key)) || !viaOf(key) ? [] : [{value: viaOf(key), label: viaOf(key)}]), ...targets(key).map(tag => ({value: tag, label: tag}))]}/>}
 						{policy(key) === "direct" && <Mark tone="warning">{t("exit.warn.direct")}</Mark>}
 					</div>)}

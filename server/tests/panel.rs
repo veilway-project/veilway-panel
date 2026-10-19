@@ -751,6 +751,48 @@ async fn notices_dns_log_links_and_replay_are_sections_like_the_others() {
 }
 
 #[tokio::test]
+async fn through_is_written_when_set_and_refused_when_it_loops_breaks_a_user_or_is_too_long() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	let proxies = json!([{"tag": "plain", "type": "direct"}, {"tag": "p1", "type": "socks5", "server": "127.0.0.1:1080"}, {"tag": "p2", "type": "socks5", "server": "127.0.0.1:1081", "via": "p1"}]);
+	let applied = h.call(Method::PUT, "/p/api/config/outbounds", Some(&session), Some(json!({"revision": "rev1", "value": proxies})), "10.0.0.1").await;
+	assert_eq!(applied.status, StatusCode::OK, "{}", String::from_utf8_lossy(&applied.body));
+	let document = fake.applied.lock().unwrap().last().unwrap().clone();
+	assert_eq!((document["outbounds"][1].get("via").cloned(), document["outbounds"][2]["via"].clone()), (None, json!("p1")), "through is written only when it is set");
+	let long: Vec<Value> = std::iter::once(json!({"tag": "h0", "type": "socks5", "server": "127.0.0.1:1080"})).chain((1..=9).map(|i| json!({"tag": format!("h{i}"), "type": "socks5", "server": "127.0.0.1:1080", "via": format!("h{}", i - 1)}))).collect();
+	let refusals = [
+		(json!([{"tag": "p1", "type": "socks5", "server": "127.0.0.1:1080", "via": "p2"}, {"tag": "p2", "type": "socks5", "server": "127.0.0.1:1081", "via": "p1"}]), "is in a loop"),
+		(json!([{"tag": "p1", "type": "socks5", "server": "127.0.0.1:1080", "via": "nope"}]), "names no socks5 outbound"),
+		(json!([{"tag": "plain", "type": "direct"}, {"tag": "p1", "type": "socks5", "server": "127.0.0.1:1080", "via": "plain"}]), "names no socks5 outbound"),
+		(json!([{"tag": "plain", "type": "direct", "via": "p1"}, {"tag": "p1", "type": "socks5", "server": "127.0.0.1:1080"}]), "only a socks5 outbound"),
+		(Value::Array(long), "more than 8 hops"),
+		(json!([{"tag": "plain", "type": "direct"}, {"tag": "p9", "type": "socks5", "server": "127.0.0.1:1080"}, {"tag": "p2", "type": "socks5", "server": "127.0.0.1:1081", "via": "p1"}]), "the Through of outbound p2 names p1"),
+	];
+	for (value, text) in refusals {
+		let refused = h.call(Method::PUT, "/p/api/config/outbounds", Some(&session), Some(json!({"revision": "rev2", "value": value})), "10.0.0.1").await;
+		assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{text}");
+		assert!(String::from_utf8_lossy(&refused.body).contains(text), "{text}: {}", String::from_utf8_lossy(&refused.body));
+	}
+	let mut looped = node_document("10.66.0.1/24");
+	looped["outbounds"] = json!([{"tag": "p1", "type": "socks5", "server": "127.0.0.1:1080", "via": "p1"}]);
+	assert_eq!(h.call(Method::POST, "/p/api/config/validate", Some(&session), Some(json!({"document": looped})), "10.0.0.1").await.status, StatusCode::UNPROCESSABLE_ENTITY);
+	let dialed = json!([{"tag": "up", "direction": "forward", "peer": {"public_key": "AAAA"}, "via": "p1"}]);
+	assert_eq!(h.call(Method::PUT, "/p/api/config/links", Some(&session), Some(json!({"revision": "rev2", "value": dialed})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(fake.applied.lock().unwrap().last().unwrap()["links"][0]["via"], "p1", "a dialed link keeps its through");
+	let listening = json!([{"tag": "in", "direction": "forward", "inbound": "Main", "public_key": "AAAA", "via": "p1"}]);
+	let refused = h.call(Method::PUT, "/p/api/config/links", Some(&session), Some(json!({"revision": "rev3", "value": listening})), "10.0.0.1").await;
+	assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+	assert!(String::from_utf8_lossy(&refused.body).contains("only a link this node dials"));
+	let chained_exit = json!([{"tag": "a", "backend": {"type": "netstack", "outbound": "p2", "unsupported": {"udp": "direct"}}}]);
+	let refused = h.call(Method::PUT, "/p/api/config/exits", Some(&session), Some(json!({"revision": "rev3", "value": chained_exit})), "10.0.0.1").await;
+	assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+	assert!(String::from_utf8_lossy(&refused.body).contains("around the chain of outbound p2"));
+	let target_only = json!([{"tag": "a", "backend": {"type": "netstack", "outbound": "p1", "unsupported": {"udp": "direct"}}}]);
+	assert_eq!(h.call(Method::PUT, "/p/api/config/exits", Some(&session), Some(json!({"revision": "rev3", "value": target_only})), "10.0.0.1").await.status, StatusCode::OK, "an outbound that is only the target of a through dials directly, so direct UDP is allowed");
+}
+
+#[tokio::test]
 async fn a_default_exit_is_one_of_the_users_exits_and_goes_with_its_exit() {
 	let mut document = node_document("10.66.0.1/24");
 	document["exits"] = json!([{"tag": "fra", "backend": {"type": "netstack", "outbound": "plain"}}, {"tag": "ams", "backend": {"type": "netstack", "outbound": "plain"}}]);

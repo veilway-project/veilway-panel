@@ -3,7 +3,7 @@ import {useRef, useState} from "react";
 import {api, ApiError, type NodeLink, type Pairings, type Pasted, type Running, type Template, type User, type UserPatch} from "../api.ts";
 import {ago, Copyable, DayField, ErrorNote, lines, LinesField, Mark, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {SectionReview, useRunning} from "./apply.tsx";
-import {loadRunning} from "./config.tsx";
+import {loadRunning, viaProblem} from "./config.tsx";
 import {TunnelCards, TunnelPreset} from "./tunnels.tsx";
 
 type Compare = {id: string, fingerprint: string, name: string};
@@ -72,7 +72,7 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 		</div>
 		{running.data && !flow && !answering && <TunnelCards running={running.data} onChanged={running.reload} onAdd={() => setTunnelPreset("tcp")}/>}
 		{links.data && !(links.data.links ?? []).length && !flow && <Glass className="p-panel"><StateBlock kind="empty" title={t("links.empty")} action={<Button variant="primary" icon="plus" onClick={() => setFlow("offer")}>{t("links.offer")}</Button>}>{t("links.emptyBody")}</StateBlock></Glass>}
-		{editing && <LinkDialog link={editing} exits={((running.data?.document.exits ?? []) as {tag: string, backend?: {type?: string}}[]).filter(exit => exit.backend?.type !== "chain").map(exit => exit.tag)} onClose={() => setEditing(null)} onSave={changed => { setEditing(null); setProposed({value: configured.map(link => link.tag === changed.tag ? changed : link), summary: t("links.summaryEdit", {name: changed.tag})}); }}/>}
+		{editing && <LinkDialog link={editing} exits={((running.data?.document.exits ?? []) as {tag: string, backend?: {type?: string}}[]).filter(exit => exit.backend?.type !== "chain").map(exit => exit.tag)} outbounds={(running.data?.document.outbounds ?? []) as Record<string, unknown>[]} onClose={() => setEditing(null)} onSave={changed => { setEditing(null); setProposed({value: configured.map(link => link.tag === changed.tag ? changed : link), summary: t("links.summaryEdit", {name: changed.tag})}); }}/>}
 		<ConfirmDialog open={removing !== null} onOpenChange={open => { if (!open) setRemoving(null); }} danger title={t("links.removeTitle", {name: removing?.tag ?? ""})} body={t("links.removeBody", {name: removing?.tag ?? ""})} confirmLabel={t("links.removeConfirm")} onConfirm={() => { const gone = removing!; setRemoving(null); setProposed({value: configured.filter(link => link.tag !== gone.tag), summary: t("links.summaryRemove", {name: gone.tag})}); }}/>
 		{proposed && running.data && <SectionReview section="links" running={running.data} value={proposed.value} summary={<p>{proposed.summary}</p>} onClose={() => setProposed(null)} onDone={() => { setProposed(null); running.reload(); refresh(); }}/>}
 		{pairings.data && waiting > 0 && <Glass className="p-panel">
@@ -89,12 +89,15 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 const exitHalf = (link: LinkConfig) => (link.inbound !== undefined) === (link.direction === "forward");
 
 // What can change on a link after pairing: whether it runs, and on the exit half what it may use. The keys and the transports stay as the pairing made them.
-function LinkDialog({link, exits, onClose, onSave}: {link: LinkConfig, exits: string[], onClose: () => void, onSave: (link: LinkConfig) => void}) {
+function LinkDialog({link, exits, outbounds, onClose, onSave}: {link: LinkConfig, exits: string[], outbounds: Record<string, unknown>[], onClose: () => void, onSave: (link: LinkConfig) => void}) {
 	const {t} = useP(), exitSide = exitHalf(link), [enabled, setEnabled] = useState(link.enabled ?? true), [exit, setExit] = useState(link.exit ?? ""), [allowed, setAllowed] = useState(link.exits ?? []), [allowPrivate, setAllowPrivate] = useState(link.allow_private ?? false);
 	const [flows, setFlows] = useState<number | "">(link.max_flows ?? ""), [quota, setQuota] = useState<number | "">(link.quota_bytes ? Math.round(link.quota_bytes / GB * 100) / 100 : ""), [period, setPeriod] = useState(link.quota_period ?? "none"), [day, setDay] = useState(link.expires_at ? link.expires_at.slice(0, 10) : ""), [mtu, setMtu] = useState<number | "">(link.mtu ?? "");
+	const [through, setThrough] = useState((link.via as string | undefined) ?? ""), dials = link.peer !== undefined, socks = outbounds.filter(item => item.type === "socks5").map(item => String(item.tag)), viaWrong = dials && through ? viaProblem("", through, outbounds) : undefined;
 	const save = () => {
+		if (viaWrong) return;
 		const made: LinkConfig = {...link};
-		for (const key of ["enabled", "exit", "exits", "allow_private", "max_flows", "quota_bytes", "quota_period", "expires_at", "mtu"]) delete made[key];
+		for (const key of ["enabled", "exit", "exits", "allow_private", "max_flows", "quota_bytes", "quota_period", "expires_at", "mtu", "via"]) delete made[key];
+		if (dials && through) made.via = through;
 		if (!enabled) made.enabled = false;
 		if (exitSide && exit) made.exit = exit;
 		if (exitSide && allowed.length) made.exits = allowed;
@@ -109,6 +112,7 @@ function LinkDialog({link, exits, onClose, onSave}: {link: LinkConfig, exits: st
 	return <Dialog open onOpenChange={open => { if (!open) onClose(); }} title={t("links.manageTitle", {name: link.tag})} description={t(exitSide ? "links.manageExit" : "links.manageEntry")}>
 		<form className="p-stack" onSubmit={event => { event.preventDefault(); save(); }} noValidate>
 			<Switch label={t("links.enabled")} hint={t("links.enabledHint")} checked={enabled} onChange={setEnabled}/>
+			{dials && <SelectField label={t("links.via")} hint={t("links.viaHint") + " " + t("via.plain")} value={through} onChange={setThrough} error={viaWrong ? t(viaWrong) : undefined} options={[{value: "", label: t("config.viaDirect")}, ...[...socks, ...(through && !socks.includes(through) ? [through] : [])].map(tag => ({value: tag, label: tag}))]}/>}
 			{exitSide && <>
 				<SelectField label={t("links.exit")} hint={t("links.exitHint")} value={exit} onChange={setExit} options={[{value: "", label: t("links.exitDefault")}, ...exits.map(tag => ({value: tag, label: tag}))]}/>
 				<div className="vw-field"><span className="vw-label">{t("links.exits")}</span><p className="vw-note">{t("links.exitsHint")}</p><ul className="p-row-list p-exit-list">{exits.map(tag => <li key={tag}><label className="p-exit"><input type="checkbox" className="p-check" checked={allowed.includes(tag)} onChange={event => setAllowed(event.target.checked ? [...allowed, tag] : allowed.filter(held => held !== tag))}/><span className="p-row-text"><strong className="vw-code">{tag}</strong></span><span/></label></li>)}</ul></div>

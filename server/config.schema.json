@@ -745,6 +745,11 @@
         "transport_secret": {
           "$ref": "#/$defs/TransportSecret",
           "description": "The secret the two nodes agreed on when they were paired. It never travels."
+        },
+        "via": {
+          "description": "On the node that dials (it has `peer`): the tag of a socks5 outbound that the link's TCP transports connect through. Its UDP transports are not used through it.",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "type": "string"
         }
       },
       "required": [
@@ -1093,6 +1098,11 @@
               "description": "A secret. No diagnostic, log line or `Debug` output shows it.",
               "maxLength": 255,
               "minLength": 1,
+              "type": "string"
+            },
+            "via": {
+              "description": "The tag of another socks5 outbound that this one connects through to reach its server. A chain may have at most 8 hops and may not loop.",
+              "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
               "type": "string"
             }
           },
