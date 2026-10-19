@@ -3,6 +3,8 @@
 .p-page { display: grid; gap: var(--s-5); align-content: start; min-inline-size: 0; }
 .p-stack { display: grid; gap: var(--s-4); align-content: start; min-inline-size: 0; }
 .p-cluster { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+/* The banner's narrow-shell rule waits for a `shell` container that the panel never defines, so a group of actions drops below the text here instead. */
+@media (max-width: 480px) { .vw-banner > .p-cluster { grid-column: 2; justify-self: start; } }
 .p-row { display: flex; flex-wrap: wrap; align-items: start; justify-content: space-between; gap: var(--s-3); }
 .p-pad { padding: var(--s-2) var(--s-3); }
 .p-panel { display: grid; gap: var(--s-4); align-content: start; padding: var(--s-4); min-inline-size: 0; }

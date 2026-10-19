@@ -1185,6 +1185,8 @@ async fn an_update_is_requested_with_a_file_that_holds_only_the_word_panel() {
 	assert_eq!((info["latest"].is_null(), info["can_update"].clone(), info["updating"].clone()), (true, json!(true), json!(false)));
 	assert_eq!(h.call(Method::POST, "/p/api/update/request", Some(&session), None, "10.0.0.1").await.status, StatusCode::CONFLICT);
 	assert!(!h.app.cfg.update_request.exists());
+	assert_eq!(h.call(Method::POST, "/p/api/update/request", Some(&session), Some(json!({"part": "node"})), "10.0.0.1").await.status, StatusCode::CONFLICT);
+	assert_eq!(h.call(Method::POST, "/p/api/update/request", Some(&session), Some(json!({"part": "all"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
 	h.app.update.lock().unwrap().found = Some(veilway_panel::updater::Found {version: "9.9.9".into(), notes_url: "https://github.com/veilway-project/veilway-panel/releases/tag/v9.9.9".into()});
 	assert_eq!(h.bearer(Method::POST, "/p/api/update/request", &full, None, "10.1.1.1").await.status, StatusCode::FORBIDDEN);
 	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
@@ -1198,7 +1200,7 @@ async fn an_update_is_requested_with_a_file_that_holds_only_the_word_panel() {
 	assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&h.app.cfg.update_request).unwrap().permissions()) & 0o777, 0o600);
 	assert_eq!(h.call(Method::GET, "/p/api/update", Some(&session), None, "10.0.0.1").await.json()["updating"], true);
 	assert_eq!(h.call(Method::POST, "/p/api/update/request", Some(&session), None, "10.0.0.1").await.status, StatusCode::CONFLICT);
-	let audit: i64 = h.app.db.call(|db| db.query_row("select count(*) from audit where action = 'update.request' and detail = 'from ' || ? || ' to 9.9.9'", [veilway_panel::updater::CURRENT], |row| row.get(0)).unwrap()).await.unwrap();
+	let audit: i64 = h.app.db.call(|db| db.query_row("select count(*) from audit where action = 'update.request' and detail = 'panel from ' || ? || ' to 9.9.9'", [veilway_panel::updater::CURRENT], |row| row.get(0)).unwrap()).await.unwrap();
 	assert_eq!(audit, 1);
 	std::fs::remove_dir_all(folder).unwrap();
 	h.app.update.lock().unwrap().requested_at = None;

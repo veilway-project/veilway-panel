@@ -1,6 +1,6 @@
 import {Backdrop, Banner, Button, DEFAULT_SETTINGS, Glass, Icon, IconButton, PRODUCT, Segmented, StateBlock, ToastProvider, UiProvider, useToast, type IconName} from "@veilway/ui";
 import {useEffect, useMemo, useRef, useState, type ReactNode} from "react";
-import {api, flags, session, type NodeLink, type Settings} from "./api.ts";
+import {api, flags, session, type NodeLink, type Part, type Settings} from "./api.ts";
 import {en, type PanelKey} from "./locales/en.ts";
 import {fa} from "./locales/fa.ts";
 import {ago, ErrorNote, GuardProvider, useGuard, useLoad, useP, useSay} from "./kit.tsx";
@@ -178,28 +178,33 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 	</Backdrop>;
 }
 
-// A newer release, with the one action that asks the host to install it. The host answers the request itself, so after it the panel goes away and comes back as the new version.
+// Newer releases of the panel and the node, each with its notes and the action that asks the host to install it. The host answers the request itself: the panel goes away and comes back as the new version, and the node restarts, which drops its live tunnels for a moment.
 function UpdateBanner() {
-	const {t} = useP(), guard = useGuard(), info = useLoad(() => api("get", "/update"), []), [asked, setAsked] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null);
-	const updating = asked || !!info.data?.updating, from = info.data?.current;
-	const start = useLoad(() => api("get", "/status"), []), startId = start.data?.start_id;
+	const {t} = useP(), guard = useGuard(), info = useLoad(() => api("get", "/update"), []), [asked, setAsked] = useState<Part | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null);
+	const data = info.data, from = data?.current, nodeFrom = data?.node_current, start = useLoad(() => api("get", "/status"), []), startId = start.data?.start_id;
+	const panelBusy = asked === "panel" || asked === "both" || !!data?.updating, nodeBusy = asked === "node" || asked === "both" || !!data?.node_updating, updating = panelBusy || nodeBusy;
 	useEffect(() => {
 		if (!updating || !from || !startId) return;
 		const started = Date.now(), timer = setInterval(() => {
-			if (Date.now() - started > 15 * 60_000) { clearInterval(timer); setAsked(false); setError(new Error(t("banner.update.slow"))); return; }
-			// Done when the server restarted (a new start id) or reports another version.
+			if (Date.now() - started > 15 * 60_000) { clearInterval(timer); setAsked(null); setError(new Error(t("banner.update.slow"))); return; }
+			// Done when the server restarted (a new start id), the panel reports another version, or the node is back with another one.
 			void api("get", "/status").then(next => { if (next.start_id !== startId) location.reload(); }, () => {});
-			void api("get", "/update").then(next => { if (next.current !== from) location.reload(); }, () => {});
+			void api("get", "/update").then(next => { if (next.current !== from || (next.node_current && next.node_current !== nodeFrom)) location.reload(); }, () => {});
 		}, 3000);
 		return () => clearInterval(timer);
-	}, [updating, from, startId, t]);
-	if (!info.data?.latest) return null;
-	const ask = () => { setBusy(true); setError(null); void guard(() => api("post", "/update/request")).then(() => setAsked(true), setError).finally(() => setBusy(false)); };
-	if (updating) return <Banner tone="info" title={t("banner.update.running", {version: info.data.latest})}>{t("banner.update.runningBody")}</Banner>;
-	return <Banner tone="info" title={t("banner.update.title", {version: info.data.latest})} action={<>
-		{info.data.notes_url && <Button size="sm" onClick={() => { window.open(info.data!.notes_url!, "_blank", "noopener,noreferrer"); }}>{t("banner.update.notes")}</Button>}
-		{info.data.can_update && <Button size="sm" variant="primary" disabled={busy} onClick={ask}>{t("banner.update.button")}</Button>}
-	</>}>{error ? <ErrorNote error={error}/> : !info.data.can_update ? t("banner.update.manual") : null}</Banner>;
+	}, [updating, from, nodeFrom, startId, t]);
+	if (!data || (!data.latest && !data.node_latest && !updating)) return null;
+	if (updating) return <Banner tone="info" title={panelBusy ? t("banner.update.running", {version: data.latest ?? ""}) : t("banner.update.runningNode", {version: data.node_latest ?? ""})}>{error ? <ErrorNote error={error}/> : panelBusy ? t("banner.update.runningBody") : t("banner.update.runningNodeBody")}</Banner>;
+	const panel = !!data.latest, node = !!data.node_latest, both = panel && node, can = data.can_update;
+	const title = both ? t("banner.update.bothTitle", {panel: data.latest ?? "", node: data.node_latest ?? ""}) : panel ? t("banner.update.title", {version: data.latest ?? ""}) : t("banner.update.nodeTitle", {version: data.node_latest ?? ""});
+	const ask = (part: Part) => { setBusy(true); setError(null); void guard(() => api("post", "/update/request", {body: {part}})).then(() => setAsked(part), setError).finally(() => setBusy(false)); };
+	return <Banner tone="info" title={title} action={<div className="p-cluster">
+		{panel && data.notes_url && <Button size="sm" onClick={() => { window.open(data.notes_url!, "_blank", "noopener,noreferrer"); }}>{t("banner.update.notes")}</Button>}
+		{node && data.node_notes_url && <Button size="sm" onClick={() => { window.open(data.node_notes_url!, "_blank", "noopener,noreferrer"); }}>{t("banner.update.nodeNotes")}</Button>}
+		{can && panel && <Button size="sm" variant={both ? "secondary" : "primary"} disabled={busy} onClick={() => ask("panel")}>{t("banner.update.panelButton")}</Button>}
+		{can && node && <Button size="sm" variant={both ? "secondary" : "primary"} disabled={busy} onClick={() => ask("node")}>{t("banner.update.nodeButton")}</Button>}
+		{can && both && <Button size="sm" variant="primary" disabled={busy} onClick={() => ask("both")}>{t("banner.update.bothButton")}</Button>}
+	</div>}>{error ? <ErrorNote error={error}/> : !can ? t("banner.update.manual") : node ? t("banner.update.nodeWarning") : null}</Banner>;
 }
 
 // The node's health in one line at the top of every page, with the one action that can fix a missed push.

@@ -1,4 +1,4 @@
-//! Finding out that a newer panel exists, and asking for it. The panel runs unprivileged and never updates itself: a request is a file with the word `panel` in a folder only the panel and root can write, which a root service on the host answers (see `veilway.sh`). Everything GitHub sends is untrusted.
+//! Finding out that a newer panel or node exists, and asking for it. The panel runs unprivileged and never updates itself: a request is a file with the word `panel`, `node` or `both` in a folder only the panel and root can write, which a root service on the host answers (see `veilway.sh`). Everything GitHub sends is untrusted.
 use crate::{app::App, crypto::now, http::{ok, Ctx, Failure}};
 use axum::{extract::State, http::StatusCode, response::Response, Extension};
 use http_body_util::{BodyExt, Empty, Limited};
@@ -6,7 +6,7 @@ use hyper::{body::Bytes, Request};
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::ServerName;
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{cmp::Ordering, fs::OpenOptions, io::{ErrorKind, Write}, os::unix::fs::OpenOptionsExt, sync::Arc, time::Duration};
 use tokio::net::TcpStream;
@@ -14,8 +14,10 @@ use tokio_rustls::TlsConnector;
 
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 const HOST: &str = "api.github.com";
-const PATH: &str = "/repos/veilway-project/veilway-panel/releases/latest";
-const NOTES: &str = "https://github.com/veilway-project/veilway-panel/releases/tag/";
+const PANEL_PATH: &str = "/repos/veilway-project/veilway-panel/releases/latest";
+const PANEL_NOTES: &str = "https://github.com/veilway-project/veilway-panel/releases/tag/";
+const NODE_PATH: &str = "/repos/veilway-project/veilway/releases/latest";
+const NODE_NOTES: &str = "https://github.com/veilway-project/veilway/releases/tag/";
 /// The release answer is a few KiB. Past this the body is dropped unread.
 const BODY_MAX: usize = 262_144;
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -67,20 +69,62 @@ impl Ord for Version {
 	}
 }
 
-/// What the last good check found: a release newer than this build.
+/// A published release: its version without the `v`, and the page that holds its notes.
 #[derive(Clone, Debug)]
 pub struct Found {pub version: String, pub notes_url: String}
 
+/// The newest published release of the panel and of the node, as the last good checks found them, whether or not they are newer than what runs.
 #[derive(Default)]
-pub struct Known {pub found: Option<Found>, pub checked_at: Option<i64>, pub requested_at: Option<i64>}
+pub struct Known {pub found: Option<Found>, pub node_found: Option<Found>, pub checked_at: Option<i64>, pub requested_at: Option<i64>, pub requested: Option<Part>, pub node_from: Option<String>}
 
-/// The tag of a published release, if the answer is one and is newer than `current`. The link is made here from the tag, since the answer's own links are not trusted.
-pub fn newer(body: &[u8], current: &str) -> Result<Option<Found>, String> {
+/// What an update request is for. The word is what the host script reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Part {Panel, Node, Both}
+
+impl Part {
+	fn word(self) -> &'static str {match self {Part::Panel => "panel", Part::Node => "node", Part::Both => "both"}}
+}
+
+/// The body of an update request.
+#[derive(Deserialize, JsonSchema)]
+pub struct Choice {pub part: Part}
+
+/// The newest published release from its answer. The link is made here from the tag, since the answer's own links are not trusted. Drafts and pre-releases are nothing to offer.
+fn release(body: &[u8], notes: &str) -> Result<Option<Found>, String> {
 	let release: Value = serde_json::from_slice(body).map_err(|_| "the answer is not JSON".to_string())?;
 	if release.get("draft").and_then(Value::as_bool).unwrap_or(false) || release.get("prerelease").and_then(Value::as_bool).unwrap_or(false) {return Ok(None)}
 	let tag = release.get("tag_name").and_then(Value::as_str).ok_or("the answer has no tag")?;
-	let (latest, current) = (Version::parse(tag).ok_or("the tag is not a version")?, Version::parse(current).ok_or("this build has no valid version")?);
-	Ok((latest > current).then(|| Found {version: tag.strip_prefix('v').unwrap_or(tag).to_string(), notes_url: format!("{NOTES}{tag}")}))
+	Version::parse(tag).ok_or("the tag is not a version")?;
+	Ok(Some(Found {version: tag.strip_prefix('v').unwrap_or(tag).to_string(), notes_url: format!("{notes}{tag}")}))
+}
+
+/// The release when it is newer than `current`, the version this panel or the node runs. Nothing is offered while either version is unknown.
+fn offered(found: Option<&Found>, current: Option<&str>) -> Option<Found> {
+	let found = found?;
+	(Version::parse(&found.version)? > Version::parse(current?)?).then(|| found.clone())
+}
+
+/// The node's version as its last poll saw it, when the node answered and the version parses.
+fn node_version(app: &App) -> Option<String> {
+	let live = app.live.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+	live.as_ref().filter(|live| live.reachable).and_then(|live| live.health["version"].as_str()).filter(|version| Version::parse(version).is_some()).map(str::to_string)
+}
+
+/// The part an update request asks for. An empty body asks for the panel, as requests did before the node could be asked. Anything but an object with a known part is refused.
+fn requested_part(body: &[u8]) -> Option<Part> {
+	if body.is_empty() {return Some(Part::Panel)}
+	serde_json::from_slice::<Value>(body).ok().filter(Value::is_object).and_then(|value| serde_json::from_value::<Choice>(value).ok()).map(|choice| choice.part)
+}
+
+/// The part a request writes, given what was asked and which parts have a newer release.
+fn chosen(asked: Part, panel: bool, node: bool) -> Option<Part> {
+	match (panel && asked != Part::Node, node && asked != Part::Panel) {
+		(true, true) => Some(Part::Both),
+		(true, false) => Some(Part::Panel),
+		(false, true) => Some(Part::Node),
+		(false, false) => None,
+	}
 }
 
 fn connector() -> TlsConnector {
@@ -88,13 +132,13 @@ fn connector() -> TlsConnector {
 	TlsConnector::from(Arc::new(rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_safe_default_protocol_versions().expect("the default protocol versions").with_root_certificates(roots).with_no_client_auth()))
 }
 
-async fn fetch() -> Result<Vec<u8>, String> {
+async fn fetch(path: &str) -> Result<Vec<u8>, String> {
 	let attempt = async {
 		let tcp = TcpStream::connect((HOST, 443)).await.map_err(|error| error.to_string())?;
 		let tls = connector().connect(ServerName::try_from(HOST).map_err(|error| error.to_string())?, tcp).await.map_err(|error| error.to_string())?;
 		let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(tls)).await.map_err(|error| error.to_string())?;
 		tokio::spawn(connection);
-		let request = Request::builder().uri(PATH).header("host", HOST).header("user-agent", format!("veilway-panel/{CURRENT}")).header("accept", "application/vnd.github+json").body(Empty::<Bytes>::new()).map_err(|error| error.to_string())?;
+		let request = Request::builder().uri(path).header("host", HOST).header("user-agent", format!("veilway-panel/{CURRENT}")).header("accept", "application/vnd.github+json").body(Empty::<Bytes>::new()).map_err(|error| error.to_string())?;
 		let response = sender.send_request(request).await.map_err(|error| error.to_string())?;
 		if response.status() != StatusCode::OK {return Err(format!("GitHub answered {}", response.status().as_u16()))}
 		Ok(Limited::new(response.into_body(), BODY_MAX).collect().await.map_err(|_| "the answer is larger than allowed or was cut".to_string())?.to_bytes().to_vec())
@@ -102,21 +146,30 @@ async fn fetch() -> Result<Vec<u8>, String> {
 	tokio::time::timeout(TIMEOUT, attempt).await.map_err(|_| "GitHub did not answer in time".to_string())?
 }
 
-/// One check, at start and every six hours. A failure is logged and tried again in half an hour, so one bad answer never stops the checks.
+fn record(slot: &mut Option<Found>, name: &str, answer: Result<Option<Found>, String>) {
+	match answer {
+		Ok(found) => {
+			if found.as_ref().map(|found| &found.version) != slot.as_ref().map(|found| &found.version) {tracing::info!("update check: the newest {name} release is {}", found.as_ref().map_or("none", |found| found.version.as_str()))}
+			*slot = found;
+		}
+		Err(error) => tracing::warn!("update check of the {name} failed: {error}"),
+	}
+}
+
+/// One check of each repository, at start and every six hours. A failure is logged and tried again in half an hour, and the last good answer stays until then.
 pub fn spawn_checks(app: Arc<App>) {
 	if !app.cfg.update_check {return}
 	tokio::spawn(async move {
 		loop {
-			let wait = match fetch().await.and_then(|body| newer(&body, CURRENT)) {
-				Ok(found) => {
-					let mut state = app.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-					if found.as_ref().map(|found| &found.version) != state.found.as_ref().map(|found| &found.version) {tracing::info!("update check: {}", found.as_ref().map_or("this panel is current".to_string(), |found| format!("{} is available", found.version)))}
-					(state.found, state.checked_at) = (found, Some(now()));
-					EVERY
-				}
-				Err(error) => {tracing::warn!("update check failed: {error}"); RETRY}
-			};
-			tokio::time::sleep(wait).await;
+			let (panel, node) = (fetch(PANEL_PATH).await.and_then(|body| release(&body, PANEL_NOTES)), fetch(NODE_PATH).await.and_then(|body| release(&body, NODE_NOTES)));
+			let failed = panel.is_err() || node.is_err();
+			{
+				let mut state = app.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+				record(&mut state.found, "panel", panel);
+				record(&mut state.node_found, "node", node);
+				if !failed {state.checked_at = Some(now())}
+			}
+			tokio::time::sleep(if failed {RETRY} else {EVERY}).await;
 		}
 	});
 }
@@ -130,28 +183,44 @@ pub struct UpdateInfo {
 	pub checked_at: Option<i64>,
 	/// Whether the folder for update requests exists, which a host installed or updated by `veilway.sh` has.
 	pub can_update: bool,
-	/// A request was made and this panel has not come back as another version yet.
+	/// A panel update was requested and this panel has not come back as another version yet.
 	pub updating: bool,
+	/// The node's version, when the node is reachable and reports one.
+	pub node_current: Option<String>,
+	/// The newest node release, when it is newer than the node's version.
+	pub node_latest: Option<String>,
+	pub node_notes_url: Option<String>,
+	/// A node update was requested and the node has not come back with another version yet.
+	pub node_updating: bool,
 }
 
 pub async fn info(State(app): State<Arc<App>>) -> Result<Response, Failure> {
+	let node_current = node_version(&app);
 	let state = app.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-	let updating = state.found.is_some() && state.requested_at.is_some_and(|at| now() - at < UPDATING);
-	ok(&UpdateInfo {current: CURRENT.into(), latest: state.found.as_ref().map(|found| found.version.clone()), notes_url: state.found.as_ref().map(|found| found.notes_url.clone()), checked_at: state.checked_at, can_update: app.cfg.update_request.parent().is_some_and(|folder| folder.is_dir()), updating})
+	let (latest, node_latest) = (offered(state.found.as_ref(), Some(CURRENT)), offered(state.node_found.as_ref(), node_current.as_deref()));
+	let within = state.requested_at.is_some_and(|at| now() - at < UPDATING);
+	let updating = within && latest.is_some() && state.requested.is_some_and(|part| part != Part::Node);
+	let node_updating = within && state.requested.is_some_and(|part| part != Part::Panel) && node_current.as_deref().is_none_or(|version| state.node_from.as_deref() == Some(version));
+	ok(&UpdateInfo {current: CURRENT.into(), latest: latest.as_ref().map(|found| found.version.clone()), notes_url: latest.as_ref().map(|found| found.notes_url.clone()), checked_at: state.checked_at, can_update: app.cfg.update_request.parent().is_some_and(|folder| folder.is_dir()), updating, node_current: node_current.clone(), node_latest: node_latest.as_ref().map(|found| found.version.clone()), node_notes_url: node_latest.map(|found| found.notes_url), node_updating})
 }
 
 #[derive(Serialize, JsonSchema)]
-pub struct Requested {pub ok: bool, pub version: String}
+pub struct Requested {pub ok: bool, pub version: String, pub part: Part}
 
 /// Writes the request. Nothing in it names a version, path or argument: the host script updates to the release it finds and verifies itself.
-pub async fn request(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {
+pub async fn request(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, body: Bytes) -> Result<Response, Failure> {
+	let asked = requested_part(&body).ok_or_else(|| Failure::bad("The part is panel, node or both."))?;
+	let node_now = node_version(&app);
 	// Held until the request is written, so two requests cannot both pass the checks. Nothing awaits while it is held.
-	let version = {
+	let (part, detail, version) = {
 		let mut state = app.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-		let found = state.found.as_ref().ok_or_else(|| Failure::conflict("There is no newer release."))?;
+		let (panel, node) = (offered(state.found.as_ref(), Some(CURRENT)), offered(state.node_found.as_ref(), node_now.as_deref()));
+		let part = chosen(asked, panel.is_some(), node.is_some()).ok_or_else(|| Failure::conflict("There is no newer release for the chosen part."))?;
 		if state.requested_at.is_some_and(|at| now() - at < UPDATING) {return Err(Failure::conflict("An update was requested a moment ago."))}
-		let version = found.version.clone();
 		if app.cfg.update_request.exists() {return Err(Failure::conflict("An update is already requested."))}
+		let (panel, node) = (panel.filter(|_| part != Part::Node), node.filter(|_| part != Part::Panel));
+		let changes: Vec<String> = [panel.as_ref().map(|found| format!("panel from {CURRENT} to {}", found.version)), node.as_ref().map(|found| format!("node from {} to {}", node_now.as_deref().unwrap_or_default(), found.version))].into_iter().flatten().collect();
+		let version = panel.or(node).map(|found| found.version).unwrap_or_default();
 		// Written whole under another name and renamed, so the path unit only ever sees a complete file. The root side reads `request` alone and ignores this name.
 		let temporary = app.cfg.update_request.with_extension("tmp");
 		let _ = std::fs::remove_file(&temporary);
@@ -159,12 +228,12 @@ pub async fn request(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 			ErrorKind::NotFound | ErrorKind::PermissionDenied => Failure::conflict("This server has no update service. Run `sudo bash veilway.sh update panel` on it once."),
 			_ => Failure::internal(error),
 		})?;
-		file.write_all(b"panel").and_then(|()| file.sync_all()).and_then(|()| std::fs::rename(&temporary, &app.cfg.update_request)).map_err(Failure::internal)?;
-		state.requested_at = Some(now());
-		version
+		file.write_all(part.word().as_bytes()).and_then(|()| file.sync_all()).and_then(|()| std::fs::rename(&temporary, &app.cfg.update_request)).map_err(Failure::internal)?;
+		(state.requested_at, state.requested, state.node_from) = (Some(now()), Some(part), node_now);
+		(part, changes.join("; "), version)
 	};
-	app.db.audit(&ctx.actor, &ctx.source, "update.request", "panel", &format!("from {CURRENT} to {version}")).await;
-	ok(&Requested {ok: true, version})
+	app.db.audit(&ctx.actor, &ctx.source, "update.request", part.word(), &detail).await;
+	ok(&Requested {ok: true, version, part})
 }
 
 #[cfg(test)]
@@ -187,15 +256,55 @@ mod tests {
 	}
 
 	#[test]
-	fn only_a_newer_published_release_is_found() {
-		let release = |tag: &str, extra: &str| format!("{{\"tag_name\": \"{tag}\", \"html_url\": \"https://evil.example/x\"{extra}}}");
-		let found = newer(release("v0.2.0", "").as_bytes(), "0.1.0").unwrap().unwrap();
-		assert_eq!((found.version.as_str(), found.notes_url.as_str()), ("0.2.0", "https://github.com/veilway-project/veilway-panel/releases/tag/v0.2.0"));
-		assert!(newer(release("v0.1.0", "").as_bytes(), "0.1.0").unwrap().is_none());
-		assert!(newer(release("v0.0.9", "").as_bytes(), "0.1.0").unwrap().is_none());
-		assert!(newer(release("v0.2.0-rc.1", "").as_bytes(), "0.2.0").unwrap().is_none());
-		assert!(newer(release("v0.3.0", ", \"prerelease\": true").as_bytes(), "0.1.0").unwrap().is_none());
-		assert!(newer(release("v0.3.0", ", \"draft\": true").as_bytes(), "0.1.0").unwrap().is_none());
-		for bad in [release("latest", ""), release("../../etc", ""), release("v0.2.0\\nx", ""), "{}".into(), "[]".into(), "not json".into(), "{\"tag_name\": 5}".into()] {assert!(newer(bad.as_bytes(), "0.1.0").is_err(), "{bad}")}
+	fn a_published_release_is_read_with_a_link_made_from_its_tag() {
+		let answer = |tag: &str, extra: &str| format!("{{\"tag_name\": \"{tag}\", \"html_url\": \"https://evil.example/x\"{extra}}}");
+		let found = release(answer("v0.2.0", "").as_bytes(), NODE_NOTES).unwrap().unwrap();
+		assert_eq!((found.version.as_str(), found.notes_url.as_str()), ("0.2.0", "https://github.com/veilway-project/veilway/releases/tag/v0.2.0"));
+		assert!(release(answer("v0.3.0", ", \"prerelease\": true").as_bytes(), NODE_NOTES).unwrap().is_none());
+		assert!(release(answer("v0.3.0", ", \"draft\": true").as_bytes(), NODE_NOTES).unwrap().is_none());
+		for bad in [answer("latest", ""), answer("../../etc", ""), answer("v0.2.0\\nx", ""), "{}".into(), "[]".into(), "not json".into(), "{\"tag_name\": 5}".into()] {assert!(release(bad.as_bytes(), NODE_NOTES).is_err(), "{bad}")}
+	}
+
+	#[test]
+	fn only_a_release_newer_than_the_running_version_is_offered() {
+		let found = |version: &str| Found {version: version.into(), notes_url: String::new()};
+		assert_eq!(offered(Some(&found("0.2.0")), Some("0.1.0")).map(|found| found.version), Some("0.2.0".to_string()));
+		assert!(offered(Some(&found("0.1.0")), Some("0.1.0")).is_none());
+		assert!(offered(Some(&found("0.0.9")), Some("0.1.0")).is_none());
+		assert!(offered(Some(&found("0.2.0-rc.1")), Some("0.2.0")).is_none());
+		assert!(offered(Some(&found("0.2.0")), None).is_none());
+		assert!(offered(Some(&found("0.2.0")), Some("not a version")).is_none());
+		assert!(offered(None, Some("0.1.0")).is_none());
+	}
+
+	#[test]
+	fn a_node_older_newer_or_unknown_gets_the_right_offer() {
+		let found = Found {version: "0.3.0".into(), notes_url: String::new()};
+		assert!(offered(Some(&found), Some("0.2.1")).is_some());
+		assert!(offered(Some(&found), Some("0.3.0-alpha")).is_some());
+		assert!(offered(Some(&found), Some("0.3.0")).is_none());
+		assert!(offered(Some(&found), Some("0.4.0")).is_none());
+		assert!(offered(Some(&found), None).is_none());
+	}
+
+	#[test]
+	fn the_request_takes_one_of_three_parts_and_nothing_else() {
+		assert_eq!(requested_part(b""), Some(Part::Panel));
+		assert_eq!(requested_part(br#"{"part": "node"}"#), Some(Part::Node));
+		assert_eq!(requested_part(br#"{"part": "both"}"#), Some(Part::Both));
+		for bad in [r#"{"part": "all"}"#, r#"{"part": "Panel"}"#, r#"{"part": ""}"#, r#"{}"#, r#"{"part": null}"#, r#"{"part": ["panel"]}"#, r#"["panel"]"#, r#""panel""#, "null", "{", " "] {assert!(requested_part(bad.as_bytes()).is_none(), "{bad}")}
+	}
+
+	#[test]
+	fn the_word_written_follows_what_has_a_newer_release() {
+		assert_eq!([Part::Panel, Part::Node, Part::Both].map(Part::word), ["panel", "node", "both"]);
+		assert_eq!(chosen(Part::Panel, true, true), Some(Part::Panel));
+		assert_eq!(chosen(Part::Panel, false, true), None);
+		assert_eq!(chosen(Part::Node, true, true), Some(Part::Node));
+		assert_eq!(chosen(Part::Node, true, false), None);
+		assert_eq!(chosen(Part::Both, true, true), Some(Part::Both));
+		assert_eq!(chosen(Part::Both, true, false), Some(Part::Panel));
+		assert_eq!(chosen(Part::Both, false, true), Some(Part::Node));
+		assert_eq!(chosen(Part::Both, false, false), None);
 	}
 }

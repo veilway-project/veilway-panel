@@ -198,6 +198,18 @@
         ],
         "type": "object"
       },
+      "Choice": {
+        "description": "The body of an update request.",
+        "properties": {
+          "part": {
+            "$ref": "#/components/schemas/Part"
+          }
+        },
+        "required": [
+          "part"
+        ],
+        "type": "object"
+      },
       "CodeIn": {
         "additionalProperties": false,
         "properties": {
@@ -1564,6 +1576,15 @@
         ],
         "type": "object"
       },
+      "Part": {
+        "description": "What an update request is for. The word is what the host script reads.",
+        "enum": [
+          "panel",
+          "node",
+          "both"
+        ],
+        "type": "string"
+      },
       "PasteIn": {
         "additionalProperties": false,
         "properties": {
@@ -1748,13 +1769,17 @@
           "ok": {
             "type": "boolean"
           },
+          "part": {
+            "$ref": "#/components/schemas/Part"
+          },
           "version": {
             "type": "string"
           }
         },
         "required": [
           "ok",
-          "version"
+          "version",
+          "part"
         ],
         "type": "object"
       },
@@ -2569,6 +2594,30 @@
               "null"
             ]
           },
+          "node_current": {
+            "description": "The node's version, when the node is reachable and reports one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node_latest": {
+            "description": "The newest node release, when it is newer than the node's version.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node_notes_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node_updating": {
+            "description": "A node update was requested and the node has not come back with another version yet.",
+            "type": "boolean"
+          },
           "notes_url": {
             "type": [
               "string",
@@ -2576,14 +2625,15 @@
             ]
           },
           "updating": {
-            "description": "A request was made and this panel has not come back as another version yet.",
+            "description": "A panel update was requested and this panel has not come back as another version yet.",
             "type": "boolean"
           }
         },
         "required": [
           "current",
           "can_update",
-          "updating"
+          "updating",
+          "node_updating"
         ],
         "type": "object"
       },
@@ -3125,7 +3175,7 @@
   "info": {
     "description": "HTTP and JSON under the panel's path prefix. A browser logs in and sends the CSRF token on every change. An integration sends an API token as a Bearer header. The x-access member of an operation says what it needs: read, users or full are token scopes, session and session-reauth are for a logged-in admin only, and public needs nothing.",
     "title": "Veilway panel API",
-    "version": "0.2.1"
+    "version": "0.2.2"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -7087,7 +7137,7 @@
             "description": "Rate limited."
           }
         },
-        "summary": "This panel's version and the newest release, as the last check found it.",
+        "summary": "This panel's and the node's version, and the newest release of each, as the last check found them.",
         "x-access": "read"
       }
     },
@@ -7095,6 +7145,16 @@
       "post": {
         "operationId": "requestUpdate",
         "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Choice"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -7147,7 +7207,7 @@
             "description": "Rate limited."
           }
         },
-        "summary": "Asks the host to update the panel to the newest release, which the host script downloads and checks itself. Needs a recent re-authentication and is audited. No API token can do this.",
+        "summary": "Asks the host to update the panel, the node or both (`part`, the panel when the body is empty) to the newest release, which the host script downloads and checks itself. Needs a recent re-authentication and is audited. No API token can do this.",
         "x-access": "session-reauth"
       }
     },

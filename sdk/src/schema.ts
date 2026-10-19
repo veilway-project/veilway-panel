@@ -951,7 +951,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** This panel's version and the newest release, as the last check found it. */
+        /** This panel's and the node's version, and the newest release of each, as the last check found them. */
         get: operations["updateInfo"];
         put?: never;
         post?: never;
@@ -970,7 +970,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Asks the host to update the panel to the newest release, which the host script downloads and checks itself. Needs a recent re-authentication and is audited. No API token can do this. */
+        /** Asks the host to update the panel, the node or both (`part`, the panel when the body is empty) to the newest release, which the host script downloads and checks itself. Needs a recent re-authentication and is audited. No API token can do this. */
         post: operations["requestUpdate"];
         delete?: never;
         options?: never;
@@ -1340,6 +1340,10 @@ export interface components {
         Changed: {
             node: components["schemas"]["NodeState"];
             user: components["schemas"]["UserOut"];
+        };
+        /** @description The body of an update request. */
+        Choice: {
+            part: components["schemas"]["Part"];
         };
         CodeIn: {
             code: string;
@@ -1795,6 +1799,11 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /**
+         * @description What an update request is for. The word is what the host script reads.
+         * @enum {string}
+         */
+        Part: "panel" | "node" | "both";
         PasteIn: {
             /** @description Must be true: the operator has seen where this node would dial and agrees. */
             accept: boolean;
@@ -1876,6 +1885,7 @@ export interface components {
         };
         Requested: {
             ok: boolean;
+            part: components["schemas"]["Part"];
             version: string;
         };
         Reset: {
@@ -2219,8 +2229,15 @@ export interface components {
             current: string;
             /** @description The newest release, when it is newer than this panel. */
             latest?: string | null;
+            /** @description The node's version, when the node is reachable and reports one. */
+            node_current?: string | null;
+            /** @description The newest node release, when it is newer than the node's version. */
+            node_latest?: string | null;
+            node_notes_url?: string | null;
+            /** @description A node update was requested and the node has not come back with another version yet. */
+            node_updating: boolean;
             notes_url?: string | null;
-            /** @description A request was made and this panel has not come back as another version yet. */
+            /** @description A panel update was requested and this panel has not come back as another version yet. */
             updating: boolean;
         };
         UsageEntry: {
@@ -5939,7 +5956,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Choice"];
+            };
+        };
         responses: {
             /** @description Done. */
             200: {
