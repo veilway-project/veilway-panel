@@ -1,6 +1,6 @@
 {
 	"name": "@veilway/panel-sdk",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"description": "Typed client for the Veilway panel's admin API, for integrations that use an API token",
 	"license": "Apache-2.0",
 	"repository": {
