@@ -14,6 +14,7 @@ The admin panel of a Veilway node: users, devices, subscription links and an API
 
 <p align="center">
 <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
+<a href="https://t.me/VeilwayGroup"><img alt="Telegram" src="https://img.shields.io/badge/Telegram-VeilwayGroup-26A5E4?logo=telegram&logoColor=white"></a>
 </p>
 
 ## Screenshots
