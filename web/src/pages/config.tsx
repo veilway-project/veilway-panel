@@ -136,7 +136,7 @@ function SectionTab({section}: {section: Exclude<Section, "inbounds">}) {
 			<DataTable caption={t(`node.tab.${section}`)} rows={items.map((item, index) => ({item, index}))} rowKey={row => str(row.item.tag) || String(row.index)} empty={<StateBlock kind="empty" title={t(`config.empty.${section}`)} action={<Button variant="primary" icon="plus" onClick={() => edit(null)}>{t(`config.add.${section}`)}</Button>}>{t(`config.emptyBody.${section}`)}</StateBlock>} columns={[
 				{id: "tag", header: t("config.col.tag"), cell: ({item}) => <span className="p-user"><span className="vw-code">{str(item.tag)}</span><span className="vw-muted vw-small">{section === "exits" ? [str(item.name), str(item.country)].filter(Boolean).join(", ") : str(item.type)}</span></span>},
 				...(section === "outbounds" ? [
-					{id: "target", header: t("config.col.target"), cell: ({item}: {item: Item}) => item.type === "socks5" ? <span className="p-user"><span className="vw-code">{str(item.server)}</span>{str(item.via) && <span className="vw-muted vw-small">{t("config.viaName", {outbound: str(item.via)})}</span>}</span> : <span className="vw-muted">{item.bind ? t("config.bind", {address: str(item.bind)}) : t("config.fromNode")}</span>}
+					{id: "target", header: t("config.col.target"), cell: ({item}: {item: Item}) => item.type === "socks5" ? <span className="p-user"><span className="vw-code">{str(item.server)}</span>{str(item.via) && <span className="vw-muted vw-small">{t("config.viaName", {outbound: str(item.via)})}</span>}</span> : <span className="vw-muted">{(item.bind ? t("config.bind", {address: str(item.bind)}) : t("config.fromNode")) + (item.interface ? t("config.onInterface", {name: str(item.interface)}) : "")}</span>}
 				] : [
 					{id: "backend", header: t("config.col.backend"), cell: ({item}: {item: Item}) => { const backend = (item.backend ?? {}) as Item; return backend.type === "netstack" ? t("config.backend.netstackVia", {outbound: str(backend.outbound)}) : backend.type === "chain" ? t("config.backend.chainVia", {links: (backend.links as string[] | undefined ?? []).join(", ")}) : t(`config.backend.${backend.type === "l3" ? "l3" : "block"}`); }}
 				]),
@@ -433,7 +433,10 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 						<SecretField label={t("config.password")} value={str(draft.password)} onChange={value => set("password", value)} autoComplete="off" optional/>
 					</div>
 					<SelectField label={t("config.via")} hint={t("config.viaHint") + " " + t("via.plain")} value={str(draft.via)} onChange={value => set("via", value)} error={viaWrong ? t(viaWrong) : undefined} options={[{value: "", label: t("config.viaDirect")}, ...[...through, ...(str(draft.via) && !through.includes(str(draft.via)) ? [str(draft.via)] : [])].map(tag => ({value: tag, label: tag}))]}/>
-				</> : <TextField label={t("config.bindLabel")} hint={t("config.bindHint")} value={str(draft.bind)} onChange={value => set("bind", value.trim())} technical optional/>}
+				</> : <>
+					<TextField label={t("config.bindLabel")} hint={t("config.bindHint")} value={str(draft.bind)} onChange={value => set("bind", value.trim())} technical optional/>
+					<TextField label={t("config.outInterface")} hint={t("config.outInterfaceHint")} placeholder="eth1" value={str(draft.interface)} onChange={value => set("interface", value.trim())} maxLength={15} technical optional/>
+				</>}
 			</>}
 			{section === "exits" && <>
 				<div className="p-pair">
