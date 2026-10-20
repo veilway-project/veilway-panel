@@ -2443,6 +2443,37 @@ async fn put_inbounds(h: &Harness, session: &Session, revision: u32, inbounds: V
 fn site_of(host: &str) -> Value {json!({"host": host, "acknowledged": true})}
 
 #[tokio::test]
+async fn an_inbound_applied_with_its_private_key_gets_its_public_key_in_its_profile() {
+	let (_fake, h, session) = borrowed_node().await;
+	let inbound = |key: String| json!([{"tag": "Main", "type": "veilway", "private_key": key, "address": ["10.66.0.1/24"], "transports": [{"type": "udp", "listen": "0.0.0.0:51820"}]}]);
+	let wg = |fill: u8| STANDARD.encode(x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from([fill; 32])).to_bytes());
+	let derived = || async {h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json()["templates"][0].clone()};
+	assert_eq!(derived().await["missing"], json!(["inbound_public_key"]), "a key the panel never saw in full is still asked for");
+	h.configure(&session, json!({"node_host": "192.0.2.10", "profile_overrides": {"Main": {"inbound_public_key": wg(9), "name": "Edited"}}})).await;
+	assert_eq!(put_inbounds(&h, &session, 1, inbound(STANDARD.encode([7u8; 32]))).await.status, StatusCode::OK);
+	let template = derived().await;
+	assert_eq!((template["profile"]["inbound_public_key"].clone(), template["missing"].clone()), (json!(wg(7)), json!([])), "the public half is made from the key that was applied");
+	assert_eq!(h.app.settings().profile_overrides["Main"], json!({"name": "Edited"}), "an override with another key is dropped, the other edits stay");
+	assert_eq!(put_inbounds(&h, &session, 2, inbound("<redacted>".into())).await.status, StatusCode::OK);
+	assert_eq!(derived().await["profile"]["inbound_public_key"], json!(wg(7)), "a marker keeps the key made before");
+	let mut forged = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	forged["inbound_keys"] = json!({"Main": wg(3)});
+	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(forged), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.app.settings().inbound_keys["Main"], wg(7), "a settings update never takes the keys from the page");
+	let spec: Value = serde_json::from_str(&openapi::openapi()).unwrap();
+	assert_eq!(spec["components"]["schemas"]["Settings"]["properties"]["inbound_keys"]["readOnly"], json!(true));
+}
+
+#[tokio::test]
+async fn the_first_endpoint_needs_a_default_and_the_error_says_where() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	let answer = h.call(Method::PUT, "/p/api/settings", Some(&session), Some(json!({"provider_name": "Test Net", "endpoints": [{"name": "main", "url": "https://panel.example.org/s", "pins": []}], "default_endpoint": ""})), "10.0.0.1").await;
+	assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&answer.body));
+	assert!(String::from_utf8_lossy(&answer.body).contains("Pick one under Default endpoint"), "{}", String::from_utf8_lossy(&answer.body));
+}
+
+#[tokio::test]
 async fn a_settings_update_never_takes_the_borrowed_site_keys_from_the_page() {
 	let (_fake, h, session) = borrowed_node().await;
 	assert_eq!(put_inbounds(&h, &session, 1, borrowed_inbounds(site_of("www.example.com"), &STANDARD.encode([5u8; 32]))).await.status, StatusCode::OK);

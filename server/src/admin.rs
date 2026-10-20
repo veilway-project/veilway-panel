@@ -505,6 +505,7 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 		let before = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 		// The public halves of the borrowed-site keys are the server's: a page that read them earlier would write an old copy back over what an apply made since.
 		saved.faketls_keys = before.faketls_keys.clone();
+		saved.inbound_keys = before.inbound_keys.clone();
 		crate::endpoints::in_use(&tx, &saved).map_err(Failure::conflict)?;
 		let known: Vec<i64> = tx.prepare("select id from users")?.query_map([], |row| row.get(0))?.collect::<Result<_, _>>()?;
 		if let Some(id) = saved.relays.iter().flat_map(|relay| relay.users.iter().copied()).find(|id| !known.contains(id)) {return Err(Failure::bad(format!("A relay names the account {id}, which does not exist. Take it off the relay first.")))}

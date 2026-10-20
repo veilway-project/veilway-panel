@@ -25,11 +25,17 @@ export function EndpointPick({label, hint, value, onChange, followLabel}: {label
 }
 
 // The endpoints are part of the settings form and save with it. What the panel counts for each comes from its own route, as of the last save.
-export function EndpointsSection({rows, onRows, draft, patch, saved, onMoved}: {rows: EndpointDraft[], onRows: (rows: EndpointDraft[]) => void, draft: Settings, patch: (change: Partial<Settings>) => void, saved: Settings, onMoved: () => void}) {
+export function EndpointsSection({rows, onRows, draft, patch, saved, onMoved}: {rows: EndpointDraft[], onRows: (rows: EndpointDraft[], defaultEndpoint: string) => void, draft: Settings, patch: (change: Partial<Settings>) => void, saved: Settings, onMoved: () => void}) {
 	const {t, number} = useP(), [moving, setMoving] = useState(false);
 	const stats = useLoad(() => api("get", "/endpoints"), [JSON.stringify([saved.endpoints, saved.default_endpoint, saved.group_endpoints])]);
 	const names = rows.map(r => r.name.trim()).filter(Boolean), known = new Map((stats.data?.endpoints ?? []).map(e => [e.name, e])), groups = stats.data?.groups ?? [], follow = draft.group_endpoints ?? {};
-	const change = (index: number, part: Partial<EndpointDraft>) => onRows(rows.map((r, i) => i === index ? {...r, ...part} : r));
+	// The default follows a renamed endpoint, and a lone endpoint is the default, so a first endpoint saves without a trip to the picker.
+	const setRows = (next: EndpointDraft[]) => {
+		const current = draft.default_endpoint ?? "", at = current ? rows.findIndex(r => r.name.trim() === current) : -1, now = next.map(r => r.name.trim()).filter(Boolean);
+		const renamed = at >= 0 && next.length === rows.length ? next[at]!.name.trim() : current;
+		onRows(next, now.includes(renamed) ? renamed : now.length === 1 ? now[0]! : current);
+	};
+	const change = (index: number, part: Partial<EndpointDraft>) => setRows(rows.map((r, i) => i === index ? {...r, ...part} : r));
 	return <section className="p-section" id="set-endpoints">
 		<div><h2 className="vw-h3" tabIndex={-1}>{t("settings.endpoints")}</h2><p>{t("settings.endpointsLead")}</p></div>
 		<div className="p-form">
@@ -37,7 +43,7 @@ export function EndpointsSection({rows, onRows, draft, patch, saved, onMoved}: {
 			{rows.map((row, i) => {
 				const own = known.get(row.name), used = own?.users ?? 0, isDefault = row.name.trim() !== "" && row.name.trim() === draft.default_endpoint;
 				return <fieldset key={i} className="p-mirror">
-					<legend className="p-row"><span className="p-cluster"><strong className="vw-code">{row.name.trim() || t("endpoints.new")}</strong>{isDefault && <Mark tone="success">{t("endpoints.default")}</Mark>}</span><IconButton icon="close" label={used > 0 ? t("endpoints.inUse") : t("endpoints.remove", {name: row.name.trim() || String(i + 1)})} disabled={used > 0} onClick={() => onRows(rows.filter((_, j) => j !== i))}/></legend>
+					<legend className="p-row"><span className="p-cluster"><strong className="vw-code">{row.name.trim() || t("endpoints.new")}</strong>{isDefault && <Mark tone="success">{t("endpoints.default")}</Mark>}</span><IconButton icon="close" label={used > 0 ? t("endpoints.inUse") : t("endpoints.remove", {name: row.name.trim() || String(i + 1)})} disabled={used > 0} onClick={() => setRows(rows.filter((_, j) => j !== i))}/></legend>
 					<div className="p-pair">
 						<TextField label={t("endpoints.name")} hint={t("endpoints.nameHint")} value={row.name} onChange={value => change(i, {name: value.trim()})} maxLength={64} technical/>
 						<TextField label={t("endpoints.url")} hint={t("endpoints.urlHint")} type="url" placeholder="https://" value={row.url} onChange={value => change(i, {url: value.trim()})} technical/>
@@ -51,7 +57,7 @@ export function EndpointsSection({rows, onRows, draft, patch, saved, onMoved}: {
 			})}
 			{!!stats.error && !stats.data && <ErrorNote error={stats.error}/>}
 			<div className="p-cluster">
-				{rows.length < 16 && <Button size="sm" icon="plus" onClick={() => onRows([...rows, {name: "", url: "", pins: ""}])}>{t("endpoints.add")}</Button>}
+				{rows.length < 16 && <Button size="sm" icon="plus" onClick={() => setRows([...rows, {name: "", url: "", pins: ""}])}>{t("endpoints.add")}</Button>}
 				{known.size > 0 && <Button size="sm" onClick={() => setMoving(true)}>{t("endpoints.move")}</Button>}
 			</div>
 			{names.length > 0 && <SelectField label={t("endpoints.defaultLabel")} hint={t("endpoints.defaultHint")} value={names.includes(draft.default_endpoint ?? "") ? draft.default_endpoint ?? "" : FOLLOW} onChange={value => patch({default_endpoint: value === FOLLOW ? "" : value})} options={[...(names.includes(draft.default_endpoint ?? "") ? [] : [{value: FOLLOW, label: t("endpoints.noDefault")}]), ...names.map(n => ({value: n, label: n}))]}/>}

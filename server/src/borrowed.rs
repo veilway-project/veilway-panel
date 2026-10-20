@@ -148,6 +148,7 @@ pub fn template(settings: &Settings, document: &Value, inbound: &Value, gateways
 		}
 	}
 	let mut profile = json!({"id": id, "name": format!("{tag} (borrowed site, alpha)"), "type": "veilway", "gateways": gateways, "mtu": inbound["mtu"].as_u64().unwrap_or(1420), "transports": emitted, "rating_cap": "detectable"});
+	if let Some(public) = settings.inbound_keys.get(tag) {profile["inbound_public_key"] = json!(public);}
 	let edits = settings.profile_overrides.get(tag).and_then(Value::as_object);
 	for (key, value) in edits.into_iter().flatten().filter(|(key, _)| !OWN.contains(&key.as_str()) && *key != ADDRESSES) {profile[key] = value.clone();}
 	let mut missing = Vec::new();

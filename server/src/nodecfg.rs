@@ -1,6 +1,7 @@
 //! The node's config through its control API: the schema, the document as a whole and by section, dry runs, the one path that applies a change, and the profile templates derived from the inbounds.
 use crate::{app::{store_settings, App, Settings}, auth::reauthed, crypto::now, http::{json, ok, Body, Ctx, Failure}, node, subs::UserRow, users::name_ok, xray::{self, addresses, Exposure}};
 use axum::{extract::{Path, State}, http::{header::CONTENT_TYPE, HeaderValue, StatusCode}, response::{IntoResponse, Response}, Extension};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -142,6 +143,7 @@ pub(crate) async fn apply(app: &Arc<App>, ctx: &Ctx, document: Value, revision: 
 			// A profile of a borrowed site that was published is made again from what the node runs now, or taken down when it can no longer be emitted, so that no document carries the key or the listener it had before. One that was never published, and one written by hand, stay as they are.
 			let republished = app.update_settings(move |settings| {
 				crate::borrowed::remember(settings, &kept);
+				remember_keys(settings, &kept);
 				let templates = derive(settings, &kept, &[], None, &Exposure::default());
 				let ids: Vec<String> = settings.relay_profiles.keys().filter(|id| id.ends_with("-faketls") && settings.profiles.iter().any(|profile| profile["id"] == id.as_str() && profile["transports"].as_array().is_some_and(|list| !list.is_empty() && list.iter().all(|transport| transport["type"] == "faketls")))).cloned().collect();
 				for id in ids {
@@ -262,6 +264,21 @@ pub fn carry(profile: &mut Value, tag: &str, reaching: &[(u8, &Relay)]) -> Vec<V
 	trimmed
 }
 
+/// Keeps the public half of each `veilway` inbound's key. The node shows a key only as a marker once it holds it, so the half is made when an apply carries the key in full, and kept from before otherwise. An override of the inbound's public key that differs from a key made here is dropped, since the node runs this one.
+pub fn remember_keys(settings: &mut Settings, document: &Value) {
+	let mut kept = BTreeMap::new();
+	for inbound in document["inbounds"].as_array().into_iter().flatten().filter(|inbound| inbound["type"] == "veilway") {
+		let tag = inbound["tag"].as_str().unwrap_or_default().to_string();
+		let fresh = inbound["private_key"].as_str().and_then(|key| <[u8; 32]>::try_from(STANDARD.decode(key).ok()?).ok()).map(|key| STANDARD.encode(crate::gateway::public_of(&key)));
+		if let (Some(public), Some(edits)) = (&fresh, settings.profile_overrides.get_mut(&tag).and_then(Value::as_object_mut)) {
+			if edits.get("inbound_public_key").is_some_and(|old| old != public.as_str()) {edits.remove("inbound_public_key");}
+			if edits.is_empty() {settings.profile_overrides.remove(&tag);}
+		}
+		if let Some(public) = fresh.or_else(|| settings.inbound_keys.get(&tag).cloned()) {kept.insert(tag, public);}
+	}
+	settings.inbound_keys = kept;
+}
+
 /// One template per `veilway` inbound, with the overrides laid over it and the relays that reach `user` carried in. `user` is the account's id and groups, or None for the relays that reach everyone. `missing` lists what a profile still needs from the operator, since the node never reveals a public key and does not know its own public address.
 fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, exposure: &Exposure) -> Vec<Value> {
 	let inbounds = document.get("inbounds").and_then(Value::as_array).cloned().unwrap_or_default();
@@ -289,6 +306,7 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 			})
 		}).collect();
 		let mut profile = json!({"id": tag.to_lowercase(), "name": tag, "type": "veilway", "gateways": gateways, "mtu": inbound["mtu"].as_u64().unwrap_or(if obfs {1390} else {1420}), "transports": listed});
+		if let Some(public) = settings.inbound_keys.get(&tag) {profile["inbound_public_key"] = json!(public);}
 		if let Some(edits) = settings.profile_overrides.get(&tag).and_then(Value::as_object) {for (key, value) in edits.iter().filter(|(key, _)| *key != crate::borrowed::ADDRESSES) {profile[key] = value.clone();}}
 		// The Xray inbounds answer on the addresses a profile names, so one that shares an address may not claim more than Detectable. An override of `unsafe` is the operator's own choice and stays.
 		if exposure.shares(&addresses(&profile)) && profile["rating_cap"] != "unsafe" {profile["rating_cap"] = json!("detectable");}

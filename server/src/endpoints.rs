@@ -62,7 +62,7 @@ pub fn validate(settings: &Settings) -> Result<(), String> {
 			if found.pinned() && !found.pins().iter().any(|pin| endpoint.pins.contains(&STANDARD.encode(pin))) {return Err(format!("The refresh mirror {} has the host and port of the endpoint {} and none of its pins. The app refuses a document whose list holds no pin it holds.", found.authority(), endpoint.name))}
 		}
 	}
-	if !settings.endpoints.is_empty() && settings.named(&settings.default_endpoint).is_none() {return Err(format!("default_endpoint {:?} is not one of the endpoints.", settings.default_endpoint))}
+	if !settings.endpoints.is_empty() && settings.named(&settings.default_endpoint).is_none() {return Err(if settings.default_endpoint.is_empty() {"No default endpoint is chosen. Pick one under Default endpoint, below the endpoints.".into()} else {format!("The default endpoint {:?} is not one of the endpoints. Pick one under Default endpoint, below the endpoints.", settings.default_endpoint)})}
 	if settings.group_endpoints.len() > 256 {return Err("group_endpoints has at most 256 entries.".into())}
 	for (group, name) in &settings.group_endpoints {
 		if !name_ok(group, true) {return Err(format!("The group name {group:?} is 1 to 64 characters of a-z, 0-9, dot, dash and underscore."))}

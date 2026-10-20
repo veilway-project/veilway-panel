@@ -1134,7 +1134,7 @@ export const fa: Record<PanelKey, string> = {
 	"profiles.ready": "آماده",
 	"profiles.incomplete": "ناقص",
 	"profiles.missing": "هنوز لازم است",
-	"profiles.missing.inbound_public_key": "کلید عمومی ورودی، که نود هرگز نشان نمی‌دهد.",
+	"profiles.missing.inbound_public_key": "کلید عمومی ورودی. پنل آن را وقتی می‌سازد که ورودی با کلید خصوصی‌اش اعمال شود؛ برای ورودی‌ای که پیش از v0.2.7 اضافه شده، کلید خصوصی‌اش را در صفحهٔ ورودی‌ها دوباره وارد و اعمال کنید، یا نیمهٔ عمومی را اینجا بچسبانید.",
 	"profiles.missing.transport_public_key": "کلید عمومی ترابرد، برای tls و ws.",
 	"profiles.missing.node_host": "نشانی عمومی این نود، که در تنظیمات تعیین می‌شود.",
 	"profiles.inboundKey": "کلید عمومی ورودی",

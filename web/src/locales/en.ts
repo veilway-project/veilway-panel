@@ -1133,7 +1133,7 @@ export const en = {
 	"profiles.ready": "Ready",
 	"profiles.incomplete": "Incomplete",
 	"profiles.missing": "Still needed",
-	"profiles.missing.inbound_public_key": "The inbound's public key, which the node never shows.",
+	"profiles.missing.inbound_public_key": "The inbound's public key. The panel makes it when the inbound is applied with its private key, so for an inbound added before v0.2.7, enter its private key again on Inbounds and apply, or paste the public half here.",
 	"profiles.missing.transport_public_key": "The public transport key, for tls and ws.",
 	"profiles.missing.node_host": "This node's public address, set under Settings.",
 	"profiles.inboundKey": "Inbound public key",

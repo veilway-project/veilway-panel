@@ -57,7 +57,7 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 		setBusy(true);
 		try {
 			// The public halves of the borrowed-site keys are the server's, so they are not sent. The generated type lists every field with a default as required.
-			const {faketls_keys: _kept, ...sent} = draft;
+			const {faketls_keys: _kept, inbound_keys: _keys, ...sent} = draft;
 			const saved = await guard(() => api("put", "/settings", {body: {...sent, not_found: notFound, endpoints: endpoints.filter(e => e.name || e.url).map(e => ({name: e.name, url: e.url, pins: isPlain(e.url) ? [] : lines(e.pins)})), profiles: parsed as Settings["profiles"], refresh_mirrors: mirrors.filter(m => m.url.trim()).map(m => lines(m.pins).length ? {url: m.url.trim(), pins: lines(m.pins)} : m.url.trim())} as Settings}));
 			onSaved(saved);
 			shared.set(saved);
@@ -83,7 +83,7 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 					<TextField label={t("subs.nodeHost")} hint={t("subs.nodeHostHint")} placeholder="vpn.example.org" value={draft.node_host ?? ""} onChange={value => patch({node_host: value.trim()})} technical/>
 				</div>
 			</section>
-			<EndpointsSection rows={endpoints} onRows={rows => set({endpoints: rows})} draft={draft} patch={patch} saved={initial} onMoved={() => void api("get", "/settings").then(fresh => { const groups = fresh.group_endpoints; setBase(old => ({...old, draft: {...old.draft, group_endpoints: groups}})); setForm(old => ({...old, draft: {...old.draft, group_endpoints: groups}})); onSaved(fresh); shared.set(fresh); }, () => {})}/>
+			<EndpointsSection rows={endpoints} onRows={(rows, defaultEndpoint) => setForm({...form, endpoints: rows, draft: {...draft, default_endpoint: defaultEndpoint}})} draft={draft} patch={patch} saved={initial} onMoved={() => void api("get", "/settings").then(fresh => { const groups = fresh.group_endpoints; setBase(old => ({...old, draft: {...old.draft, group_endpoints: groups}})); setForm(old => ({...old, draft: {...old.draft, group_endpoints: groups}})); onSaved(fresh); shared.set(fresh); }, () => {})}/>
 			<section className="p-section" id="set-refresh">
 				{head("refresh")}
 				<div className="p-pair">

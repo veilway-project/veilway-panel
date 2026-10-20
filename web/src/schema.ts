@@ -2042,6 +2042,13 @@ export interface components {
                 [key: string]: string;
             };
             /**
+             * @description The public half of the key of each `veilway` inbound, by inbound tag, which its profile is made with. Made the same way as `faketls_keys`, and read-only in the API too.
+             * @default {}
+             */
+            readonly inbound_keys: {
+                [key: string]: string;
+            };
+            /**
              * @description The public host or address of this node, which the profiles' endpoints are made with.
              * @default
              */
