@@ -32,7 +32,7 @@ async fn main() -> ExitCode {
 				let cfg = Config::load(path)?;
 				let db = Db::open(&cfg.database).map_err(|error| format!("{}: {error}", cfg.database.display()))?;
 				if command == "admins" {
-					for (name, used) in db.blocking(|connection| admin::console_admins(connection)).map_err(|error| error.to_string())?.map_err(|error| error.to_string())? {println!("{name}{}", if used {""} else {"  (has not signed in with an authenticator code yet)"})}
+					for (name, used) in db.blocking(|connection| admin::console_admins(connection)).map_err(|error| error.to_string())?.map_err(|error| error.to_string())? {println!("{name}{}", if used || !cfg.two_step_on() {""} else {"  (has not signed in with an authenticator code yet)"})}
 					return Ok(())
 				}
 				let name = args.get(1).filter(|arg| !arg.starts_with("--")).ok_or("usage: veilway-panel reset-password <username> [--config panel.json], with the new password on standard input")?.clone();
