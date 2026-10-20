@@ -394,6 +394,25 @@ pub async fn reset_admin(State(app): State<Arc<App>>, Extension(ctx): Extension<
 	ok(&shown)
 }
 
+/// The usernames, for an operator on the server's console who lost track of theirs, and whether each has used a code from its authenticator.
+pub fn console_admins(db: &Connection) -> rusqlite::Result<Vec<(String, bool)>> {
+	let mut statement = db.prepare("select username, totp_last_step > 0 from admins order by id")?;
+	let admins = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect();
+	admins
+}
+
+/// A new password set from the server's console, for an operator locked out of the panel. Every session of the admin ends; the authenticator secret and the API tokens stay.
+pub fn console_reset(db: &Connection, name: &str, password: &str) -> Result<usize, String> {
+	password_ok(password).map_err(|failure| failure.message)?;
+	let hash = hash_blocking(password).map_err(|failure| failure.message)?;
+	let id: i64 = db.query_row("select id from admins where username = ?", [name], |row| row.get(0)).optional().map_err(|error| error.to_string())?.ok_or_else(|| format!("no admin is called {name}"))?;
+	db.execute("update admins set password_hash = ? where id = ?", params![hash, id]).map_err(|error| error.to_string())?;
+	db.execute("delete from settings where key = ?", [format!("short_password:{id}")]).map_err(|error| error.to_string())?;
+	let ended = db.execute("delete from sessions where admin_id = ?", [id]).map_err(|error| error.to_string())?;
+	audit(db, "console", "console", "admin.reset", &format!("admin:{name}"), &format!("password replaced from the server console, {ended} sessions ended"));
+	Ok(ended)
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct AuditQuery {pub limit: Option<i64>, pub before: Option<i64>}
 

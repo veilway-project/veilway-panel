@@ -4,7 +4,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::{future::Future, net::SocketAddr, path::PathBuf, sync::{atomic::Ordering, Arc, Mutex}};
 use tower::ServiceExt;
-use veilway_panel::{app::{bucket, App, Limiter, Signing}, build, config::{Config, TrustedMirror}, crypto, mirrors, openapi, router, upkeep_once, Upkeep};
+use veilway_panel::{admin, app::{bucket, App, Limiter, Signing}, build, config::{Config, TrustedMirror}, crypto, mirrors, openapi, router, upkeep_once, Upkeep};
 use veilway_proto::subscription::{envelope::{self, Kid}, exchange::{self, GatewayKey}, link::Link, payload::{self, Payload, Reason}, sealed_file, BODY_MAX};
 
 const PASSWORD: &str = "correct horse battery";
@@ -2550,4 +2550,18 @@ async fn a_profile_written_by_hand_under_the_id_of_a_borrowed_site_profile_is_no
 	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK, "a refused transport blocks nothing else");
 	let profiles = h.app.settings().profiles;
 	assert_eq!((profiles.len(), profiles.iter().find(|profile| profile["id"] == "main-faketls").cloned()), (2, Some(by_hand)), "the profile written by hand is still there, unchanged");
+}
+
+#[tokio::test]
+async fn the_console_lists_admins_and_resets_a_password() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	assert_eq!(h.app.db.call(|db| admin::console_admins(db).unwrap()).await.unwrap(), vec![("owner".to_string(), true)]);
+	assert!(h.app.db.call(|db| admin::console_reset(db, "owner", "short")).await.unwrap().is_err(), "a short password");
+	assert!(h.app.db.call(|db| admin::console_reset(db, "nobody", "a console long password")).await.unwrap().is_err(), "an unknown name");
+	assert_eq!(h.app.db.call(|db| admin::console_reset(db, "owner", "a console long password")).await.unwrap(), Ok(1));
+	assert_eq!(h.call(Method::GET, "/p/api/admins", Some(&session), None, "10.0.0.1").await.status, StatusCode::UNAUTHORIZED, "its sessions ended");
+	h.app.db.call(|db| db.execute("update admins set totp_last_step = 0", []).unwrap()).await.unwrap();
+	let login = h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": "a console long password", "totp": h.code(0)})), "10.0.0.1").await;
+	assert_eq!(login.status, StatusCode::OK, "{}", String::from_utf8_lossy(&login.body));
 }
