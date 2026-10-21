@@ -314,7 +314,8 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 		let trimmed = carry(&mut profile, &tag, &reached);
 		let mut missing = Vec::new();
 		if profile.get("inbound_public_key").is_none() {missing.push("inbound_public_key")}
-		if host.is_empty() {missing.push("node_host")}
+		// Apps dial an IP address and refuse a profile that names a host, so a host name here would publish profiles that every app refuses.
+		if host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().map_or(true, |ip| !veilway_proto::subscription::payload::dialable(ip)) {missing.push("node_host")}
 		if profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport["type"] == "tls" || transport["type"] == "ws" || transport["type"] == "fronted-shaped")) && profile.get("transport_public_key").is_none() {missing.push("transport_public_key")}
 		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed, "refused": refused});
 		std::iter::once(own).chain(crate::borrowed::template(settings, document, inbound, &gateways)).collect::<Vec<_>>()
@@ -534,5 +535,12 @@ mod tests {
 		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
 		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
 		assert_eq!((template["profile"]["transports"][0]["candidates"].clone(), template["refused"].clone()), (json!([{"address": "192.0.2.10:443", "sni": "node.example.org", "host": "node.example.org"}]), json!([])));
+	}
+
+	#[test]
+	fn a_node_address_that_apps_cannot_dial_holds_the_profile_back() {
+		let missing = |host: &str| derive(&Settings {node_host: host.into(), ..Settings::default()}, &document(), &[], None, &Exposure::default())[1]["missing"].as_array().unwrap().iter().any(|name| name == "node_host");
+		for host in ["node.example.org", "", "127.0.0.1", "0.0.0.0", "[fe80::1]"] {assert!(missing(host), "{host:?}: apps dial an address they may reach, never a name")}
+		for host in ["192.0.2.10", "2001:db8::10", "[2001:db8::10]"] {assert!(!missing(host), "{host:?}")}
 	}
 }

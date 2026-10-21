@@ -80,7 +80,7 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 					<TextField label={t("subs.provider")} hint={t("subs.providerHint")} value={draft.provider_name ?? ""} onChange={value => patch({provider_name: value})} maxLength={64}/>
 					<TextField label={t("subs.terms")} hint={t("subs.termsHint")} type="url" placeholder="https://" value={draft.terms_url ?? ""} onChange={value => patch({terms_url: value.trim()})} technical/>
 					<TextField label={t("subs.privacy")} hint={t("subs.privacyHint")} type="url" placeholder="https://" value={draft.privacy_url ?? ""} onChange={value => patch({privacy_url: value.trim()})} technical/>
-					<TextField label={t("subs.nodeHost")} hint={t("subs.nodeHostHint")} placeholder="vpn.example.org" value={draft.node_host ?? ""} onChange={value => patch({node_host: value.trim()})} technical/>
+					<TextField label={t("subs.nodeHost")} hint={t("subs.nodeHostHint")} placeholder="203.0.113.10" value={draft.node_host ?? ""} onChange={value => patch({node_host: value.trim()})} technical/>
 				</div>
 			</section>
 			<EndpointsSection rows={endpoints} onRows={(rows, defaultEndpoint) => setForm({...form, endpoints: rows, draft: {...draft, default_endpoint: defaultEndpoint}})} draft={draft} patch={patch} saved={initial} onMoved={() => void api("get", "/settings").then(fresh => { const groups = fresh.group_endpoints; setBase(old => ({...old, draft: {...old.draft, group_endpoints: groups}})); setForm(old => ({...old, draft: {...old.draft, group_endpoints: groups}})); onSaved(fresh); shared.set(fresh); }, () => {})}/>
