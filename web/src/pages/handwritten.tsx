@@ -28,8 +28,10 @@ const isIp = (text: string) => /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[
 // "192.0.2.10:51820" or "[2001:db8::10]:51820" as address and port, and back.
 const split = (dial: string): [string, string] => { const at = dial.lastIndexOf(":"), v6 = dial.startsWith("["); return at < 0 || (!v6 && dial.indexOf(":") !== at) ? [dial, ""] : [dial.slice(v6 ? 1 : 0, v6 ? dial.lastIndexOf("]") : at), dial.slice(at + 1)]; };
 const join = (address: string, port: string) => !address && !port ? "" : address.includes(":") ? `[${address}]:${port}` : `${address}:${port}`;
-// What the client's parser refuses when the document is read: the address forms it never dials, and a port of 0 or with a leading zero.
-const dialable = (dial: string) => { const [address, port] = split(dial); if (!isIp(address) || !/^[1-9]\d{0,4}$/.test(port) || Number(port) > 65535) return false; const low = address.toLowerCase(), first = Number(address.split(".")[0]); return address.includes(":") ? !["::", "::1"].includes(low) && !/^(ff|fe[89ab]|fe[c-f]|::ffff:|64:ff9b:|2002:|2001:0?:)/.test(low) : first !== 0 && first !== 127 && first < 224 && !address.startsWith("169.254.") && address !== "255.255.255.255"; };
+// A host name as the panel takes one: lowercase labels, and a last label that is not a number. Each document carries the IP addresses it has then.
+const isHost = (text: string) => text.length <= 253 && text.split(".").every(label => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(label)) && !/^(\d+|0x[0-9a-f]+)$/.test(text.split(".").pop()!);
+// What the client's parser refuses when the document is read: the address forms it never dials, and a port of 0 or with a leading zero. A host name is never in what the client reads, since the panel puts its addresses in its place.
+const dialable = (dial: string) => { const [address, port] = split(dial); if (!/^[1-9]\d{0,4}$/.test(port) || Number(port) > 65535) return false; if (!isIp(address)) return isHost(address); const low = address.toLowerCase(), first = Number(address.split(".")[0]); return address.includes(":") ? !["::", "::1"].includes(low) && !/^(ff|fe[89ab]|fe[c-f]|::ffff:|64:ff9b:|2002:|2001:0?:)/.test(low) : first !== 0 && first !== 127 && first < 224 && !address.startsWith("169.254.") && address !== "255.255.255.255"; };
 
 // Each problem keyed by its place: "0.id", "0.transports.1.candidates.0.pins". The server only checks the shape of the list, so these are what an app would refuse the profile for.
 function problems(list: unknown[], t: ReturnType<typeof useP>["t"]) {
@@ -198,7 +200,7 @@ function TransportBlock({index, transport, check, onChange, onRemove, onMove}: {
 	</fieldset>;
 }
 
-// An address a client dials, as two inputs: the IP address and the port.
+// An address a client dials, as two inputs: the IP address or host name, and the port.
 function DialRow({label, value, error, onChange, onRemove}: {label: string, value: string, error?: string, onChange: (next: string) => void, onRemove?: () => void}) {
 	const {t} = useP(), [address, port] = split(value);
 	return <div className="p-hand-line">

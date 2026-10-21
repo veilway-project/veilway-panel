@@ -498,7 +498,7 @@ export const en = {
 	"hand.problem.transportKey": "A tls, ws, fronted or fronted-shaped transport needs the transport public key, 44 characters of base64.",
 	"hand.problem.transports": "A profile has 1 to 8 transports.",
 	"hand.problem.endpoints": "A transport has 1 to 16 endpoints.",
-	"hand.problem.dial": "An IP address apps may dial and a port from 1 to 65535. Not loopback, link-local, multicast or 0.0.0.0.",
+	"hand.problem.dial": "An IP address apps may dial or a lowercase host name, and a port from 1 to 65535. Not loopback, link-local, multicast or 0.0.0.0. A host name is looked up each time a user's subscription is made.",
 	"hand.problem.path": "A path starts with /, has 12 to 256 characters of A to Z, a to z, 0 to 9 and . _ ~ / -, and no .. part.",
 	"hand.problem.candidates": "A transport has 1 to 16 candidates.",
 	"hand.problem.host": "A host name in lowercase, such as cdn.example.org.",

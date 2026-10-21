@@ -499,7 +499,7 @@ export const fa: Record<PanelKey, string> = {
 	"hand.problem.transportKey": "انتقال tls، ws، fronted یا fronted-shaped به کلید عمومی انتقال نیاز دارد، ۴۴ نویسهٔ base64.",
 	"hand.problem.transports": "هر پروفایل ۱ تا ۸ انتقال دارد.",
 	"hand.problem.endpoints": "هر انتقال ۱ تا ۱۶ نقطهٔ پایانی دارد.",
-	"hand.problem.dial": "نشانی IP که برنامه‌ها بتوانند به آن وصل شوند و درگاهی از ۱ تا ۶۵۵۳۵. نه loopback، نه link-local، نه multicast و نه 0.0.0.0.",
+	"hand.problem.dial": "نشانی IP که برنامه‌ها بتوانند به آن وصل شوند یا یک نام میزبان با حروف کوچک، و درگاهی از ۱ تا ۶۵۵۳۵. نه loopback، نه link-local، نه multicast و نه 0.0.0.0. نام میزبان هر بار که اشتراک یک کاربر ساخته می‌شود جست‌وجو می‌شود.",
 	"hand.problem.path": "مسیر با / شروع می‌شود، ۱۲ تا ۲۵۶ نویسه از حروف لاتین، رقم و نشانه‌های ‎. _ ~ / - دارد و بخش ‎.. ندارد.",
 	"hand.problem.candidates": "هر انتقال ۱ تا ۱۶ گزینه دارد.",
 	"hand.problem.host": "نام میزبان با حروف کوچک، مثل cdn.example.org.",
