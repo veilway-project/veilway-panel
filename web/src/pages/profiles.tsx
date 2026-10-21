@@ -52,7 +52,7 @@ function Refusals({refused}: {refused: NonNullable<Template["refused"]>}) {
 
 function Override({template, onSaved}: {template: Template, onSaved: () => void}) {
 	const {t} = useP(), toast = useToast(), shared = useContext(SettingsContext), current = (shared.settings?.profile_overrides?.[template.inbound] ?? {}) as Record<string, unknown>;
-	const [text, setText] = useState(JSON.stringify(current, null, 2)), [key, setKey] = useState(String(current.inbound_public_key ?? "")), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
+	const [text, setText] = useState(JSON.stringify(current, null, 2)), [key, setKey] = useState(String(current.inbound_public_key ?? "")), [hosts, setHosts] = useState((Array.isArray(current.node_addresses) ? current.node_addresses as string[] : []).join(", ")), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const save = async (set: Record<string, unknown>) => {
 		setBusy(true);
 		setError(null);
@@ -77,6 +77,10 @@ function Override({template, onSaved}: {template: Template, onSaved: () => void}
 			<TextField label={t("profiles.inboundKey")} hint={t("profiles.inboundKeyHint")} value={key} onChange={setKey} technical/>
 			<Button type="submit" disabled={busy || !key.trim()}>{t("common.save")}</Button>
 		</form>}
+		<form className="p-inline-form" onSubmit={event => { event.preventDefault(); const list = hosts.split(/[\s,]+/).filter(Boolean), {node_addresses: _old, ...rest} = current; void save(list.length ? {...rest, node_addresses: list} : rest); }}>
+			<TextField label={t("profiles.addresses")} hint={t("profiles.addressesHint")} placeholder="203.0.113.10, vpn.example.org" value={hosts} onChange={setHosts} technical/>
+			<Button type="submit" disabled={busy}>{t("common.save")}</Button>
+		</form>
 		<details className="p-details">
 			<summary>{t("profiles.show")}</summary>
 			<pre className="vw-code p-pre" dir="ltr">{JSON.stringify(template.profile, null, 2)}</pre>

@@ -88,6 +88,8 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 		profile["device"] = device.clone();
 		profile
 	}).collect();
+	let profiles = app.names.resolve(profiles).await;
+	if profiles.is_empty() {return Err("no profile has an address that resolves".into())}
 	let at = now();
 	let (floor, device_id) = (at * 1000 + (crypto::random::<2>()[0] as i64 % 250), this.id);
 	let serial: i64 = app.db.call(move |db| db.query_row("update devices set last_serial = max(?, last_serial + 1) where id = ? returning last_serial", params![floor, device_id], |row| row.get::<_, i64>(0))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;

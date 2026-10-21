@@ -30,7 +30,7 @@ pub const RELAYS_MAX: usize = CANDIDATES_MAX - 1;
 pub struct Relay {
 	/// 1 to 32 characters, unique among the relays.
 	pub name: String,
-	/// An IP address: apps dial candidates by address, never by name.
+	/// An IP address, or a host name such as a content delivery network's, which each document turns into the addresses it has then: apps dial candidates by address, never by name.
 	pub address: String,
 	/// The tags of the `veilway` inbounds it carries. Empty for all of them.
 	#[serde(default)]
@@ -61,7 +61,7 @@ pub fn checked_relays<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<
 	for (index, relay) in relays.iter().enumerate() {
 		let name = relay.name.trim();
 		if name.is_empty() || name != relay.name || name.chars().count() > 32 || relays[..index].iter().any(|other| other.name == relay.name) {return fail(format!("relay {}: the name is 1 to 32 characters, without spaces around it, and no other relay has it.", index + 1))}
-		if !relay.address.parse::<IpAddr>().is_ok_and(dialable) {return fail(format!("relay {name}: the address is an IP address that apps may dial, not a host name and not a loopback, link-local or multicast address."))}
+		if !reachable(&relay.address) {return fail(format!("relay {name}: the address is a host name or an IP address that apps may dial, not a loopback, link-local or multicast address."))}
 		if relay.transports.len() > RELAYED.len() || relay.transports.iter().enumerate().any(|(i, kind)| !RELAYED.contains(&kind.as_str()) || relay.transports[..i].contains(kind)) || relay.ports.iter().any(|(kind, port)| !RELAYED.contains(&kind.as_str()) || *port == 0) {return fail(format!("relay {name}: transports and ports name udp, udp-obfs, tls, ws, fronted or fronted-shaped once each, and a port is 1 to 65535."))}
 		if relay.inbounds.len() > 16 || relay.inbounds.iter().enumerate().any(|(i, tag)| tag.is_empty() || tag.len() > 64 || relay.inbounds[..i].contains(tag)) {return fail(format!("relay {name}: inbounds is at most 16 different tags of 1 to 64 characters."))}
 		if relay.groups.len() > 64 || relay.groups.iter().any(|group| !name_ok(group, true)) || relay.users.len() > 1000 {return fail(format!("relay {name}: groups is at most 64 group names and users at most 1000 account ids."))}
@@ -226,7 +226,22 @@ pub async fn put_section(State(app): State<Arc<App>>, Extension(ctx): Extension<
 	ok(&apply(&app, &ctx, document, &input.revision, &section).await?)
 }
 
-fn host_port(host: &str, listen: &str) -> Option<String> {
+/// The override member with the addresses apps reach an inbound's profiles at, IP addresses or host names, in place of the node address.
+pub const NODE_ADDRESSES: &str = "node_addresses";
+
+/// Whether apps may be sent to `host`: an IP address they may dial, or a host name, which each document turns into the addresses it has then.
+pub fn reachable(host: &str) -> bool {host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().map_or_else(|_| is_host(host), dialable)}
+
+/// Where apps reach a transport of the inbound `tag` that listens on `listen`: the inbound's own addresses when it has them, else the listener's address when it is a public one, else the node address. A private listen address is often behind the provider's NAT, so it is never used by itself.
+pub fn hosts(settings: &Settings, tag: &str, listen: &str) -> Vec<String> {
+	let own: Vec<String> = settings.profile_overrides.get(tag).and_then(|edits| edits[NODE_ADDRESSES].as_array()).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+	if !own.is_empty() {return own}
+	let public = |ip: &IpAddr| dialable(*ip) && match ip {IpAddr::V4(v4) => !v4.is_private() && !(v4.octets()[0] == 100 && v4.octets()[1] & 0xc0 == 64), IpAddr::V6(v6) => v6.segments()[0] & 0xfe00 != 0xfc00};
+	if let Some(ip) = listen.parse::<SocketAddr>().ok().map(|bound| bound.ip()).filter(public) {return vec![ip.to_string()]}
+	if settings.node_host.is_empty() {Vec::new()} else {vec![settings.node_host.clone()]}
+}
+
+pub fn host_port(host: &str, listen: &str) -> Option<String> {
 	let port = listen.rsplit_once(':')?.1;
 	Some(if host.contains(':') && !host.starts_with('[') {format!("[{host}]:{port}")} else {format!("{host}:{port}")})
 }
@@ -250,7 +265,7 @@ pub fn carry(profile: &mut Value, tag: &str, reaching: &[(u8, &Relay)]) -> Vec<V
 		let address_of = |entry: &Value| entry.as_str().or_else(|| entry["address"].as_str()).map(str::to_string);
 		let first_port = address_of(&own[0]).and_then(|address| address.rsplit_once(':')?.1.parse::<u16>().ok());
 		let mut carried: Vec<(u8, bool, String, Value)> = reaching.iter().filter(|(_, relay)| (relay.inbounds.is_empty() || relay.inbounds.iter().any(|held| held == tag)) && (relay.transports.is_empty() || relay.transports.contains(&kind))).filter_map(|(tier, relay)| {
-			let address = SocketAddr::new(relay.address.parse().ok()?, relay.ports.get(&kind).copied().or(first_port)?).to_string();
+			let address = host_port(&relay.address, &format!(":{}", relay.ports.get(&kind).copied().or(first_port)?))?;
 			Some((*tier, relay.prefer, relay.name.clone(), if list == "endpoints" {json!(address)} else {let mut candidate = own[0].clone(); candidate["address"] = json!(address); candidate}))
 		}).collect();
 		carried.sort_by_key(|(tier, prefer, _, _)| (*tier, !prefer));
@@ -264,19 +279,22 @@ pub fn carry(profile: &mut Value, tag: &str, reaching: &[(u8, &Relay)]) -> Vec<V
 	trimmed
 }
 
-/// Keeps the public half of each `veilway` inbound's key. The node shows a key only as a marker once it holds it, so the half is made when an apply carries the key in full, and kept from before otherwise. An override of the inbound's public key that differs from a key made here is dropped, since the node runs this one.
+/// Keeps the public half of each `veilway` inbound's key and of its first transport key. The node shows a key only as a marker once it holds it, so the half is made when an apply carries the key in full, and kept from before otherwise. An override of a public key that differs from a key made here is dropped, since the node runs this one.
 pub fn remember_keys(settings: &mut Settings, document: &Value) {
-	let mut kept = BTreeMap::new();
+	let (mut kept, mut transport) = (BTreeMap::new(), BTreeMap::new());
 	for inbound in document["inbounds"].as_array().into_iter().flatten().filter(|inbound| inbound["type"] == "veilway") {
 		let tag = inbound["tag"].as_str().unwrap_or_default().to_string();
-		let fresh = inbound["private_key"].as_str().and_then(|key| <[u8; 32]>::try_from(STANDARD.decode(key).ok()?).ok()).map(|key| STANDARD.encode(crate::gateway::public_of(&key)));
-		if let (Some(public), Some(edits)) = (&fresh, settings.profile_overrides.get_mut(&tag).and_then(Value::as_object_mut)) {
-			if edits.get("inbound_public_key").is_some_and(|old| old != public.as_str()) {edits.remove("inbound_public_key");}
+		let read = |key: &Value| key.as_str().and_then(|key| <[u8; 32]>::try_from(STANDARD.decode(key).ok()?).ok());
+		let fresh = read(&inbound["private_key"]).map(|key| STANDARD.encode(crate::gateway::public_of(&key)));
+		let fresh_transport = read(&inbound["transport_keys"][0]).map(|key| STANDARD.encode(veilway_proto::proof::public_key(&key)));
+		if let Some(edits) = settings.profile_overrides.get_mut(&tag).and_then(Value::as_object_mut) {
+			for (member, public) in [("inbound_public_key", &fresh), ("transport_public_key", &fresh_transport)] {if public.as_ref().is_some_and(|public| edits.get(member).is_some_and(|old| old != public.as_str())) {edits.remove(member);}}
 			if edits.is_empty() {settings.profile_overrides.remove(&tag);}
 		}
-		if let Some(public) = fresh.or_else(|| settings.inbound_keys.get(&tag).cloned()) {kept.insert(tag, public);}
+		if let Some(public) = fresh.or_else(|| settings.inbound_keys.get(&tag).cloned()) {kept.insert(tag.clone(), public);}
+		if let Some(public) = fresh_transport.or_else(|| settings.transport_keys.get(&tag).cloned()).filter(|_| inbound["transport_keys"].as_array().is_some_and(|keys| !keys.is_empty())) {transport.insert(tag, public);}
 	}
-	settings.inbound_keys = kept;
+	(settings.inbound_keys, settings.transport_keys) = (kept, transport);
 }
 
 /// One template per `veilway` inbound, with the overrides laid over it and the relays that reach `user` carried in. `user` is the account's id and groups, or None for the relays that reach everyone. `missing` lists what a profile still needs from the operator, since the node never reveals a public key and does not know its own public address.
@@ -290,15 +308,18 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 		let gateways: Vec<Value> = inbound["address"].as_array().into_iter().flatten().filter_map(|address| address.as_str()?.split('/').next().map(|ip| json!(ip))).collect();
 		let mut refused: Vec<Value> = Vec::new();
 		let listed: Vec<Value> = transports.iter().filter_map(|transport| {
-			let endpoint = host_port(host, transport["listen"].as_str()?)?;
+			let listen = transport["listen"].as_str()?;
+			let reached = hosts(settings, &tag, listen);
+			let endpoints: Vec<String> = reached.iter().filter_map(|host| host_port(host, listen)).collect();
+			if endpoints.is_empty() {return None}
 			Some(match transport["type"].as_str()? {
-				kind @ ("udp" | "udp-obfs") => json!({"type": kind, "endpoints": [endpoint]}),
+				kind @ ("udp" | "udp-obfs") => json!({"type": kind, "endpoints": endpoints}),
 				kind @ ("tls" | "ws" | "fronted-shaped") if transport.get("decoy").is_some() => {
-					let Some(name) = [transport["tls"]["name"].as_str(), transport["decoy"]["origin"].as_str().and_then(|origin| origin.split("://").last()?.split(['/', ':']).next()), Some(host)].into_iter().flatten().find(|name| is_host(name)) else {
+					let Some(name) = [transport["tls"]["name"].as_str(), transport["decoy"]["origin"].as_str().and_then(|origin| origin.split("://").last()?.split(['/', ':']).next()), Some(host)].into_iter().flatten().chain(reached.iter().map(String::as_str)).find(|name| is_host(name)) else {
 						refused.push(json!({"transport": transport["listen"], "code": "no_name", "reason": "apps need a host name to send and check: the certificate names none, the decoy's origin is not a host name, and the node's address is an IP address"}));
 						return None;
 					};
-					let mut stream = json!({"type": kind, "path": transport["path"], "candidates": [{"address": endpoint, "sni": name, "host": name}]});
+					let mut stream = json!({"type": kind, "path": transport["path"], "candidates": endpoints.iter().map(|endpoint| json!({"address": endpoint, "sni": name, "host": name})).collect::<Vec<_>>()});
 					if kind == "fronted-shaped" {stream["shape"] = transport["shape"].clone()}
 					stream
 				}
@@ -307,17 +328,18 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 		}).collect();
 		let mut profile = json!({"id": tag.to_lowercase(), "name": tag, "type": "veilway", "gateways": gateways, "mtu": inbound["mtu"].as_u64().unwrap_or(if obfs {1390} else {1420}), "transports": listed});
 		if let Some(public) = settings.inbound_keys.get(&tag) {profile["inbound_public_key"] = json!(public);}
-		if let Some(edits) = settings.profile_overrides.get(&tag).and_then(Value::as_object) {for (key, value) in edits.iter().filter(|(key, _)| *key != crate::borrowed::ADDRESSES) {profile[key] = value.clone();}}
+		if let Some(public) = settings.transport_keys.get(&tag).filter(|_| profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport.get("candidates").is_some()))) {profile["transport_public_key"] = json!(public);}
+		if let Some(edits) = settings.profile_overrides.get(&tag).and_then(Value::as_object) {for (key, value) in edits.iter().filter(|(key, _)| *key != crate::borrowed::ADDRESSES && *key != NODE_ADDRESSES) {profile[key] = value.clone();}}
 		// The Xray inbounds answer on the addresses a profile names, so one that shares an address may not claim more than Detectable. An override of `unsafe` is the operator's own choice and stays.
 		if exposure.shares(&addresses(&profile)) && profile["rating_cap"] != "unsafe" {profile["rating_cap"] = json!("detectable");}
 		// Relays come after the overrides, so a transport an override wrote gets them too.
 		let trimmed = carry(&mut profile, &tag, &reached);
 		let mut missing = Vec::new();
 		if profile.get("inbound_public_key").is_none() {missing.push("inbound_public_key")}
-		// Apps dial an IP address and refuse a profile that names a host, so a host name here would publish profiles that every app refuses.
-		if host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>().map_or(true, |ip| !veilway_proto::subscription::payload::dialable(ip)) {missing.push("node_host")}
+		let used: Vec<String> = transports.iter().filter_map(|transport| transport["listen"].as_str()).flat_map(|listen| hosts(settings, &tag, listen)).collect();
+		if used.is_empty() || !used.iter().all(|host| reachable(host)) {missing.push("node_host")}
 		if profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport["type"] == "tls" || transport["type"] == "ws" || transport["type"] == "fronted-shaped")) && profile.get("transport_public_key").is_none() {missing.push("transport_public_key")}
-		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed, "refused": refused});
+		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES && *key != NODE_ADDRESSES).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed, "refused": refused});
 		std::iter::once(own).chain(crate::borrowed::template(settings, document, inbound, &gateways)).collect::<Vec<_>>()
 	}).collect()
 }
@@ -372,6 +394,7 @@ pub struct OverrideIn {
 pub async fn put_override(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(inbound): Path<String>, Body(input): Body<OverrideIn>) -> Result<Response, Failure> {
 	if inbound.is_empty() || inbound.len() > 64 || input.set.contains_key("device") || input.set.contains_key("id") || input.set.len() > 32 {return Err(Failure::bad("An override has at most 32 members and none of them is `id` or `device`."))}
 	if input.set.get(crate::borrowed::ADDRESSES).is_some_and(|list| !list.as_array().is_some_and(|list| list.len() < CANDIDATES_MAX && list.iter().all(|text| text.as_str().is_some_and(|text| text.parse::<SocketAddr>().map(|found| found.ip()).or_else(|_| text.parse::<IpAddr>()).is_ok_and(dialable))))) {return Err(Failure::bad(format!("{} is at most {} IP addresses that apps may dial, each with a port or without one.", crate::borrowed::ADDRESSES, CANDIDATES_MAX - 1)))}
+	if input.set.get(NODE_ADDRESSES).is_some_and(|list| !list.as_array().is_some_and(|list| (1..CANDIDATES_MAX).contains(&list.len()) && list.iter().all(|host| host.as_str().is_some_and(|host| (!host.contains(':') || host.parse::<IpAddr>().is_ok()) && reachable(host))))) {return Err(Failure::bad(format!("{NODE_ADDRESSES} is 1 to {} IP addresses or host names, without ports. Each transport adds its own port.", CANDIDATES_MAX - 1)))}
 	let (tag, set) = (inbound.clone(), input.set);
 	app.update_settings(move |settings| if set.is_empty() {settings.profile_overrides.remove(&tag);} else {settings.profile_overrides.insert(tag, Value::Object(set));}).await.map_err(Failure::internal)?;
 	app.db.audit(&ctx.actor, &ctx.source, "profile.override", &inbound, "").await;
@@ -503,8 +526,9 @@ mod tests {
 		let read = |relays: Value| serde_json::from_value::<Settings>(json!({"relays": relays})).map(|settings| settings.relays.len()).map_err(|error| error.to_string());
 		assert_eq!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["tls"], "ports": {"tls": 443}}])), Ok(1));
 		assert_eq!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["fronted-shaped"], "ports": {"fronted-shaped": 9443}}])), Ok(1), "a fronted-shaped relay is carried like a fronted one");
-		for bad in [json!({"name": "a", "address": "relay.example.org", "enabled": true}), json!({"name": "a", "address": "127.0.0.1", "enabled": true}), json!({"name": " a", "address": "198.51.100.7", "enabled": true}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["quic"]}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "ports": {"udp": 0}}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["udp", "udp"]}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["faketls"]}), json!({"name": "a", "address": "198.51.100.7"})] {assert!(read(json!([bad])).is_err(), "{bad}")}
+		for bad in [json!({"name": "a", "address": "Relay Example", "enabled": true}), json!({"name": "a", "address": "127.0.0.1", "enabled": true}), json!({"name": " a", "address": "198.51.100.7", "enabled": true}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["quic"]}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "ports": {"udp": 0}}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["udp", "udp"]}), json!({"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["faketls"]}), json!({"name": "a", "address": "198.51.100.7"})] {assert!(read(json!([bad])).is_err(), "{bad}")}
 		assert!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true}, {"name": "a", "address": "198.51.100.8", "enabled": true}])).is_err(), "names are unique");
+		assert_eq!(read(json!([{"name": "a", "address": "cdn.example.net", "enabled": true}])), Ok(1), "a host name, such as a content delivery network's");
 		assert!(read(json!((0..=RELAYS_MAX).map(|i| json!({"name": format!("r{i}"), "address": "198.51.100.7", "enabled": true})).collect::<Vec<_>>())).unwrap_err().contains("at most 15"));
 		assert_eq!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true, "groups": ["office"], "users": [7]}])), Ok(1), "audiences are optional and an old relay without them is for everyone");
 		assert!(read(json!([{"name": "a", "address": "198.51.100.7", "enabled": true, "groups": ["Bad Group"]}])).is_err());
@@ -538,9 +562,50 @@ mod tests {
 	}
 
 	#[test]
-	fn a_node_address_that_apps_cannot_dial_holds_the_profile_back() {
+	fn a_node_address_apps_cannot_reach_holds_the_profile_back() {
 		let missing = |host: &str| derive(&Settings {node_host: host.into(), ..Settings::default()}, &document(), &[], None, &Exposure::default())[1]["missing"].as_array().unwrap().iter().any(|name| name == "node_host");
-		for host in ["node.example.org", "", "127.0.0.1", "0.0.0.0", "[fe80::1]"] {assert!(missing(host), "{host:?}: apps dial an address they may reach, never a name")}
-		for host in ["192.0.2.10", "2001:db8::10", "[2001:db8::10]"] {assert!(!missing(host), "{host:?}")}
+		for host in ["", "127.0.0.1", "0.0.0.0", "[fe80::1]", "not a name", "Node.Example.org"] {assert!(missing(host), "{host:?}")}
+		for host in ["192.0.2.10", "2001:db8::10", "[2001:db8::10]", "node.example.org"] {assert!(!missing(host), "{host:?}: a host name becomes its addresses in each document")}
+	}
+
+	#[test]
+	fn an_inbound_has_addresses_of_its_own_and_a_public_listener_speaks_for_itself() {
+		let mut settings = Settings {node_host: "node.example.org".into(), ..Settings::default()};
+		let endpoints = |settings: &Settings, document: &Value| derive(settings, document, &[], None, &Exposure::default())[0]["profile"]["transports"][0]["endpoints"].clone();
+		let bound = |listen: &str| json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "udp-obfs", "listen": listen}]}]});
+		assert_eq!(endpoints(&settings, &bound("0.0.0.0:8443")), json!(["node.example.org:8443"]));
+		assert_eq!(endpoints(&settings, &bound("198.51.100.7:8443")), json!(["198.51.100.7:8443"]), "a listener on a public address is reached there");
+		assert_eq!(endpoints(&settings, &bound("10.0.0.5:8443")), json!(["node.example.org:8443"]), "a private one is behind NAT more often than not");
+		settings.profile_overrides.insert("Main".into(), json!({NODE_ADDRESSES: ["203.0.113.5", "edge.example.net", "2001:db8::5"]}));
+		let template = derive(&settings, &bound("198.51.100.7:8443"), &[], None, &Exposure::default()).remove(0);
+		assert_eq!(template["profile"]["transports"][0]["endpoints"], json!(["203.0.113.5:8443", "edge.example.net:8443", "[2001:db8::5]:8443"]));
+		assert!(template["profile"].get(NODE_ADDRESSES).is_none() && template["overridden"] == json!([]), "the list is no member of the profile");
+	}
+
+	#[test]
+	fn a_relay_may_be_a_host_name() {
+		let relay = relay(json!({"address": "cdn.example.net", "transports": ["fronted"]}));
+		assert_eq!(relay.address, "cdn.example.net");
+		let mut profile = json!({"transports": [{"type": "fronted", "candidates": [{"address": "192.0.2.10:443", "sni": "front.example.com"}]}]});
+		carry(&mut profile, "Main", &[(2, &relay)]);
+		assert_eq!(profile["transports"][0]["candidates"][1], json!({"address": "cdn.example.net:443", "sni": "front.example.com"}));
+	}
+
+	#[test]
+	fn a_transport_key_applied_in_full_gives_its_profile_the_public_half() {
+		let key = [7u8; 32];
+		let public = STANDARD.encode(veilway_proto::proof::public_key(&key));
+		let mut document = document();
+		document["inbounds"][0]["transport_keys"] = json!([STANDARD.encode(key)]);
+		let mut settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
+		settings.profile_overrides.insert("Main".into(), json!({"transport_public_key": "an old one"}));
+		remember_keys(&mut settings, &document);
+		assert!(!settings.profile_overrides.contains_key("Main"), "an override of another key is dropped");
+		let derived = derive(&settings, &document, &[], None, &Exposure::default());
+		assert_eq!((derived[0]["profile"]["transport_public_key"].clone(), derived[0]["missing"].as_array().unwrap().contains(&json!("transport_public_key"))), (json!(public), false));
+		assert!(derived[1]["profile"].get("transport_public_key").is_none(), "a profile with no stream transport carries none");
+		document["inbounds"][0]["transport_keys"] = json!(["<redacted>"]);
+		remember_keys(&mut settings, &document);
+		assert_eq!(settings.transport_keys["Main"], public, "a redacted key keeps the half made before");
 	}
 }

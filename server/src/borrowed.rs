@@ -120,7 +120,9 @@ pub fn template(settings: &Settings, document: &Value, inbound: &Value, gateways
 	let held: Vec<&str> = inbounds.iter().flat_map(|inbound| inbound["transport_keys"].as_array().into_iter().flatten().chain(faketls(inbound).map(|transport| &transport["transport_key"])).filter_map(Value::as_str)).collect();
 	let publics: Vec<&str> = settings.faketls_keys.values().flat_map(|listens| listens.values()).map(String::as_str).collect();
 	let others: Vec<&str> = settings.profile_overrides.values().filter_map(|edits| edits["transport_public_key"].as_str()).collect();
-	let node = host.parse::<IpAddr>().ok().filter(|ip| dialable(*ip));
+	let own: Vec<String> = settings.profile_overrides.get(tag).and_then(|edits| edits[crate::nodecfg::NODE_ADDRESSES].as_array()).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+	// The inbound's own addresses, else the node's, each after the address the listener is bound to.
+	let reached = if own.is_empty() {vec![host.to_string()]} else {own};
 	let (mut emitted, mut refused) = (Vec::new(), Vec::new());
 	for transport in mine {
 		let listen = transport["listen"].as_str().unwrap_or_default();
@@ -128,11 +130,12 @@ pub fn template(settings: &Settings, document: &Value, inbound: &Value, gateways
 		let key = transport["transport_key"].as_str().unwrap_or_default();
 		let port = listen.parse::<SocketAddr>().ok().map(|listen| listen.port());
 		let site = transport["site"]["host"].as_str().filter(|site| is_host(site));
-		let mut candidates: Vec<SocketAddr> = Vec::new();
-		for ip in listen.parse::<SocketAddr>().ok().map(|bound| bound.ip()).into_iter().chain(node).filter(|ip| dialable(*ip)) {candidates.extend(port.map(|port| SocketAddr::new(ip, port)))}
-		for text in settings.profile_overrides.get(tag).and_then(|edits| edits[ADDRESSES].as_array()).into_iter().flatten().filter_map(Value::as_str) {candidates.extend(text.parse::<SocketAddr>().ok().or_else(|| Some(SocketAddr::new(text.parse().ok()?, port?))).filter(|found| dialable(found.ip())))}
+		let mut candidates: Vec<String> = Vec::new();
+		if let (Some(ip), Some(port)) = (listen.parse::<SocketAddr>().ok().map(|bound| bound.ip()).filter(|ip| dialable(*ip)), port) {candidates.push(SocketAddr::new(ip, port).to_string())}
+		if port.is_some() {candidates.extend(reached.iter().filter(|host| crate::nodecfg::reachable(host)).filter_map(|host| crate::nodecfg::host_port(host, listen)))}
+		for text in settings.profile_overrides.get(tag).and_then(|edits| edits[ADDRESSES].as_array()).into_iter().flatten().filter_map(Value::as_str) {candidates.extend(text.parse::<SocketAddr>().ok().or_else(|| Some(SocketAddr::new(text.parse().ok()?, port?))).filter(|found| dialable(found.ip())).map(|found| found.to_string()))}
 		let mut seen = Vec::new();
-		candidates.retain(|found| {let new = !seen.contains(found); seen.push(*found); new});
+		candidates.retain(|found| {let new = !seen.contains(found); seen.push(found.clone()); new});
 		candidates.truncate(CANDIDATES_MAX);
 		let why = if id_wrong {Some(("profile_id", "the id of its profile, the inbound tag and -faketls, is longer than 64 characters, is the tag of another inbound, or is the id of a profile written by hand, which publishing would replace"))}
 			else if transport["site"]["acknowledged"] != true {Some(("not_acknowledged", "the operator has not acknowledged that the site has not agreed to this"))}
@@ -140,21 +143,21 @@ pub fn template(settings: &Settings, document: &Value, inbound: &Value, gateways
 			else if held.iter().filter(|other| **other == key).count() > 1 || public.is_some_and(|public| others.contains(&public.as_str()) || publics.iter().filter(|other| **other == public.as_str()).count() > 1) {Some(("key_shared", "its key equals the key of another transport of the node"))}
 			else if public.is_none() {Some(("no_public_key", "the panel holds no public half of its key, because it never saw the key in full: enter the key again and apply"))}
 			else if site.is_none() || port.is_none() {Some(("bad_site", "its site name or listen address does not read"))}
-			else if candidates.is_empty() {Some(("node_host", "the node's public address is not set to an IP address that apps may dial, and the listener is not bound to one"))}
+			else if candidates.is_empty() {Some(("node_host", "the node's public address is not set to a host name or an IP address that apps may dial, and the listener is not bound to one"))}
 			else {None};
 		match (why, public, site) {
-			(None, Some(public), Some(site)) => emitted.push(json!({"type": "faketls", "transport_public_key": public, "candidates": candidates.iter().map(|found| json!({"address": found.to_string(), "sni": site})).collect::<Vec<_>>()})),
+			(None, Some(public), Some(site)) => emitted.push(json!({"type": "faketls", "transport_public_key": public, "candidates": candidates.iter().map(|found| json!({"address": found, "sni": site})).collect::<Vec<_>>()})),
 			(why, ..) => refused.push(json!({"transport": listen, "code": why.map(|(code, _)| code).unwrap_or("unreadable"), "reason": why.map(|(_, reason)| reason).unwrap_or("it does not read")})),
 		}
 	}
 	let mut profile = json!({"id": id, "name": format!("{tag} (borrowed site, alpha)"), "type": "veilway", "gateways": gateways, "mtu": inbound["mtu"].as_u64().unwrap_or(1420), "transports": emitted, "rating_cap": "detectable"});
 	if let Some(public) = settings.inbound_keys.get(tag) {profile["inbound_public_key"] = json!(public);}
 	let edits = settings.profile_overrides.get(tag).and_then(Value::as_object);
-	for (key, value) in edits.into_iter().flatten().filter(|(key, _)| !OWN.contains(&key.as_str()) && *key != ADDRESSES) {profile[key] = value.clone();}
+	for (key, value) in edits.into_iter().flatten().filter(|(key, _)| !OWN.contains(&key.as_str()) && *key != ADDRESSES && *key != crate::nodecfg::NODE_ADDRESSES) {profile[key] = value.clone();}
 	let mut missing = Vec::new();
 	if profile.get("inbound_public_key").is_none() {missing.push("inbound_public_key")}
-	if host.is_empty() {missing.push("node_host")}
-	Some(json!({"inbound": tag, "kind": "faketls", "profile": profile, "missing": missing, "refused": refused, "overridden": edits.into_iter().flatten().map(|(key, _)| key).filter(|key| !OWN.contains(&key.as_str())).collect::<Vec<_>>(), "trimmed": []}))
+	if host.is_empty() && settings.profile_overrides.get(tag).and_then(|edits| edits[crate::nodecfg::NODE_ADDRESSES].as_array()).is_none_or(Vec::is_empty) {missing.push("node_host")}
+	Some(json!({"inbound": tag, "kind": "faketls", "profile": profile, "missing": missing, "refused": refused, "overridden": edits.into_iter().flatten().map(|(key, _)| key).filter(|key| !OWN.contains(&key.as_str()) && *key != crate::nodecfg::NODE_ADDRESSES).collect::<Vec<_>>(), "trimmed": []}))
 }
 
 #[cfg(test)]
@@ -305,7 +308,6 @@ mod tests {
 		assert_eq!(refused(json!({}), &|settings| {settings.profile_overrides.insert("Other".into(), json!({"transport_public_key": public(5)}));}).0, ["key_shared"], "or of any other inbound");
 		assert_eq!(refused(json!({}), &|settings| {settings.faketls_keys.entry("Other".into()).or_default().insert("0.0.0.0:444".into(), public(5));}).0, ["key_shared"], "or of another borrowed site");
 		assert_eq!(refused(json!({}), &|settings| settings.faketls_keys.clear()).0, ["no_public_key"]);
-		assert_eq!(refused(json!({}), &|settings| settings.node_host = "node.example.org".into()).0, ["node_host"], "apps dial addresses and never names");
 		assert_eq!(refused(json!({}), &|settings| settings.node_host = String::new()).0, ["node_host"]);
 		assert_eq!(refused(json!({}), &|settings| settings.node_host = "127.0.0.1".into()).0, ["node_host"]);
 		assert_eq!(refused(json!({"listen": "not an address"}), &nothing).0, ["bad_site"], "a listener that does not read has no port to emit");
@@ -380,7 +382,8 @@ mod tests {
 		assert_eq!(candidates("0.0.0.0:443", "192.0.2.10", None), ["192.0.2.10:443"], "a wildcard listener is reached at the node's address alone");
 		assert_eq!(candidates("198.51.100.7:8443", "192.0.2.10", None), ["198.51.100.7:8443", "192.0.2.10:8443"], "the bound address first, then the node's");
 		assert_eq!(candidates("192.0.2.10:443", "192.0.2.10", None), ["192.0.2.10:443"], "one address once");
-		assert_eq!(candidates("198.51.100.7:443", "node.example.org", None), ["198.51.100.7:443"], "a bound address needs no node host that reads");
+		assert_eq!(candidates("198.51.100.7:443", "", None), ["198.51.100.7:443"], "a bound address needs no node host");
+		assert_eq!(candidates("0.0.0.0:443", "node.example.org", None), ["node.example.org:443"], "a host name becomes its addresses in each document");
 		assert_eq!(candidates("[2001:db8::7]:443", "192.0.2.10", None), ["[2001:db8::7]:443", "192.0.2.10:443"]);
 		assert_eq!(candidates("127.0.0.1:443", "192.0.2.10", None), ["192.0.2.10:443"], "a loopback listener is no address to dial");
 		assert_eq!(candidates("0.0.0.0:443", "192.0.2.10", Some(json!(["203.0.113.5", "203.0.113.6:8443", "192.0.2.10", "127.0.0.1", "not an address", "[2001:db8::9]:443"]))), ["192.0.2.10:443", "203.0.113.5:443", "203.0.113.6:8443", "[2001:db8::9]:443"], "the port is the listener's unless given; undialable and unreadable entries and repeats add nothing");

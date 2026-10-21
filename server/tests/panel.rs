@@ -946,7 +946,7 @@ async fn relays_are_saved_with_the_settings_and_previewed_before() {
 	assert_eq!(preview["templates"][0]["profile"]["transports"][1]["endpoints"], json!(["198.51.100.7:4000", "192.0.2.10:51821"]));
 	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
 	assert_eq!(derived["templates"][0]["profile"]["transports"][1]["endpoints"], json!(["192.0.2.10:51821"]), "a preview saves nothing");
-	let refused = h.call(Method::POST, "/p/api/profiles/preview", Some(&session), Some(json!({"relays": [{"name": "edge", "address": "relay.example.org", "enabled": true}]})), "10.0.0.1").await;
+	let refused = h.call(Method::POST, "/p/api/profiles/preview", Some(&session), Some(json!({"relays": [{"name": "edge", "address": "Relay Example", "enabled": true}]})), "10.0.0.1").await;
 	assert_eq!(refused.status, StatusCode::BAD_REQUEST);
 	let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
 	settings["relays"] = relays;

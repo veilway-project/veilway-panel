@@ -1845,7 +1845,7 @@ export interface components {
         };
         /** @description A forwarder on another address that passes bytes to the node unchanged: nginx `stream`, a DNAT rule, HAProxy, or a content delivery network. TLS, the proofs and WireGuard run end to end through it, so it sees nothing and cannot pass for the node. */
         Relay: {
-            /** @description An IP address: apps dial candidates by address, never by name. */
+            /** @description An IP address, or a host name such as a content delivery network's, which each document turns into the addresses it has then: apps dial candidates by address, never by name. */
             address: string;
             enabled: boolean;
             /**
@@ -2122,6 +2122,13 @@ export interface components {
              * @default
              */
             terms_url: string;
+            /**
+             * @description The public half of the first transport key of each `veilway` inbound, by inbound tag, which its profile carries as `transport_public_key` for its `tls`, `ws` and `fronted` transports. Made the same way as `inbound_keys`.
+             * @default {}
+             */
+            readonly transport_keys: {
+                [key: string]: string;
+            };
             /**
              * Format: uint32
              * @default 3600

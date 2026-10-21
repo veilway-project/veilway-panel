@@ -218,6 +218,9 @@ function Review({section, running, value, moves, show, onClose, onDone}: {sectio
 
 const ceiling = (row: Row, key: string) => key === "undecided_per_source" ? Math.min(Number(row.limits.undecided) || 512, 65536) : LIMITS[key]![1];
 const outside = (row: Row, key: string) => typeof row.limits[key] === "number" && ((row.limits[key] as number) < LIMITS[key]![0] || (row.limits[key] as number) > ceiling(row, key));
+// A key from the browser's random source, as veilway genkey makes one: an inbound key is clamped for X25519, a transport key is 32 random bytes.
+const newKey = (clamped: boolean) => { const key = crypto.getRandomValues(new Uint8Array(32)); if (clamped) { key[0] = key[0]! & 248; key[31] = (key[31]! & 127) | 64; } return btoa(String.fromCharCode(...key)); };
+
 const toRow = (tr: Item, at: number): Row => { const tls = (tr.tls ?? {}) as Item, site = (tr.site ?? {}) as Item, shape = (tr.shape ?? {}) as Item; return {limits: {...((tr.limits ?? {}) as Record<string, number>)}, proxyProtocol: ((tr.decoy ?? {}) as Item).proxy_protocol === true, http2: tr.http2 === "on", type: str(tr.type), listen: str(tr.listen), path: str(tr.path), at, cert: tls.cert !== undefined ? "files" : "self", name: str(tls.name), certFile: str(tls.cert), keyFile: str(tls.key), origin: str(((tr.decoy ?? {}) as Item).origin), proxies: Array.isArray(tr.trusted_proxies) && tr.trusted_proxies.length ? tr.trusted_proxies as string[] : [""], header: str(tr.client_address_header), preset: presetOf(shape), shape, siteHost: str(site.host), siteNames: Array.isArray(site.names) ? site.names.map(str) : [], sitePort: typeof site.port === "number" ? site.port : "", siteAddress: str(site.address), acknowledged: site.acknowledged === true, siteKey: str(tr.transport_key)}; };
 
 // The checks the node's validator runs on a tls, ws or fronted transport of a veilway inbound, so a mistake shows at its field before the review. Errors stop the review; warnings repeat the node's own.
@@ -331,7 +334,10 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 			<TextField label={t("config.col.tag")} hint={t("config.tagHint")} value={tag} onChange={value => set("tag", value.toLowerCase())} error={clash ? t("config.tagTaken") : undefined} technical required autoFocus/>
 			{section === "inbounds" && <>
 				<SelectField label={t("inbounds.col.type")} hint={t("inbounds.typeHint")} value={kind} onChange={value => { if (value !== "xray") set("type", value); else if (xray) onXray?.(); }} options={[{value: "veilway", label: t("config.inbound.veilway"), detail: t("config.inbound.veilwayDetail")}, {value: "wireguard", label: t("config.inbound.wireguard"), detail: t("config.inbound.wireguardDetail")}, ...(item ? [] : [{value: "xray", label: t("config.inbound.xray"), detail: t(xray ? "config.inbound.xrayDetail" : "config.inbound.xrayMissing")}])]}/>
-				<SecretField label={t("config.privateKey")} hint={t(item ? "config.privateKeyKeep" : "config.privateKeyNew")} value={str(draft.private_key)} onChange={value => set("private_key", value.trim())} autoComplete="off"/>
+				<div className="p-proxy">
+					<SecretField label={t("config.privateKey")} hint={t(item ? "config.privateKeyKeep" : "config.privateKeyNew")} value={str(draft.private_key)} onChange={value => set("private_key", value.trim())} autoComplete="off"/>
+					{!str(draft.private_key).startsWith("<redacted") && <Button onClick={() => set("private_key", newKey(true))}>{t("config.keyMake")}</Button>}
+				</div>
 				<LinesField label={t("config.addresses")} hint={t("config.addressesHint")} value={form.addresses} onChange={addresses => patch({addresses})} rows={2}/>
 				<NumberField label={t("config.mtu")} hint={t("config.mtuHint")} unit={t("config.bytes")} min={1280} max={1500} value={typeof draft.mtu === "number" ? draft.mtu : ""} onChange={value => set("mtu", value === "" ? undefined : value)} optional/>
 				<fieldset className="p-mirror">
@@ -361,7 +367,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 								</div>
 								<div className="p-proxy">
 									<SecretField label={t("borrowed.key")} hint={t(row.siteKey.startsWith("<redacted") ? "borrowed.keyKeep" : "borrowed.keyNew")} value={row.siteKey} onChange={value => up({siteKey: value.trim()})} error={shownBorrowed("key", row.siteKey)} autoComplete="off"/>
-									<Button onClick={() => up({siteKey: btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32))))})}>{t("borrowed.keyPick")}</Button>
+									<Button onClick={() => up({siteKey: newKey(false)})}>{t("borrowed.keyPick")}</Button>
 								</div>
 								<Checkbox label={t("borrowed.acknowledge")} checked={row.acknowledged} onChange={acknowledged => up({acknowledged})}/>
 								{bproblem?.ack && tried && <Mark tone="danger">{t(bproblem.ack)}</Mark>}
@@ -405,7 +411,10 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 				</fieldset>
 				{proved && <fieldset className="p-mirror">
 					<legend className="vw-label">{t("stream.keys")}</legend>
-					<SecretField label={t("stream.key")} hint={t((keys[0] ?? "").startsWith("<redacted") ? "stream.keyKeep" : "stream.keyNew")} value={keys[0] ?? ""} onChange={value => set("transport_keys", [value.trim(), ...keys.slice(1)])} error={keyWrong && (tried || keys[0]) ? t("stream.err.key") : undefined} autoComplete="off"/>
+					<div className="p-proxy">
+						<SecretField label={t("stream.key")} hint={t((keys[0] ?? "").startsWith("<redacted") ? "stream.keyKeep" : "stream.keyNew")} value={keys[0] ?? ""} onChange={value => set("transport_keys", [value.trim(), ...keys.slice(1)])} error={keyWrong && (tried || keys[0]) ? t("stream.err.key") : undefined} autoComplete="off"/>
+						{!(keys[0] ?? "").startsWith("<redacted") && <Button onClick={() => set("transport_keys", [newKey(false), ...keys.slice(1)])}>{t("config.keyMake")}</Button>}
+					</div>
 					{keys.length > 1 && <p className="vw-muted vw-small">{t("stream.keyRotating")}</p>}
 					{upgraded && <div className="p-proxy">
 						<TextField label={t("stream.cookie")} hint={t("stream.cookieHint")} value={str(draft.upgrade_cookie)} onChange={value => set("upgrade_cookie", value.trim())} error={cookieWrong && (tried || draft.upgrade_cookie) ? t("stream.err.cookie") : undefined} technical/>

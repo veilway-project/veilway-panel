@@ -57,7 +57,7 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 		setBusy(true);
 		try {
 			// The public halves of the borrowed-site keys are the server's, so they are not sent. The generated type lists every field with a default as required.
-			const {faketls_keys: _kept, inbound_keys: _keys, ...sent} = draft;
+			const {faketls_keys: _kept, inbound_keys: _keys, transport_keys: _transport, ...sent} = draft;
 			const saved = await guard(() => api("put", "/settings", {body: {...sent, not_found: notFound, endpoints: endpoints.filter(e => e.name || e.url).map(e => ({name: e.name, url: e.url, pins: isPlain(e.url) ? [] : lines(e.pins)})), profiles: parsed as Settings["profiles"], refresh_mirrors: mirrors.filter(m => m.url.trim()).map(m => lines(m.pins).length ? {url: m.url.trim(), pins: lines(m.pins)} : m.url.trim())} as Settings}));
 			onSaved(saved);
 			shared.set(saved);

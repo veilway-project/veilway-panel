@@ -148,11 +148,14 @@ pub struct Settings {
 	/// The public half of the key of each `veilway` inbound, by inbound tag, which its profile is made with. Made the same way as `faketls_keys`, and read-only in the API too.
 	#[schemars(extend("readOnly" = true))]
 	pub inbound_keys: BTreeMap<String, String>,
+	/// The public half of the first transport key of each `veilway` inbound, by inbound tag, which its profile carries as `transport_public_key` for its `tls`, `ws` and `fronted` transports. Made the same way as `inbound_keys`.
+	#[schemars(extend("readOnly" = true))]
+	pub transport_keys: BTreeMap<String, String>,
 }
 
 impl Default for Settings {
 	fn default() -> Self {
-		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), published_relays: Vec::new(), faketls_keys: BTreeMap::new(), inbound_keys: BTreeMap::new()}
+		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), published_relays: Vec::new(), faketls_keys: BTreeMap::new(), inbound_keys: BTreeMap::new(), transport_keys: BTreeMap::new()}
 	}
 }
 
@@ -168,6 +171,8 @@ pub struct App {
 	pub lookups: Arc<RwLock<HashMap<[u8; 32], i64>>>,
 	/// The signed refusals made, by account, reason and signing key, reused while they are within their age.
 	pub refusals: Mutex<HashMap<(i64, String, [u8; 8]), (i64, String)>>,
+	/// The host names of the profiles and the addresses they last had.
+	pub names: crate::names::Names,
 	pub limits: Limiter,
 	/// The limits of the subscription endpoint, apart from `limits`: the keys a flood of requests makes there can fill this one and never lock an admin out.
 	pub sub_limits: Limiter,
