@@ -49,11 +49,11 @@ Veilway is an open-source VPN platform for people on censored networks: a Rust c
 
 - Users and devices: quotas per period, expiry, groups, enabling and disabling, device keys, usage resets, and subscription links and QR codes.
 - Subscriptions and gateway keys: requests and answers are encrypted end to end to the panel's gateway key, so relay mirrors see nothing of their content. Links carry the gateway key, and the page for rotation, theft and loss of a key is in the panel. Named endpoints are reached at `sub_path/<name>`, can be assigned per user and per group, and a move between them is signed. An endpoint may be plain `http://`, and the panel warns when one is.
-- Inbounds, exits and routing: native inbounds and the optional Xray add-on, a default exit with exits per user, and routing rules you reorder by drag and drop. A raw JSON editor checks each change against the schema.
-- Node links and mirrors: guided setups for an entry node and a reverse tunnel, relays, and relay and static mirrors.
+- Inbounds, exits and routing: native inbounds and the optional Xray add-on, keys made with a Generate button, addresses per inbound, a default exit with exits per user, and routing rules you reorder by drag and drop. A raw JSON editor checks each change against the schema.
+- Node links and mirrors: guided setups for an entry node and a reverse tunnel, relays, and relay and static mirrors. The node address and relay addresses may be IP addresses or host names. The panel looks a name up when it makes a user's subscription, so apps always get IP addresses.
 - Traffic, DNS, logs and notices: live and past traffic per user, inbound, exit and outbound, DNS settings, logs, and notices to every device.
 - Admins and access: sign-in with a password and a TOTP code, sessions, rate limits, API tokens, and an audit log. The admin API is described by `server/openapi.json`.
-- Operations: backup and restore, an update button for installs made with the install script, links to your own terms and privacy pages, a demo mode with two-step sign-in off (`"two_step": "off"` in `panel.json` only) that logs a warning, and English and Persian in light and dark themes.
+- Operations: backup and restore, update buttons for the panel and the node and restart buttons on the Nodes page (for installs made with the install script, which the updater keeps current too), links to your own terms and privacy pages, a demo mode with two-step sign-in off (`"two_step": "off"` in `panel.json` only) that logs a warning, and English and Persian in light and dark themes.
 
 ## Who it is for
 
@@ -61,11 +61,17 @@ Operators who run a Veilway node and want to manage its users from a browser or 
 
 ## Status
 
-> **Alpha.** The server and the web app are built and run against a real node in the alpha gate. This repository has no published release yet, and the panel has had no outside security review.
+> **Alpha.** The current release is `v0.2.10-alpha`. The server and the web app run against a real node in the alpha gate, and the panel has had no outside security review. Downloads are on the [releases page](https://github.com/veilway-project/veilway-panel/releases). Manuals and release notes are on the [docs site](https://veilway-project.github.io/veilway-docs/).
 
 ## Quick start
 
-This repository has no published release yet, so build from source first (see below). Then, in `server/`:
+The install script is the recommended way. It installs the node, the panel or both, checks every download, and can set up the web server for you:
+
+```
+curl -fsSL https://raw.githubusercontent.com/veilway-project/veilway/main/scripts/veilway.sh | sudo bash
+```
+
+The [install guide](https://veilway-project.github.io/veilway-docs/getting-started/) has the details, and [First inbound and user](https://veilway-project.github.io/veilway-docs/guides/first-user/) goes from the first sign-in to a user's link. To run the panel from source instead, build it first (see below). Then, in `server/`:
 
 1. Write `panel.json`. Every key is optional, but the panel refuses to start unless `trusted_proxies` lists your web server (or `direct` is `true` when no proxy is in front). Set `prefix` to a long random path: it is the admin path. Set `not_found` to the status, headers and body of your web server's 404, copied as they are.
 2. Start the panel:
@@ -77,7 +83,7 @@ cargo run -- run --config panel.json
 On the first start it prints a one-time setup token to the console. Keep it private.
 
 3. Create the first admin account: send the token with a username, a password and `"accepted_terms": true` to `{prefix}/api/setup`. The panel requires accepting the Veilway terms at setup. The answer holds a TOTP secret. Add it to an authenticator app, then sign in with the code.
-4. Before you add users, set the endpoint URL, the address pool and the profiles in the panel.
+4. Before you add users, set the node address, the endpoint URL and the address pool under Settings, then add an inbound and publish its profile. The Generate buttons make the inbound's private key and transport key, and the panel fills in the public halves, so no `veilway genkey` run is needed.
 5. Open `{prefix}` in a browser to sign in.
 
 ## Build from source
@@ -122,10 +128,6 @@ API tokens let a script call the admin API. A token never reaches the routes tha
 - The panel has no TLS of its own: it refuses to start on a non-loopback `listen`, and its cookies are secure.
 - The subscription endpoint looks like your web server's own 404. The `not_found` setting copies that answer, so a stranger cannot tell the endpoint from any other missing path.
 - The audit log never holds a link, token or key.
-
-## Screenshots
-
-Screenshots will be added from the real web app.
 
 ## Repositories
 
