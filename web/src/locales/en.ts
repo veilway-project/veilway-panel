@@ -1076,6 +1076,8 @@ export const en = {
 	"review.apply": "Apply to the node",
 	"rule.default": "Default exit",
 	"rule.defaultHint": "Where traffic goes when no rule matches.",
+	"rule.spare": "Exits Automatic may switch to",
+	"rule.spareHint": "When a device has not chosen an exit and its own stops working, it leaves through the first of these that works and that its user may use, and goes back when its own works again. With none ticked it stays on its exit, which is what an entry node needs.",
 	"rule.lead": "Checked from the top. The first match decides.",
 	"rule.add": "Add rule",
 	"rule.empty": "No rules",

@@ -491,7 +491,9 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 function Routing({routing, reviewing, exits: items, inbounds, links, onPropose}: {routing: Item, reviewing: boolean, exits: Item[], inbounds: string[], links: string[], onPropose: (routing: Item, notes?: string[]) => void}) {
 	const users = useLoad(() => api("get", "/users"), []), people = users.data?.users ?? null;
 	const exits = items.map(item => str(item.tag)), named = (tag: string) => str(items.find(item => item.tag === tag)?.name) || tag;
-	const {t, number} = useP(), saved = list(routing.rules), [order, setOrder] = useState(() => saved.map((_, i) => i)), rules = order.map(i => saved[i]!), [fallback, setFallback] = useState(str(routing.default)), [editing, setEditing] = useState<number | null | undefined>(undefined);
+	const {t, number} = useP(), saved = list(routing.rules), [order, setOrder] = useState(() => saved.map((_, i) => i)), rules = order.map(i => saved[i]!), [fallback, setFallback] = useState(str(routing.default)), savedSpare = list(routing.fallback).map(str), [spare, setSpare] = useState(savedSpare), [editing, setEditing] = useState<number | null | undefined>(undefined);
+	// The exits Automatic may switch to, in the order of the exits. A block exit carries nothing and is not offered.
+	const spares = items.filter(item => (item.backend as Item | undefined)?.type !== "block").map(item => str(item.tag)), spareChanged = spare.join(",") !== savedSpare.join(",");
 	// A rule can name an exit that a later edit removed. The node refuses such a config in the review; the list says so before that.
 	const action = (rule: Item) => { const exit = typeof rule.action === "object" && rule.action ? str((rule.action as Item).exit) : null; return exit === null ? t(`rule.action.${rule.action === "block" || rule.action === "reject" ? rule.action : "user"}`) : exits.includes(exit) ? <span title={exit}>{t("rule.toExit", {exit: named(exit)})}</span> : <Mark tone="danger">{t("rule.missingExit", {exit})}</Mark>; };
 	const when = (rule: Item) => CONDITIONS.filter(key => Array.isArray(rule[key])).map(key => t(`rule.cond.${key}` as PanelKey) + ": " + (rule[key] as unknown[]).join(", ")).join("; ");
@@ -501,7 +503,10 @@ function Routing({routing, reviewing, exits: items, inbounds, links, onPropose}:
 	return <>
 		<Glass className="p-panel p-form">
 			<SelectField label={t("rule.default")} hint={t("rule.defaultHint")} value={fallback} onChange={setFallback} options={exits.map(tag => ({value: tag, label: tag}))}/>
-			{fallback !== str(routing.default) && <div><Button variant="primary" onClick={() => onPropose({...routing, ...(notes.length ? {rules} : {}), default: fallback}, notes)}>{t("config.review")}</Button></div>}
+			<Field label={t("rule.spare")} hint={t("rule.spareHint")}>
+				{ids => <div {...ids} role="group" className="p-pick-list">{spares.map(tag => <div key={tag} className="p-pick-row"><Checkbox label={named(tag)} checked={spare.includes(tag)} onChange={on => setSpare(spares.filter(other => other === tag ? on : spare.includes(other)))}/></div>)}</div>}
+			</Field>
+			{(fallback !== str(routing.default) || spareChanged) && <div><Button variant="primary" onClick={() => { const next: Item = {...routing, ...(notes.length ? {rules} : {}), default: fallback}; if (spare.length) next.fallback = spare; else delete next.fallback; onPropose(next, notes); }}>{t("config.review")}</Button></div>}
 		</Glass>
 		<Glass className="p-panel">
 			<div className="p-row p-table-head"><span className="vw-muted vw-small">{t("rule.lead")}</span><Button size="sm" icon="plus" onClick={() => setEditing(null)}>{t("rule.add")}</Button></div>

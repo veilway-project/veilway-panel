@@ -747,7 +747,19 @@
           "description": "The secret the two nodes agreed on when they were paired. It never travels."
         },
         "via": {
-          "description": "On the node that dials (it has `peer`): the tag of a socks5 outbound that the link's TCP transports connect through. Its UDP transports are not used through it.",
+          "description": "On the node that dials: the tag of a `socks5` outbound whose chain the TCP transports of the link go through. `udp` and `udp-obfs` are not usable through it.",
+          "not": {
+            "enum": [
+              "all",
+              "any",
+              "block",
+              "reject",
+              "drop",
+              "local",
+              "direct",
+              "user"
+            ]
+          },
           "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
           "type": "string"
         }
@@ -1027,6 +1039,11 @@
             "bind": {
               "$ref": "#/$defs/Ip"
             },
+            "interface": {
+              "description": "A network interface of the host by name, such as \"eth1\". Every socket of this outbound is tied to it, so its traffic leaves there whatever the routing table says. Linux and macOS only.",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,14}$",
+              "type": "string"
+            },
             "tag": {
               "not": {
                 "enum": [
@@ -1101,7 +1118,19 @@
               "type": "string"
             },
             "via": {
-              "description": "The tag of another socks5 outbound that this one connects through to reach its server. A chain may have at most 8 hops and may not loop.",
+              "description": "The tag of another `socks5` outbound. The connection to `server` goes through that outbound first, and a chain of them may be up to 8 long. SOCKS5 is plain text: each proxy of the chain sees the user name and password of the proxies after it, the CONNECT targets and the bytes of the flows. A link's payload stays protected by its TLS end to end.",
+              "not": {
+                "enum": [
+                  "all",
+                  "any",
+                  "block",
+                  "reject",
+                  "drop",
+                  "local",
+                  "direct",
+                  "user"
+                ]
+              },
               "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
               "type": "string"
             }
@@ -1245,6 +1274,28 @@
           },
           "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
           "type": "string"
+        },
+        "fallback": {
+          "description": "The exits a device without a choice of exit may leave through while its own exit is not working, in the order they are tried, each only when its user may use it. Without it a device stays on its exit whatever happens to it, which is what an entry node needs: nothing goes round a link that is down.",
+          "items": {
+            "not": {
+              "enum": [
+                "all",
+                "any",
+                "block",
+                "reject",
+                "drop",
+                "local",
+                "direct",
+                "user"
+              ]
+            },
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "type": "array",
+          "uniqueItems": true
         },
         "rules": {
           "items": {
