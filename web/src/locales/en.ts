@@ -379,6 +379,8 @@ export const en = {
 	"subs.interval": "Apps check for changes every",
 	"subs.days": "Documents stay valid for",
 	"subs.daysUnit": "days",
+	"subs.idle": "Remove devices that have not refreshed for",
+	"subs.idleHint": "0 keeps them. This frees the places of apps that were uninstalled or phones that were lost. Devices whose key the panel made are kept.",
 	"subs.minutesUnit": "minutes",
 	"subs.once": "Show links once",
 	"subs.onceHint": "The panel keeps no copy of a link. It is shown when made or reset, and never again.",

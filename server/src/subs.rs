@@ -42,6 +42,14 @@ impl DeviceRow {
 /// Drops the pending devices that were not confirmed within the lapse. Pending devices are never pushed to the node.
 pub fn expire_pending(db: &Connection, at: i64) -> rusqlite::Result<usize> {db.execute("delete from devices where state = 'pending' and created < ?", [at - PENDING_LAPSE])}
 
+/// Removes the confirmed devices that have not refreshed for `days` days, the setting `idle_device_days`, and says how many went. A device whose key the panel made has no endpoint to refresh from and stays.
+pub fn forget_idle(db: &Connection, at: i64, days: u32) -> rusqlite::Result<usize> {
+	if days == 0 {return Ok(0)}
+	let gone = db.execute("delete from devices where state = 'enrolled' and private_key is null and coalesce(last_seen, confirmed_at, created) < ?", [at - i64::from(days) * 86_400])?;
+	if gone > 0 {crate::db::audit(db, "panel", "upkeep", "device.idle", "devices", &format!("{gone} devices removed after {days} days without a refresh"))}
+	Ok(gone)
+}
+
 /// The lowest free host address of the pool, leaving the first one to the gateway.
 pub fn allocate(db: &Connection, pool: &str) -> Option<String> {
 	let pool: Ipv4Net = pool.parse().ok()?;
@@ -215,7 +223,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	if user.expires_at.is_some_and(|expires| expires <= at) {return refuse("expired")}
 	let settings = app.settings();
 	let hash = keys.device_secret_hash(ask.device_secret().expose());
-	let (public_key, op, name) = (STANDARD.encode(ask.device_public_key()), match ask.op() {Op::Fetch => "fetch", Op::Confirm(_) => "confirm", Op::Release => "release"}, match ask.op() {Op::Confirm(Some(name)) => Some(name.as_str().to_owned()), _ => None});
+	let (public_key, op, name) = (STANDARD.encode(ask.device_public_key()), match ask.op() {Op::Fetch => "fetch", Op::Confirm(_) => "confirm", Op::Release => "release", Op::Leave => "leave"}, match ask.op() {Op::Confirm(Some(name)) => Some(name.as_str().to_owned()), _ => None});
 	// A key that is some inbound's public key of this node is never a device's: the node would take the device for the node itself.
 	let node_key = settings.profiles.iter().chain(settings.profile_overrides.values()).filter_map(|profile| profile.get("inbound_public_key")?.as_str()).any(|key| STANDARD.decode(key).is_ok_and(|bytes| STANDARD.encode(bytes) == public_key));
 	let (changed, outcome) = {
@@ -230,6 +238,12 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 				Some(device) if !crypto::equal(&device.secret_hash, &hash) => Err("device_mismatch"),
 				Some(device) => match op {
 					"release" if device.state == "pending" => {changed |= tx.execute("delete from devices where id = ?", [device.id])? > 0; Ok(None)}
+					// The user removed the subscription from the app, which proved the device's secret to ask: the device goes, confirmed or not, and its place is free.
+					"leave" => {
+						changed |= tx.execute("delete from devices where id = ?", [device.id])? > 0;
+						crate::db::audit(&tx, "device", "subscription", "device.leave", &format!("user:{}", user.id), &format!("device:{}, removed by its app", device.id));
+						Ok(None)
+					}
 					"confirm" => {
 						tx.execute("update devices set state = 'enrolled', confirmed_at = coalesce(confirmed_at, ?), name = coalesce(?, name), last_seen = ? where id = ?", params![at, name, at, device.id])?;
 						changed |= device.state == "pending";
@@ -238,7 +252,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 					"fetch" if device.state == "enrolled" && !held.sub_limits.hit(&format!("dev:{}:{}", user.id, public_key), 1, 60) => Err("rate_limited"),
 					_ => {tx.execute("update devices set last_seen = ? where id = ?", params![at, device.id])?; Ok(Some(device))}
 				},
-				None if op == "release" => Ok(None),
+				None if op == "release" || op == "leave" => Ok(None),
 				None if node_key || elsewhere => Err("device_mismatch"),
 				None => {
 					let (total, pending): (i64, i64) = tx.query_row("select count(*), coalesce(sum(state = 'pending'), 0) from devices where user_id = ?", [user.id], |row| Ok((row.get(0)?, row.get(1)?)))?;

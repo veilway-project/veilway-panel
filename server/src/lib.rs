@@ -108,11 +108,21 @@ pub async fn upkeep_once(app: &Arc<App>, state: &mut Upkeep) {
 	let at = crypto::now();
 	if at - state.cleaned_at >= 3600 {
 		state.cleaned_at = at;
-		if app.db.call(move |db| {
+		let idle = app.settings().idle_device_days;
+		match app.db.call(move |db| {
 			let _ = db.execute("delete from sessions where last_seen < ? or created < ?", [at - auth::IDLE, at - auth::ABSOLUTE]);
 			let _ = subs::expire_pending(db, at);
 			stats::prune(db, at);
-		}).await.is_err() {tracing::warn!("the database clean-up did not run: the database cannot take the call")}
+			subs::forget_idle(db, at, idle)
+		}).await {
+			Ok(Ok(gone)) if gone > 0 => {
+				tracing::info!("{gone} devices that had not refreshed for {idle} days were removed");
+				app.dirty.store(true, Ordering::Relaxed);
+			}
+			Ok(Err(error)) => tracing::warn!("idle devices could not be removed: {error}"),
+			Ok(_) => {}
+			Err(_) => tracing::warn!("the database clean-up did not run: the database cannot take the call"),
+		}
 		if let Err(error) = app.signing.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).prune() {tracing::error!("the signing keys could not be pruned: {error}")}
 		let days = app.settings().gateway_retired_days;
 		let (pruned, loaded, due) = {

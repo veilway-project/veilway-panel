@@ -300,6 +300,13 @@ async fn signed_documents_and_refusals_verify() {
 	assert_eq!(refusal_of(&h.fetch(&link, &kids, 3, "fetch", None).await, &[key]), Reason::DeviceLimit);
 	assert_eq!(refusal_of(&h.fetch(&link, &kids, 2, "release", None).await, &[key]), Reason::Released);
 	assert_eq!(h.call(Method::GET, &format!("/p/api/users/{id}/devices"), Some(&session), None, "10.0.0.1").await.json()["devices"].as_array().unwrap().len(), 1);
+	// `release` never removes a confirmed device. `leave`, which an app sends when the user removes the subscription, does, and the place is free again.
+	assert!(matches!(opened(&h.fetch(&link, &kids, 1, "release", None).await, &[key]), Payload::Subscription(_)));
+	assert_eq!(refusal_of(&h.fetch(&link, &kids, 1, "leave", None).await, &[key]), Reason::Released);
+	assert_eq!(h.call(Method::GET, &format!("/p/api/users/{id}/devices"), Some(&session), None, "10.0.0.1").await.json()["devices"].as_array().unwrap().len(), 0);
+	assert_eq!(refusal_of(&h.fetch(&link, &kids, 1, "leave", None).await, &[key]), Reason::Released);
+	h.app.sub_limits.clear(&format!("new:{id}:1"));
+	assert!(matches!(opened(&h.fetch(&link, &kids, 2, "confirm", None).await, &[key]), Payload::Subscription(_)));
 	// Switching the account off and setting an expiry give signed refusals.
 	assert_eq!(h.call(Method::PATCH, &format!("/p/api/users/{id}"), Some(&session), Some(json!({"enabled": false})), "10.0.0.1").await.status, StatusCode::OK);
 	assert_eq!(refusal_of(&h.fetch(&link, &kids, 4, "fetch", None).await, &[key]), Reason::Disabled);
@@ -2623,4 +2630,27 @@ async fn the_console_lists_admins_and_resets_a_password() {
 	h.app.db.call(|db| db.execute("update admins set totp_last_step = 0", []).unwrap()).await.unwrap();
 	let login = h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": "a console long password", "totp": h.code(0)})), "10.0.0.1").await;
 	assert_eq!(login.status, StatusCode::OK, "{}", String::from_utf8_lossy(&login.body));
+}
+
+#[tokio::test]
+async fn devices_that_have_not_refreshed_for_the_set_days_are_removed_and_their_places_freed() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	// A limit shorter than three refresh intervals would take devices that are in use.
+	let refused = h.call(Method::PUT, "/p/api/settings", Some(&session), Some({let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json(); settings["idle_device_days"] = json!(1); settings["update_interval"] = json!(604_800); settings}), "10.0.0.1").await;
+	assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+	h.configure(&session, json!({"idle_device_days": 30})).await;
+	let (id, link) = h.user(&session, "ann", json!({"device_limit": 2})).await;
+	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
+	for device in [1, 2] {
+		assert!(matches!(opened(&h.fetch(&link, &kids, device, "confirm", None).await, &[key.clone()]), Payload::Subscription(_)));
+		h.app.sub_limits.clear(&format!("new:{id}:1"));
+	}
+	// Device 1 was last seen 31 days ago, device 2 today.
+	let stale = STANDARD.encode([1u8; 32]);
+	h.app.db.call(move |db| db.execute("update devices set last_seen = ? where public_key = ?", rusqlite::params![crypto::now() - 31 * 86_400, stale]).map(drop)).await.unwrap().unwrap();
+	upkeep_once(&h.app, &mut Upkeep::default()).await;
+	let devices = h.call(Method::GET, &format!("/p/api/users/{id}/devices"), Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(devices["devices"].as_array().unwrap().iter().map(|device| device["public_key"].as_str().unwrap().to_owned()).collect::<Vec<_>>(), [STANDARD.encode([2u8; 32])]);
+	assert!(matches!(opened(&h.fetch(&link, &kids, 3, "confirm", None).await, &[key]), Payload::Subscription(_)));
 }

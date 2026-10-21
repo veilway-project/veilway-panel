@@ -2158,6 +2158,13 @@
             "description": "The endpoint of a group, by group name.",
             "type": "object"
           },
+          "idle_device_days": {
+            "default": 0,
+            "description": "Devices that have not refreshed for this many days are removed, which frees their places: an app that was uninstalled, or a phone that was lost. 0 keeps them. A device whose key the panel made never refreshes and is never removed this way.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "inbound_keys": {
             "additionalProperties": {
               "type": "string"

@@ -86,9 +86,14 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 			<EndpointsSection rows={endpoints} onRows={(rows, defaultEndpoint) => setForm({...form, endpoints: rows, draft: {...draft, default_endpoint: defaultEndpoint}})} draft={draft} patch={patch} saved={initial} onMoved={() => void api("get", "/settings").then(fresh => { const groups = fresh.group_endpoints; setBase(old => ({...old, draft: {...old.draft, group_endpoints: groups}})); setForm(old => ({...old, draft: {...old.draft, group_endpoints: groups}})); onSaved(fresh); shared.set(fresh); }, () => {})}/>
 			<section className="p-section" id="set-refresh">
 				{head("refresh")}
-				<div className="p-pair">
-					<NumberField label={t("subs.interval")} unit={t("subs.minutesUnit")} min={15} max={10080} value={Math.round((draft.update_interval ?? 3600) / 60)} onChange={value => patch({update_interval: value === "" ? 3600 : value * 60})}/>
-					<NumberField label={t("subs.days")} unit={t("subs.daysUnit")} min={1} max={90} value={draft.document_days ?? 14} onChange={value => patch({document_days: value === "" ? 14 : value})}/>
+				<div className="p-form">
+					<div className="p-pair">
+						<NumberField label={t("subs.interval")} unit={t("subs.minutesUnit")} min={15} max={10080} value={Math.round((draft.update_interval ?? 3600) / 60)} onChange={value => patch({update_interval: value === "" ? 3600 : value * 60})}/>
+						<NumberField label={t("subs.days")} unit={t("subs.daysUnit")} min={1} max={90} value={draft.document_days ?? 14} onChange={value => patch({document_days: value === "" ? 14 : value})}/>
+					</div>
+					<div className="p-pair">
+						<NumberField label={t("subs.idle")} hint={t("subs.idleHint")} unit={t("subs.daysUnit")} min={0} max={365} value={draft.idle_device_days ?? 0} onChange={value => patch({idle_device_days: value === "" ? 0 : value})}/>
+					</div>
 				</div>
 			</section>
 			<section className="p-section" id="set-new-users">

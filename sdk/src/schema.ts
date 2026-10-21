@@ -2059,6 +2059,12 @@ export interface components {
                 [key: string]: string;
             };
             /**
+             * Format: uint32
+             * @description Devices that have not refreshed for this many days are removed, which frees their places: an app that was uninstalled, or a phone that was lost. 0 keeps them. A device whose key the panel made never refreshes and is never removed this way.
+             * @default 0
+             */
+            idle_device_days: number;
+            /**
              * @description The public half of the key of each `veilway` inbound, by inbound tag, which its profile is made with. Made the same way as `faketls_keys`, and read-only in the API too.
              * @default {}
              */
