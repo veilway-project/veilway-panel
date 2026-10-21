@@ -1251,6 +1251,34 @@ async fn an_update_is_requested_with_a_file_that_holds_only_the_word_panel() {
 }
 
 #[tokio::test]
+async fn a_restart_is_requested_with_the_word_restart_and_the_part() {
+	let h = Harness::with_config(None, |cfg| {
+		let folder = std::env::temp_dir().join(format!("vwrestart-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
+		std::fs::create_dir_all(&folder).unwrap();
+		cfg.update_request = folder.join("request");
+	}).await;
+	let session = h.login("10.0.0.1").await;
+	let full = h.token(&session, "full", json!({})).await;
+	let folder = h.app.cfg.update_request.parent().unwrap().to_path_buf();
+	assert_eq!(h.call(Method::POST, "/p/api/restart", Some(&session), Some(json!({"part": "all"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	assert_eq!(h.bearer(Method::POST, "/p/api/restart", &full, Some(json!({"part": "node"})), "10.1.1.1").await.status, StatusCode::FORBIDDEN);
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
+	assert_eq!(h.call(Method::POST, "/p/api/restart", Some(&session), Some(json!({"part": "node"})), "10.0.0.1").await.json()["error"]["code"], "reauth_required");
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
+	let made = h.call(Method::POST, "/p/api/restart", Some(&session), Some(json!({"part": "node"})), "10.0.0.1").await;
+	assert_eq!(made.status, StatusCode::OK, "{}", String::from_utf8_lossy(&made.body));
+	assert_eq!(std::fs::read(&h.app.cfg.update_request).unwrap(), b"restart-node");
+	assert_eq!(h.call(Method::POST, "/p/api/restart", Some(&session), Some(json!({"part": "panel"})), "10.0.0.1").await.status, StatusCode::CONFLICT, "one request at a time");
+	std::fs::remove_file(&h.app.cfg.update_request).unwrap();
+	assert_eq!(h.call(Method::POST, "/p/api/restart", Some(&session), Some(json!({"part": "both"})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(std::fs::read(&h.app.cfg.update_request).unwrap(), b"restart-both");
+	let audit: i64 = h.app.db.call(|db| db.query_row("select count(*) from audit where action = 'restart.request'", [], |row| row.get(0)).unwrap()).await.unwrap();
+	assert_eq!(audit, 2);
+	std::fs::remove_dir_all(folder).unwrap();
+	assert_eq!(h.call(Method::POST, "/p/api/restart", Some(&session), Some(json!({"part": "node"})), "10.0.0.1").await.status, StatusCode::CONFLICT, "no update service on this host");
+}
+
+#[tokio::test]
 async fn a_restore_cut_short_is_finished_at_the_next_start() {
 	let h = Harness::new().await;
 	let cfg = h.app.cfg.clone();

@@ -1,5 +1,5 @@
 //! Finding out that a newer panel or node exists, and asking for it. The panel runs unprivileged and never updates itself: a request is a file with the word `panel`, `node` or `both` in a folder only the panel and root can write, which a root service on the host answers (see `veilway.sh`). Everything GitHub sends is untrusted.
-use crate::{app::App, crypto::now, http::{ok, Ctx, Failure}};
+use crate::{app::App, crypto::now, http::{ok, Body, Ctx, Failure}};
 use axum::{extract::State, http::StatusCode, response::Response, Extension};
 use http_body_util::{BodyExt, Empty, Limited};
 use hyper::{body::Bytes, Request};
@@ -7,7 +7,7 @@ use hyper_util::rt::TokioIo;
 use rustls::pki_types::ServerName;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{cmp::Ordering, fs::OpenOptions, io::{ErrorKind, Write}, os::unix::fs::OpenOptionsExt, sync::Arc, time::Duration};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
@@ -207,6 +207,29 @@ pub async fn info(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 #[derive(Serialize, JsonSchema)]
 pub struct Requested {pub ok: bool, pub version: String, pub part: Part}
 
+/// Puts `word` in the request file for the root service. Written whole under another name and renamed, so the path unit only ever sees a complete file. The root side reads `request` alone and ignores the other name.
+fn write_request(app: &App, word: &str) -> Result<(), Failure> {
+	if app.cfg.update_request.exists() {return Err(Failure::conflict("An update or a restart is already requested."))}
+	let temporary = app.cfg.update_request.with_extension("tmp");
+	let _ = std::fs::remove_file(&temporary);
+	let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary).map_err(|error| match error.kind() {
+		ErrorKind::NotFound | ErrorKind::PermissionDenied => Failure::conflict("This server has no update service. Run `sudo bash veilway.sh update panel` on it once."),
+		_ => Failure::internal(error),
+	})?;
+	file.write_all(word.as_bytes()).and_then(|()| file.sync_all()).and_then(|()| std::fs::rename(&temporary, &app.cfg.update_request)).map_err(Failure::internal)
+}
+
+/// Asks the host to restart the node, the panel or both. The host script of v0.2.9 or later does it; an older one ignores the request, and its next update installs one that does.
+pub async fn restart(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Choice>) -> Result<Response, Failure> {
+	{
+		let state = app.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		if state.requested_at.is_some_and(|at| now() - at < UPDATING) && state.requested.is_some() {return Err(Failure::conflict("An update was requested a moment ago."))}
+		write_request(&app, &format!("restart-{}", input.part.word()))?;
+	}
+	app.db.audit(&ctx.actor, &ctx.source, "restart.request", input.part.word(), "").await;
+	ok(&json!({"ok": true, "part": input.part}))
+}
+
 /// Writes the request. Nothing in it names a version, path or argument: the host script updates to the release it finds and verifies itself.
 pub async fn request(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, body: Bytes) -> Result<Response, Failure> {
 	let asked = requested_part(&body).ok_or_else(|| Failure::bad("The part is panel, node or both."))?;
@@ -221,14 +244,7 @@ pub async fn request(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 		let (panel, node) = (panel.filter(|_| part != Part::Node), node.filter(|_| part != Part::Panel));
 		let changes: Vec<String> = [panel.as_ref().map(|found| format!("panel from {CURRENT} to {}", found.version)), node.as_ref().map(|found| format!("node from {} to {}", node_now.as_deref().unwrap_or_default(), found.version))].into_iter().flatten().collect();
 		let version = panel.or(node).map(|found| found.version).unwrap_or_default();
-		// Written whole under another name and renamed, so the path unit only ever sees a complete file. The root side reads `request` alone and ignores this name.
-		let temporary = app.cfg.update_request.with_extension("tmp");
-		let _ = std::fs::remove_file(&temporary);
-		let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary).map_err(|error| match error.kind() {
-			ErrorKind::NotFound | ErrorKind::PermissionDenied => Failure::conflict("This server has no update service. Run `sudo bash veilway.sh update panel` on it once."),
-			_ => Failure::internal(error),
-		})?;
-		file.write_all(part.word().as_bytes()).and_then(|()| file.sync_all()).and_then(|()| std::fs::rename(&temporary, &app.cfg.update_request)).map_err(Failure::internal)?;
+		write_request(&app, part.word())?;
 		(state.requested_at, state.requested, state.node_from) = (Some(now()), Some(part), node_now);
 		(part, changes.join("; "), version)
 	};
