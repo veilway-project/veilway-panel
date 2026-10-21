@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "veilway-panel"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "argon2",
  "axum",
