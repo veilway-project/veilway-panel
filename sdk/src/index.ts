@@ -15,8 +15,22 @@ export type LinkReset = Schemas["LinkReset"];
 export type Live = Schemas["Live"];
 export type Usage = Schemas["UsageOut"];
 export type History = Schemas["HistoryOut"];
-/** The exits section of the node's config. The generated schema leaves `value` open, so it is `unknown` here. */
-export interface ExitsSection {revision: string, generation: number, value: unknown}
+export type Settings = Schemas["Settings"];
+export type NodeInfo = Schemas["NodeInfo"];
+export type NodeState = Schemas["NodeState"];
+export type UpdateInfo = Schemas["UpdateInfo"];
+export type Bulk = Schemas["Bulk"];
+export type BulkResult = Schemas["BulkResult"];
+export type Endpoints = Schemas["EndpointsOut"];
+export type Move = Schemas["MoveIn"];
+export type Moved = Schemas["MoveOut"];
+export type Audit = Schemas["AuditOut"];
+export type Xray = Schemas["XrayOut"];
+export type LinkInbounds = Schemas["Inbounds"];
+/** One section of the node's config, such as `exits` or `routing`. The generated schema leaves `value` open, so it is `unknown` here. */
+export interface ConfigSection {revision: string, generation: number, value: unknown}
+/** The exits section of the node's config. */
+export type ExitsSection = ConfigSection;
 /** The part of a fetch response the client uses, so the global `fetch` and a test double both fit. */
 export interface FetchResponse {
 	status: number;
@@ -86,6 +100,55 @@ export class Client {
 	resetUsage(id: number, options: {totals?: boolean} = {}): Promise<unknown> {return this.json("POST", "/users/" + id + "/usage/reset", {totals: options.totals === true})}
 
 	getExits(): Promise<ExitsSection> {return this.json("GET", "/config/exits")}
+
+	/** A section of the node's config, with the revision to send back with a change. */
+	getConfigSection(section: string): Promise<ConfigSection> {return this.json("GET", "/config/" + encodeURIComponent(section))}
+
+	/** Replaces a section of the node's config. `revision` is the one `getConfigSection` gave: a config that changed since answers `conflict`. Needs a token of scope full. */
+	putConfigSection(section: string, value: unknown, revision: string): Promise<unknown> {return this.json("PUT", "/config/" + encodeURIComponent(section), {revision, value})}
+
+	/** Checks a whole config document without applying it. Needs a token of scope full. */
+	validateConfig(document: unknown): Promise<unknown> {return this.json("POST", "/config/validate", {document})}
+
+	/** What applying a whole config document would change. Needs a token of scope full. */
+	diffConfig(document: unknown): Promise<unknown> {return this.json("POST", "/config/diff", {document})}
+
+	/** One change to many users at once: enable, disable, a group, a quota, an expiry, a device limit, exits, or a reset of usage or links. */
+	bulkUsers(input: Bulk): Promise<BulkResult> {return this.json("POST", "/users/bulk", input)}
+
+	getSettings(): Promise<Settings> {return this.json("GET", "/settings")}
+
+	/** The node: whether it answers, its version and what the panel last sent it. */
+	getNode(): Promise<NodeInfo> {return this.json("GET", "/node")}
+
+	/** Sends the node the users and config the panel holds now. */
+	syncNode(): Promise<NodeState> {return this.json("POST", "/node/sync")}
+
+	/** Whether a newer panel or node is out. */
+	getUpdate(): Promise<UpdateInfo> {return this.json("GET", "/update")}
+
+	/** The profiles the panel makes from the node's inbounds, before overrides. */
+	derivedProfiles(): Promise<unknown> {return this.json("GET", "/profiles/derived")}
+
+	/** Sets the overrides of the profile of one inbound, such as `node_addresses`. An empty object removes them. Needs a token of scope full. */
+	setProfileOverride(inbound: string, set: Record<string, unknown>): Promise<unknown> {return this.json("PUT", "/profiles/overrides/" + encodeURIComponent(inbound), {set})}
+
+	getEndpoints(): Promise<Endpoints> {return this.json("GET", "/endpoints")}
+
+	/** Moves users to another subscription endpoint, or with `dry_run` says what would move. */
+	moveEndpoint(input: Move): Promise<Moved> {return this.json("POST", "/endpoints/move", input)}
+
+	/** The node links and their state. */
+	getLinks(): Promise<unknown> {return this.json("GET", "/links")}
+
+	/** The inbounds a node link can use. */
+	getLinkInbounds(): Promise<LinkInbounds> {return this.json("GET", "/links/inbounds")}
+
+	/** The Xray add-on: whether it is installed and its inbounds. */
+	getXray(): Promise<Xray> {return this.json("GET", "/xray")}
+
+	/** The audit log. Needs a token of scope full. */
+	getAudit(): Promise<Audit> {return this.json("GET", "/audit")}
 
 	statsNow(): Promise<Live> {return this.json("GET", "/stats/now")}
 

@@ -54,3 +54,16 @@ test("usage and history name their kind in the query", async () => {
 	assert.equal(calls[0]?.url, "https://panel.example/stats/usage?kind=user&period=week");
 	assert.equal(calls[1]?.url, "https://panel.example/stats/history?kind=exit&name=de-1&resolution=day");
 });
+
+test("the node, settings and config sections are reached at their paths", async () => {
+	const calls: Call[] = [];
+	const client = new Client(panel(calls, 200, "{}"), "https://panel.example/p/api", "vwp_test");
+	await client.getSettings();
+	await client.syncNode();
+	await client.putConfigSection("routing", {default: "main"}, "r7");
+	await client.setProfileOverride("main", {node_addresses: ["vpn.example.com"]});
+	await client.bulkUsers({ids: [1, 2], action: "disable", remove_devices: false});
+	assert.deepEqual(calls.map(call => call.method + " " + call.url.replace("https://panel.example/p/api", "")), ["GET /settings", "POST /node/sync", "PUT /config/routing", "PUT /profiles/overrides/main", "POST /users/bulk"]);
+	assert.equal(calls[2]?.body, "{\"revision\":\"r7\",\"value\":{\"default\":\"main\"}}");
+	assert.equal(calls[3]?.body, "{\"set\":{\"node_addresses\":[\"vpn.example.com\"]}}");
+});
