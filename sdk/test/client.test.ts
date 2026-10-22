@@ -67,3 +67,11 @@ test("the node, settings and config sections are reached at their paths", async 
 	assert.equal(calls[2]?.body, "{\"revision\":\"r7\",\"value\":{\"default\":\"main\"}}");
 	assert.equal(calls[3]?.body, "{\"set\":{\"node_addresses\":[\"vpn.example.com\"]}}");
 });
+
+test("upstreams are listed and retried by tag", async () => {
+	const calls: Call[] = [];
+	const client = new Client(panel(calls, 200, JSON.stringify({upstreams: [], tag: "far"})), "https://panel.example", "vwp_test");
+	assert.deepEqual(await client.getUpstreams(), []);
+	await client.retryUpstream("far one");
+	assert.deepEqual(calls.map(call => [call.method, call.url]), [["GET", "https://panel.example/upstreams"], ["POST", "https://panel.example/upstreams/far%20one/retry"]]);
+});

@@ -8,7 +8,7 @@ pub fn openapi() -> String {
 	let failure = failure_schema(&mut schemas);
 	let mut paths = Map::new();
 	for route in routes(&mut schemas) {
-		let parameters: Vec<Value> = route.path.split('/').filter_map(|segment| segment.strip_prefix('{')?.strip_suffix('}')).map(|name| json!({"name": name, "in": "path", "required": true, "schema": {"type": if name == "sid" || name == "label" {"string"} else {"integer"}}})).collect();
+		let parameters: Vec<Value> = route.path.split('/').filter_map(|segment| segment.strip_prefix('{')?.strip_suffix('}')).map(|name| json!({"name": name, "in": "path", "required": true, "schema": {"type": if name == "sid" || name == "label" || name == "tag" || name == "preview" {"string"} else {"integer"}}})).collect();
 		let mut operation = json!({"operationId": route.operation, "summary": route.summary, "parameters": parameters, "x-access": route.access.word(), "responses": {
 			"200": {"description": "Done.", "content": {"application/json": {"schema": route.response}}},
 			"400": {"description": "The request is malformed or breaks a rule.", "content": {"application/json": {"schema": failure}}},

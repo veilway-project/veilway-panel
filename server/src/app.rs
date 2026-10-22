@@ -246,6 +246,8 @@ pub struct App {
 	pub restart: tokio::sync::Notify,
 	/// Node link pairing, all in memory: an offer, its answer and the fingerprint wait here until the operator confirms, and a restart drops them.
 	pub pairing: Mutex<crate::links::Pairing>,
+	/// Fetches of another provider's subscription that wait for the operator, with the device made for each. In memory only: a restart drops them.
+	pub previews: Mutex<crate::upstreams::Previews>,
 	/// Nonces of the relay mirror headers that were accepted, so that a header seen once is not taken twice.
 	pub mirrors_seen: crate::mirrors::Seen,
 	/// One publishing round at a time.

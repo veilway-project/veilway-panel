@@ -15,8 +15,8 @@ const SCHEMA: &str = include_str!("../config.schema.json");
 const SECTIONS: [&str; 10] = ["inbounds", "outbounds", "exits", "routing", "notices", "dns", "log", "links", "tunnels", "replay"];
 /// The sections that are an object. The others are lists.
 const OBJECTS: [&str; 4] = ["routing", "dns", "log", "replay"];
-/// Sections that change the node's links, tunnels, log, resolvers or notices. Only a session that confirmed its password and code again may change them, and no API token may change them through the whole document either.
-const GUARDED: [&str; 5] = ["links", "tunnels", "log", "dns", "notices"];
+/// Sections that change the node's links, tunnels, log, resolvers, notices or upstreams. Only a session that confirmed its password and code again may change them, and no API token may change them through the whole document either.
+const GUARDED: [&str; 6] = ["links", "tunnels", "log", "dns", "notices", "upstreams"];
 /// Sections the document may leave out, which a null removes.
 const OPTIONAL: [&str; 6] = ["dns", "log", "notices", "replay", "links", "tunnels"];
 /// The transports a relay can carry, by their type in a profile.
@@ -74,7 +74,7 @@ pub fn checked_relays<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<
 
 pub async fn schema() -> Response {(StatusCode::OK, [(CONTENT_TYPE, HeaderValue::from_static("application/json"))], SCHEMA).into_response()}
 
-async fn call(app: &App, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>) -> Result<(u16, Value), Failure> {
+pub(crate) async fn call(app: &App, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>) -> Result<(u16, Value), Failure> {
 	let (status, bytes) = node::request(&app.cfg.node_socket, method, path, if_match, body).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
 	Ok((status, serde_json::from_slice(&bytes).unwrap_or(Value::Null)))
 }
@@ -102,7 +102,7 @@ pub async fn get_section(State(app): State<Arc<App>>, Path(section): Path<String
 }
 
 /// The document with the panel's users in it, and their Xray credentials, since the node's `users` is what the panel owns.
-async fn with_users(app: &Arc<App>, mut document: Value) -> Result<Value, Failure> {
+pub(crate) async fn with_users(app: &Arc<App>, mut document: Value) -> Result<Value, Failure> {
 	if !document.is_object() {return Err(Failure::bad("The document is a JSON object."))}
 	node::fill(app, &mut document).await.map_err(|error| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "users_unavailable", error))?;
 	Ok(document)
@@ -205,7 +205,7 @@ pub async fn put_config(State(app): State<Arc<App>>, Extension(ctx): Extension<C
 	let _turn = app.node_lock.lock().await;
 	let (_, _, live) = running(&app).await?;
 	let changed = |sections: &[&str]| sections.iter().any(|section| live[*section] != input.document[*section]);
-	if ctx.token_id.is_some() && changed(&["exits", "outbounds", "links", "tunnels", "log", "dns", "notices"]) {return Err(Failure::new(StatusCode::FORBIDDEN, "forbidden", "An API token cannot change exits, outbounds, links, tunnels, log, dns or notices through the whole config."))}
+	if ctx.token_id.is_some() && changed(&["exits", "outbounds", "links", "tunnels", "log", "dns", "notices", "upstreams"]) {return Err(Failure::new(StatusCode::FORBIDDEN, "forbidden", "An API token cannot change exits, outbounds, links, tunnels, log, dns, notices or upstreams through the whole config."))}
 	if changed(&GUARDED) {reauthed(&app, &ctx).await?}
 	ok(&apply(&app, &ctx, input.document, &input.revision, "config").await?)
 }

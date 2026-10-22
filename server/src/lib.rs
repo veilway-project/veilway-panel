@@ -21,6 +21,7 @@ pub mod stats;
 pub mod statics;
 pub mod subs;
 pub mod updater;
+pub mod upstreams;
 pub mod users;
 pub mod via;
 pub mod web;
@@ -84,7 +85,7 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 	}).map_err(|error| error.to_string())?;
 	let token = setup_needed.then(|| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<20>()));
 	if let Some(token) = &token {println!("Setup token (one time): {token}\nPOST it with a username and password to {}/api/setup", cfg.prefix);}
-	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), gateway: Mutex::new(gateway), lookups, refusals: Mutex::new(HashMap::new()), names: Default::default(), limits: Limiter::default(), sub_limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: Arc::new(AtomicBool::new(false)), settings: Arc::new(RwLock::new(settings)), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), mirrors_seen: Default::default(), publishing: tokio::sync::Mutex::new(())}))
+	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), gateway: Mutex::new(gateway), lookups, refusals: Mutex::new(HashMap::new()), names: Default::default(), limits: Limiter::default(), sub_limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: Arc::new(AtomicBool::new(false)), settings: Arc::new(RwLock::new(settings)), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), previews: Mutex::new(upstreams::Previews::default()), mirrors_seen: Default::default(), publishing: tokio::sync::Mutex::new(())}))
 }
 
 /// What the upkeep loop remembers between passes.

@@ -150,7 +150,7 @@ export interface paths {
         };
         /** The config the node runs without its users, which the panel owns, secrets as the node's marker, and its revision. */
         get: operations["getConfig"];
-        /** Replaces the whole document: validated on the node, then applied with If-Match set to the revision given. The panel's users are put in. No API token may change exits, outbounds, links, log, dns or notices here, and links, log, dns and notices need a recent re-authentication. The answer is the node's. */
+        /** Replaces the whole document: validated on the node, then applied with If-Match set to the revision given. The panel's users are put in. No API token may change exits, outbounds, links, log, dns, notices or upstreams here, and links, log, dns, notices and upstreams need a recent re-authentication. The answer is the node's. */
         put: operations["putConfig"];
         post?: never;
         delete?: never;
@@ -1012,6 +1012,159 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/upstreams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The subscriptions of other providers that exits of the node use, with their state and why, quota, expiry, notices as plain text, the largest packet they take, the last refresh and its error, what waits for the operator, and counters. No key, secret or link. */
+        get: operations["listUpstreams"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/upstreams/inspect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Step 1, offline: the host and the signing key fingerprint a pasted native link names. Nothing is sent. Links that are not native veilway://sub/ links are refused. */
+        post: operations["inspectUpstreamLink"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/upstreams/previews": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Step 2, after the operator said fetch: the panel makes a device key and secret, which stay on the panel in memory for ten minutes and are in no answer, and the node enrolls that device with the provider and returns what the provider's document holds. The provider sees the node's address. At most four wait. Slow: it waits on the provider. */
+        post: operations["previewUpstream"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/upstreams/previews/{preview}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Says no to a preview: the provider is told to release the place and the panel forgets the device. */
+        delete: operations["declineUpstream"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/upstreams/previews/{preview}/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Step 3: puts the upstream and an exit that leaves through it into the node's config, through the same apply as putConfig. The node takes the fetched document for that config. Needs a recent re-authentication, so no API token can do it. */
+        post: operations["addUpstream"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/upstreams/previews/{preview}/private": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Declines the preview and fetches again, with a new device, answering whether the node may dial private addresses the profiles name. */
+        post: operations["previewUpstreamAgain"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/upstreams/{tag}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Tells the provider the device left (up to ten seconds), then applies the config without the upstream and the exits that use it. The config without them is checked first. Needs a recent re-authentication. */
+        delete: operations["removeUpstream"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/upstreams/{tag}/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Says yes to the move of the provider's endpoint and to the refresh hosts it announced, which the node holds back until then. A field left out is false when the other is given; with no body both are confirmed. Needs a recent re-authentication. */
+        post: operations["confirmUpstreamMove"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/upstreams/{tag}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Asks the upstream to connect again now. */
+        post: operations["retryUpstream"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users": {
         parameters: {
             query?: never;
@@ -1310,6 +1463,26 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AddIn: {
+            /**
+             * @description The classes besides `cover` that the operator allows: no_cover, exposed, plain.
+             * @default []
+             */
+            allow: string[];
+            /** @description The provider's exit to leave through. Left out: the provider's default. */
+            exit?: string | null;
+            /** @description The exit's display name. Defaults to the tag. */
+            name?: string | null;
+            /** @description The profile of the provider to use. Left out: the first one the node would use. */
+            profile?: string | null;
+            /** @description The tag of the upstream in the node's config, and of the exit that leaves through it: 1 to 64 of a-z, 0-9, - and _. */
+            tag: string;
+        };
+        Added: {
+            /** Format: uint64 */
+            generation: number;
+            tag: string;
+        };
         AdminRowOut: {
             /** Format: int64 */
             created: number;
@@ -1371,6 +1544,12 @@ export interface components {
             failed: components["schemas"]["BulkFailure"][];
             node: components["schemas"]["NodeState"];
         };
+        Bytes: {
+            /** Format: uint64 */
+            down_bytes: number;
+            /** Format: uint64 */
+            up_bytes: number;
+        };
         Changed: {
             node: components["schemas"]["NodeState"];
             user: components["schemas"]["UserOut"];
@@ -1392,6 +1571,25 @@ export interface components {
             revision: string;
             /** @description The eight groups the other operator reads out. Typing this side's own does not confirm. */
             typed: string;
+        };
+        Counters: {
+            /** Format: uint64 */
+            dropped: number;
+            /** Format: uint64 */
+            refresh_failures: number;
+            /** Format: uint64 */
+            refreshes: number;
+            /** Format: uint64 */
+            refused: number;
+            /** Format: uint64 */
+            sent: number;
+            /** Format: uint64 */
+            starts: number;
+            /** Format: uint64 */
+            state_flips: number;
+            traffic: components["schemas"]["Bytes"];
+            /** Format: uint64 */
+            unsent: number;
         };
         /** @description How many requests each kind of refusal turned away since the start, and how many were served. */
         Counts: {
@@ -1636,6 +1834,15 @@ export interface components {
         Inbounds: {
             inbounds: components["schemas"]["Inbound"][];
         };
+        InspectIn: {
+            link: string;
+        };
+        Inspected: {
+            /** @description The fingerprint of the provider's signing key, as 8 groups of 4 hex digits. The provider can read it out for comparison. */
+            fingerprint: string;
+            /** @description The host and port of the provider's endpoint. This is where the node will connect. */
+            host: string;
+        };
         KeyOut: {
             /** Format: int64 */
             created: number;
@@ -1717,6 +1924,12 @@ export interface components {
             /** @description The accounts to move: one, a selection or many. Give this or `group`. */
             users?: number[] | null;
         };
+        MoveIn2: {
+            /** @description Take the refresh hosts the node reported as pending. */
+            hosts?: boolean | null;
+            /** @description Follow the move of the provider's endpoint the node reported as pending. */
+            move?: boolean | null;
+        };
         MoveOut: {
             applied: boolean;
             /**
@@ -1740,6 +1953,10 @@ export interface components {
              * @description Of those who move, the ones moving to a plain http endpoint.
              */
             to_plain: number;
+        };
+        Moved: {
+            hosts: boolean;
+            moved: boolean;
         };
         NewAdmin: {
             password: string;
@@ -1865,6 +2082,43 @@ export interface components {
              */
             user?: number | null;
         };
+        PreviewIn2: {
+            /** @description Whether the node may dial private addresses the profiles name. Default false. */
+            allow_private?: boolean | null;
+            /** @description The native `veilway://sub/` link of the provider. */
+            link: string;
+            /** @description The tag of a direct or socks5 outbound the node reaches the provider through. Left out: from the node itself. */
+            via?: string | null;
+        };
+        PrivateIn: {
+            allow_private: boolean;
+        };
+        Profile: {
+            classes: string[];
+            exits: components["schemas"]["ProfileExit"][];
+            id: string;
+            /** Format: uint16 */
+            mtu: number;
+            name: string;
+            /** @description Private addresses the profile names to dial. */
+            private_addresses: string[];
+            /** @description "protected", "detectable" or "unsafe": what a censor can see, worked out by the node. */
+            rating: string;
+            /** @description Why this node would not use the profile under the settings of the preview. Null when it would. */
+            refused?: string | null;
+            /** @description Transport types in the provider's order. */
+            transports: string[];
+        };
+        ProfileExit: {
+            name: string;
+            tag: string;
+        };
+        Quota: {
+            /** Format: uint64 */
+            quota_bytes: number;
+            /** Format: uint64 */
+            used_bytes: number;
+        };
         Reauth: {
             password: string;
             /**
@@ -1923,6 +2177,11 @@ export interface components {
              * @default []
              */
             users: number[];
+        };
+        Removed: {
+            /** @description Whether the provider took the word that the device left. False: its place stays until the provider removes it. Null: the node never ran this upstream, so there was nothing to tell. */
+            confirmed?: boolean | null;
+            tag: string;
         };
         Requested: {
             ok: boolean;
@@ -1995,6 +2254,42 @@ export interface components {
             id: number;
             /** Format: int64 */
             retired_at: number;
+        };
+        Retried: {
+            tag: string;
+        };
+        /** @description What the provider's document holds, verified by the node under the key of the link. It names no key and no secret. */
+        Review: {
+            /** Format: int64 */
+            account_expires_at?: number | null;
+            /**
+             * @description Filled in by the panel: whether the node may dial private addresses of the profiles under this preview.
+             * @default false
+             */
+            allow_private: boolean;
+            /** @description The classes the profiles list. The operator consents to each besides `cover`. */
+            classes: string[];
+            /** Format: uint16 */
+            device_limit?: number | null;
+            /** Format: uint32 */
+            devices: number;
+            /** Format: int64 */
+            expires_at: number;
+            /** Format: uint64 */
+            expires_in_secs: number;
+            /** @description The fingerprint of the key the document is signed with, which is the one in the link. */
+            fingerprint: string;
+            /**
+             * @description Filled in by the panel: the host and port of the provider's endpoint, as the link names them.
+             * @default
+             */
+            host: string;
+            id: string;
+            profiles: components["schemas"]["Profile"][];
+            provider: string;
+            quota?: components["schemas"]["Quota"] | null;
+            /** Format: uint64 */
+            serial: number;
         };
         Rotated: {
             node: components["schemas"]["NodeState"];
@@ -2359,6 +2654,39 @@ export interface components {
             notes_url?: string | null;
             /** @description A panel update was requested and this panel has not come back as another version yet. */
             updating: boolean;
+        };
+        /** @description What the node is doing for one upstream. */
+        Upstream: {
+            counters: components["schemas"]["Counters"];
+            exit?: string | null;
+            /** Format: int64 */
+            expires_at?: number | null;
+            /** Format: uint16 */
+            mtu?: number | null;
+            /** @description What the provider says to the device, as plain text. */
+            notices: string[];
+            offered_exits: string[];
+            /** @description Refresh hosts that wait for the operator. */
+            pending_hosts: string[];
+            /** @description A move of the provider's endpoint that waits for the operator. */
+            pending_move?: string | null;
+            profile?: string | null;
+            provider?: string | null;
+            quota?: components["schemas"]["Quota"] | null;
+            /** @description Plain words for why the state is what it is. Empty while it is up. */
+            reason: string;
+            refresh_error?: string | null;
+            /** Format: int64 */
+            refreshed_at?: number | null;
+            /** @description "fetching", "connecting", "up" or "down". */
+            state: string;
+            /** Format: uint64 */
+            state_secs: number;
+            tag: string;
+            transport?: string | null;
+        };
+        Upstreams: {
+            upstreams: components["schemas"]["Upstream"][];
         };
         UsageEntry: {
             /** Format: int64 */
@@ -6245,6 +6573,542 @@ export interface operations {
             };
         };
     };
+    listUpstreams: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Upstreams"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    inspectUpstreamLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InspectIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Inspected"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    previewUpstream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreviewIn2"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Review"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    declineUpstream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                preview: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    addUpstream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                preview: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Added"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    previewUpstreamAgain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                preview: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PrivateIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Review"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    removeUpstream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tag: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Removed"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    confirmUpstreamMove: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tag: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MoveIn2"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Moved"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    retryUpstream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tag: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Retried"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     listUsers: {
         parameters: {
             query?: never;
@@ -7434,7 +8298,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                tag: number;
+                tag: string;
             };
             cookie?: never;
         };
@@ -7492,7 +8356,7 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                tag: number;
+                tag: string;
             };
             cookie?: never;
         };

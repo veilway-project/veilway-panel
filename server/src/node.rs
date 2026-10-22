@@ -12,7 +12,10 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::net::UnixStream;
 
 /// One request to the node. The answer is the status and the body.
-pub async fn request(socket: &Path, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>) -> Result<(u16, Vec<u8>), String> {
+pub async fn request(socket: &Path, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>) -> Result<(u16, Vec<u8>), String> {request_within(socket, method, path, if_match, body, Duration::from_secs(20)).await}
+
+/// Like `request`, for a call that waits on a third party (the fetch of another provider's subscription).
+pub async fn request_within(socket: &Path, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>, limit: Duration) -> Result<(u16, Vec<u8>), String> {
 	let attempt = async {
 		let stream = UnixStream::connect(socket).await.map_err(|error| format!("the node's socket: {error}"))?;
 		let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.map_err(|error| error.to_string())?;
@@ -25,7 +28,7 @@ pub async fn request(socket: &Path, method: &str, path: &str, if_match: Option<&
 		let status = response.status().as_u16();
 		Ok::<_, String>((status, response.into_body().collect().await.map_err(|error| error.to_string())?.to_bytes().to_vec()))
 	};
-	tokio::time::timeout(Duration::from_secs(20), attempt).await.map_err(|_| "the node did not answer in time".to_string())?
+	tokio::time::timeout(limit, attempt).await.map_err(|_| "the node did not answer in time".to_string())?
 }
 
 /// The node's users by name, with their usage, for the pages and for a document's `usage`. Empty when the node cannot be reached.

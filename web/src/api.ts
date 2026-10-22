@@ -29,6 +29,9 @@ export type GatewayKeys = Schemas["GatewayOut"];
 export type Switched = Schemas["Switched"];
 export type ResetOut = Schemas["Reset"];
 export type Part = Schemas["Part"];
+export type Upstream = Schemas["Upstream"];
+export type Review = Schemas["Review"];
+export type Inspected = Schemas["Inspected"];
 // The routes below hand on the node's own answers, which the schema leaves open. Only the fields the panel reads are named.
 export type Problem = {path: string, message: string};
 export type Report = {errors: Problem[], warnings: Problem[], more_errors: number, more_warnings: number};

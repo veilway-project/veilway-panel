@@ -27,6 +27,9 @@ export type Moved = Schemas["MoveOut"];
 export type Audit = Schemas["AuditOut"];
 export type Xray = Schemas["XrayOut"];
 export type LinkInbounds = Schemas["Inbounds"];
+export type Upstreams = Schemas["Upstreams"];
+export type Upstream = Schemas["Upstream"];
+export type Retried = Schemas["Retried"];
 /** One section of the node's config, such as `exits` or `routing`. The generated schema leaves `value` open, so it is `unknown` here. */
 export interface ConfigSection {revision: string, generation: number, value: unknown}
 /** The exits section of the node's config. */
@@ -145,6 +148,12 @@ export class Client {
 
 	/** The inbounds a node link can use. */
 	getLinkInbounds(): Promise<LinkInbounds> {return this.json("GET", "/links/inbounds")}
+
+	/** The subscriptions of other providers that exits of the node use, with their state. No key, secret or link is in it. Adding, confirming and removing one need a person at the panel and are not available to a token. */
+	async getUpstreams(): Promise<Upstream[]> {return (await this.json<Upstreams>("GET", "/upstreams")).upstreams}
+
+	/** Asks an upstream to connect again now. Needs a token of scope full. */
+	retryUpstream(tag: string): Promise<Retried> {return this.json("POST", "/upstreams/" + encodeURIComponent(tag) + "/retry")}
 
 	/** The Xray add-on: whether it is installed and its inbounds. */
 	getXray(): Promise<Xray> {return this.json("GET", "/xray")}

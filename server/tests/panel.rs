@@ -1,4 +1,4 @@
-use axum::{body::Body, extract::{ConnectInfo, State}, http::{header::{CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE}, HeaderMap, Method, Request, StatusCode}, routing::{get, post}, Json, Router};
+use axum::{body::Body, extract::{ConnectInfo, Path, State}, http::{header::{CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE}, HeaderMap, Method, Request, StatusCode}, routing::{delete, get, post}, Json, Router};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
@@ -647,14 +647,14 @@ fn signing_keys_must_be_private() {
 }
 
 /// A node that keeps one config and answers the way the real control API does: a revision per applied change, If-Match, validate and diff, and the stats routes.
-struct Fake {document: Mutex<Value>, generation: Mutex<u64>, status: Mutex<Value>, stats: Mutex<Value>, sessions: Mutex<Value>, applied: Mutex<Vec<Value>>, refuse: AtomicBool, lose: AtomicBool, dir: PathBuf}
+struct Fake {document: Mutex<Value>, generation: Mutex<u64>, status: Mutex<Value>, stats: Mutex<Value>, sessions: Mutex<Value>, applied: Mutex<Vec<Value>>, refuse: AtomicBool, lose: AtomicBool, upstreams: Mutex<Value>, calls: Mutex<Vec<(String, Value)>>, dir: PathBuf}
 
 impl Fake {
 	async fn start(document: Value) -> (Arc<Fake>, PathBuf) {
 		let dir = std::env::temp_dir().join(format!("vwfake-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
 		std::fs::create_dir_all(&dir).unwrap();
 		let socket = dir.join("control.sock");
-		let fake = Arc::new(Fake {document: Mutex::new(document), generation: Mutex::new(1), status: Mutex::new(json!({"version": "0.0.0", "uptime_secs": 5, "generation": 1})), stats: Mutex::new(json!({})), sessions: Mutex::new(json!({"sessions": []})), applied: Mutex::new(Vec::new()), refuse: AtomicBool::new(false), lose: AtomicBool::new(false), dir});
+		let fake = Arc::new(Fake {document: Mutex::new(document), generation: Mutex::new(1), status: Mutex::new(json!({"version": "0.0.0", "uptime_secs": 5, "generation": 1})), stats: Mutex::new(json!({})), sessions: Mutex::new(json!({"sessions": []})), applied: Mutex::new(Vec::new()), refuse: AtomicBool::new(false), lose: AtomicBool::new(false), upstreams: Mutex::new(json!({"upstreams": []})), calls: Mutex::new(Vec::new()), dir});
 		let node = Router::new()
 			.route("/v1/config", get(|State(fake): State<Arc<Fake>>| async move {
 				let generation = *fake.generation.lock().unwrap();
@@ -693,6 +693,34 @@ impl Fake {
 			.route("/v1/exits", get(|| async {Json(json!({"exits": [{"tag": "main", "udp": true}]}))}))
 			.route("/v1/links", get(|| async {Json(json!({"links": []}))}))
 			.route("/v1/users", get(|| async {Json(json!({"users": []}))}))
+			.route("/v1/upstreams", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.upstreams.lock().unwrap().clone())}))
+			.route("/v1/upstreams/preview", post(|State(fake): State<Arc<Fake>>, Json(body): Json<Value>| async move {
+				let mut calls = fake.calls.lock().unwrap();
+				let id = format!("pv{}", calls.iter().filter(|(name, _)| name == "preview").count());
+				let private = body["allow_private"] == true;
+				calls.push(("preview".into(), body));
+				Json(json!({"id": id, "expires_in_secs": 600, "provider": "Far Net", "fingerprint": "0123 4567 89ab cdef 0123 4567 89ab cdef", "serial": 7, "expires_at": 1893456000, "quota": {"used_bytes": 10, "quota_bytes": 1000}, "account_expires_at": null, "device_limit": 3, "devices": 1, "classes": ["cover", "plain"], "profiles": [
+					{"id": "main", "name": "Main", "transports": ["tls", "udp"], "classes": ["cover", "plain"], "rating": "protected", "private_addresses": [], "mtu": 1380, "exits": [{"tag": "de", "name": "Germany"}], "refused": null},
+					{"id": "lan", "name": "Lan", "transports": ["udp"], "classes": ["plain"], "rating": "unsafe", "private_addresses": ["10.9.9.9"], "mtu": 1300, "exits": [{"tag": "de", "name": "Germany"}], "refused": if private {Value::Null} else {json!("names private addresses")}}
+				]}))
+			}))
+			.route("/v1/upstreams/preview/{id}/decline", post(|State(fake): State<Arc<Fake>>, Path(id): Path<String>| async move {
+				fake.calls.lock().unwrap().push(("decline".into(), json!(id)));
+				Json(json!({"id": id}))
+			}))
+			.route("/v1/upstreams/{tag}", delete(|State(fake): State<Arc<Fake>>, Path(tag): Path<String>| async move {
+				let before = fake.applied.lock().unwrap().len();
+				fake.calls.lock().unwrap().push(("leave".into(), json!({"tag": tag, "applied_before": before})));
+				Json(json!({"tag": tag, "confirmed": true}))
+			}))
+			.route("/v1/upstreams/{tag}/confirm", post(|State(fake): State<Arc<Fake>>, Path(tag): Path<String>, body: axum::body::Bytes| async move {
+				fake.calls.lock().unwrap().push(("confirm".into(), json!({"tag": tag, "body": String::from_utf8_lossy(&body)})));
+				Json(json!({"moved": true, "hosts": false}))
+			}))
+			.route("/v1/upstreams/{tag}/retry", post(|State(fake): State<Arc<Fake>>, Path(tag): Path<String>| async move {
+				fake.calls.lock().unwrap().push(("retry".into(), json!(tag)));
+				Json(json!({"tag": tag}))
+			}))
 			.with_state(fake.clone());
 		let listener = tokio::net::UnixListener::bind(&socket).unwrap();
 		tokio::spawn(async move {axum::serve(listener, node).await.unwrap();});
@@ -717,6 +745,9 @@ fn redacted(mut document: Value) -> Value {
 		for transport in inbound["transports"].as_array_mut().into_iter().flatten().filter(|transport| transport["type"] == "faketls") {
 			if let Some(bytes) = transport["transport_key"].as_str().filter(|key| !key.starts_with("<redacted")).and_then(|key| STANDARD.decode(key).ok()) {transport["transport_key"] = json!(format!("<redacted:{}>", bytes.iter().take(4).map(|byte| format!("{byte:02x}")).collect::<String>()))}
 		}
+	}
+	for upstream in document["upstreams"].as_array_mut().into_iter().flatten() {
+		for key in ["link", "private_key", "device_secret"] {upstream[key] = json!("<redacted>");}
 	}
 	document
 }
@@ -2977,4 +3008,112 @@ async fn a_ws_plain_transport_keeps_its_own_public_key_and_rotates_it_every_seve
 	let audit = audit_text(&h, &session).await;
 	assert!(audit.contains("transport_key.rotate") && !audit.contains(&keys[0]) && !audit.contains(&old));
 	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"plain_host": "plain.example.org", "transports": [{"type": "ws-plain", "path": "/by-hand"}]}})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "an override cannot write a ws-plain transport");
+}
+
+#[tokio::test]
+async fn another_providers_subscription_is_read_fetched_confirmed_and_removed_with_the_device_kept_on_the_panel() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (_, Link::Native(native)) = h.user(&session, "ann", json!({})).await else {panic!("not native")};
+	let link = native.veilway();
+	let read = h.call(Method::POST, "/p/api/upstreams/inspect", Some(&session), Some(json!({"link": format!(" {link}\n")})), "10.0.0.1").await;
+	assert_eq!(read.status, StatusCode::OK, "{}", String::from_utf8_lossy(&read.body));
+	assert_eq!((read.json()["host"].clone(), read.json()["fingerprint"].as_str().unwrap().split(' ').count()), (json!("panel.example.org:443"), 8));
+	for wrong in ["https://example.org/sub/abc", "veilway://doc#v1.abc", "not a link", &link.replace("veilway://sub/", "veilway://sub-plain/")] {
+		let refused = h.call(Method::POST, "/p/api/upstreams/inspect", Some(&session), Some(json!({"link": wrong})), "10.0.0.1").await;
+		assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{wrong}");
+		assert!(!String::from_utf8_lossy(&refused.body).contains(wrong), "a refusal never repeats the link");
+	}
+	let read_token = h.token(&session, "read", json!({})).await;
+	let full = h.token(&session, "full", json!({})).await;
+	assert_eq!(h.bearer(Method::POST, "/p/api/upstreams/previews", &full, Some(json!({"link": link})), "10.1.1.1").await.status, StatusCode::FORBIDDEN, "fetching is a person's act");
+	assert!(fake.calls.lock().unwrap().is_empty());
+	let first = h.call(Method::POST, "/p/api/upstreams/previews", Some(&session), Some(json!({"link": link})), "10.0.0.1").await;
+	assert_eq!(first.status, StatusCode::OK, "{}", String::from_utf8_lossy(&first.body));
+	let review = first.json();
+	let sent = fake.calls.lock().unwrap()[0].1.clone();
+	let (key, secret) = (sent["private_key"].as_str().unwrap().to_string(), sent["device_secret"].as_str().unwrap().to_string());
+	assert_eq!((sent["link"].clone(), key.len(), secret.len(), STANDARD.decode(&key).unwrap().len()), (json!(link), 44, 22, 32));
+	assert!(!String::from_utf8_lossy(&first.body).contains(&key) && !String::from_utf8_lossy(&first.body).contains(&secret), "the device never reaches the browser");
+	assert_eq!((review["host"].clone(), review["allow_private"].clone(), review["profiles"][1]["refused"].clone()), (json!("panel.example.org:443"), json!(false), json!("names private addresses")));
+	let id = review["id"].as_str().unwrap().to_string();
+	let nothing = h.call(Method::POST, &format!("/p/api/upstreams/previews/{id}/confirm"), Some(&session), Some(json!({"tag": "far", "profile": "lan"})), "10.0.0.1").await;
+	assert_eq!(nothing.status, StatusCode::BAD_REQUEST, "a profile the node would refuse is not chosen");
+	let again = h.call(Method::POST, &format!("/p/api/upstreams/previews/{id}/private"), Some(&session), Some(json!({"allow_private": true})), "10.0.0.1").await;
+	assert_eq!(again.status, StatusCode::OK, "{}", String::from_utf8_lossy(&again.body));
+	let (review, calls) = (again.json(), fake.calls.lock().unwrap().clone());
+	assert_eq!((calls[1].clone(), calls[2].1["allow_private"].clone(), review["profiles"][1]["refused"].clone(), review["allow_private"].clone()), (("decline".to_string(), json!(id)), json!(true), Value::Null, json!(true)), "the old fetch is declined first");
+	assert_ne!(calls[2].1["private_key"], json!(key), "the new fetch has a device of its own");
+	let id = review["id"].as_str().unwrap().to_string();
+	let body = json!({"tag": "far", "name": "Far exit", "profile": "lan", "exit": "de", "allow": ["plain"]});
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
+	assert_eq!(h.call(Method::POST, &format!("/p/api/upstreams/previews/{id}/confirm"), Some(&session), Some(body.clone()), "10.0.0.1").await.json()["error"]["code"], "reauth_required");
+	assert_eq!(h.bearer(Method::POST, &format!("/p/api/upstreams/previews/{id}/confirm"), &full, Some(body.clone()), "10.1.1.1").await.status, StatusCode::FORBIDDEN);
+	assert!(fake.applied.lock().unwrap().iter().all(|document| document.get("upstreams").is_none()));
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
+	for wrong in [json!({"tag": "Far!"}), json!({"tag": "far", "exit": "fr"}), json!({"tag": "far", "allow": ["exposed"]})] {
+		assert_eq!(h.call(Method::POST, &format!("/p/api/upstreams/previews/{id}/confirm"), Some(&session), Some(wrong), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	}
+	let added = h.call(Method::POST, &format!("/p/api/upstreams/previews/{id}/confirm"), Some(&session), Some(body.clone()), "10.0.0.1").await;
+	assert_eq!(added.status, StatusCode::OK, "{}", String::from_utf8_lossy(&added.body));
+	let document = fake.applied.lock().unwrap().last().unwrap().clone();
+	let entry = document["upstreams"][0].clone();
+	assert_eq!((entry["link"].clone(), entry["signing_key"].clone(), entry["private_key"].clone(), entry["device_secret"].clone()), (json!(link), review["fingerprint"].clone(), json!(calls[2].1["private_key"]), calls[2].1["device_secret"].clone()), "the node gets what it fetched with");
+	assert_eq!((entry["profile"].clone(), entry["exit"].clone(), entry["allow"].clone(), entry["allow_private"].clone(), entry.get("via").is_none()), (json!("lan"), json!("de"), json!(["plain"]), json!(true), true));
+	assert_eq!(document["exits"].as_array().unwrap().last().unwrap().clone(), json!({"tag": "far", "name": "Far exit", "backend": {"type": "upstream", "upstream": "far"}}));
+	assert_eq!(h.call(Method::POST, &format!("/p/api/upstreams/previews/{id}/confirm"), Some(&session), Some(body), "10.0.0.1").await.json()["error"]["code"], "preview_gone", "a fetch is used once");
+	let config = h.call(Method::GET, "/p/api/config", Some(&session), None, "10.0.0.1").await;
+	assert!(!String::from_utf8_lossy(&config.body).contains(&calls[2].1["private_key"].as_str().unwrap().to_string()) && config.json()["document"]["upstreams"][0]["private_key"] == "<redacted>", "the config shows markers");
+	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await.body;
+	let audit = String::from_utf8_lossy(&audit);
+	assert!(audit.contains("upstream.add") && audit.contains("upstream.preview") && [link.as_str(), key.as_str(), secret.as_str(), calls[2].1["private_key"].as_str().unwrap(), calls[2].1["device_secret"].as_str().unwrap()].iter().all(|secret| !audit.contains(secret)), "the audit log holds no link and no device");
+	let mut changed = document.clone();
+	changed["upstreams"][0]["enabled"] = json!(false);
+	assert_eq!(h.bearer(Method::PUT, "/p/api/config", &full, Some(json!({"revision": "rev3", "document": changed})), "10.1.1.1").await.status, StatusCode::FORBIDDEN, "no token changes upstreams through the whole config");
+	*fake.upstreams.lock().unwrap() = json!({"upstreams": [{"tag": "far", "state": "up", "reason": "", "state_secs": 12, "provider": "Far Net", "profile": "lan", "transport": "udp", "exit": "de", "offered_exits": ["de"], "notices": ["Maintenance on Friday"], "quota": {"used_bytes": 10, "quota_bytes": 1000}, "expires_at": 1893456000, "refreshed_at": 1893400000, "refresh_error": null, "mtu": 1300, "pending_move": "203.0.113.9:443", "pending_hosts": [], "private_key": "LEAKED", "counters": {"sent": 1, "unsent": 0, "refused": 2, "dropped": 3, "state_flips": 0, "starts": 1, "refreshes": 1, "refresh_failures": 0, "traffic": {"up_bytes": 5, "up_packets": 1, "down_bytes": 6, "down_packets": 1}}}]});
+	let listed = h.bearer(Method::GET, "/p/api/upstreams", &read_token, None, "10.1.1.1").await;
+	assert_eq!((listed.status, listed.json()["upstreams"][0]["pending_move"].clone(), listed.json()["upstreams"][0]["counters"]["traffic"]["down_bytes"].clone(), String::from_utf8_lossy(&listed.body).contains("LEAKED")), (StatusCode::OK, json!("203.0.113.9:443"), json!(6), false), "only the named fields pass");
+	assert_eq!(h.bearer(Method::POST, "/p/api/upstreams/far/retry", &read_token, None, "10.1.1.1").await.status, StatusCode::FORBIDDEN);
+	assert_eq!(h.bearer(Method::POST, "/p/api/upstreams/far/retry", &full, None, "10.1.1.1").await.status, StatusCode::OK);
+	assert_eq!(h.bearer(Method::POST, "/p/api/upstreams/far/confirm", &full, Some(json!({"move": true})), "10.1.1.1").await.status, StatusCode::FORBIDDEN, "confirming a move is a person's act");
+	let moved = h.call(Method::POST, "/p/api/upstreams/far/confirm", Some(&session), Some(json!({"move": true})), "10.0.0.1").await;
+	assert_eq!((moved.status, moved.json()["moved"].clone()), (StatusCode::OK, json!(true)));
+	assert_eq!(h.call(Method::POST, "/p/api/upstreams/far/confirm", Some(&session), Some(json!({})), "10.0.0.1").await.status, StatusCode::OK);
+	let seen: Vec<Value> = fake.calls.lock().unwrap().iter().filter(|(name, _)| name == "confirm").map(|(_, call)| call["body"].clone()).collect();
+	assert_eq!(seen, vec![json!("{\"hosts\":false,\"move\":true}"), json!("")], "a field left out is false, no body confirms both");
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
+	assert_eq!(h.call(Method::DELETE, "/p/api/upstreams/far", Some(&session), None, "10.0.0.1").await.json()["error"]["code"], "reauth_required");
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
+	assert_eq!(h.call(Method::DELETE, "/p/api/upstreams/nothing", Some(&session), None, "10.0.0.1").await.status, StatusCode::NOT_FOUND);
+	let before = fake.applied.lock().unwrap().len();
+	let removed = h.call(Method::DELETE, "/p/api/upstreams/far", Some(&session), None, "10.0.0.1").await;
+	assert_eq!((removed.status, removed.json()["confirmed"].clone()), (StatusCode::OK, json!(true)), "{}", String::from_utf8_lossy(&removed.body));
+	let left = fake.calls.lock().unwrap().iter().find(|(name, _)| name == "leave").unwrap().1.clone();
+	assert_eq!(left["applied_before"], before, "the provider is told before the config changes");
+	let document = fake.applied.lock().unwrap().last().unwrap().clone();
+	assert_eq!((document["upstreams"].clone(), document["exits"].as_array().unwrap().iter().any(|exit| exit["tag"] == "far")), (json!([]), false), "the upstream and its exit leave together");
+}
+
+#[tokio::test]
+async fn fetches_wait_at_most_four_and_a_config_the_node_refuses_stops_a_removal_before_the_provider_is_told() {
+	let mut document = node_document("10.66.0.1/24");
+	document["upstreams"] = json!([{"tag": "far", "link": "x", "signing_key": "x", "private_key": "x", "device_secret": "x"}]);
+	document["exits"] = json!([{"tag": "far", "backend": {"type": "upstream", "upstream": "far"}}]);
+	document["invalid"] = json!(true);
+	let (fake, socket) = Fake::start(document).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (_, Link::Native(native)) = h.user(&session, "ann", json!({})).await else {panic!("not native")};
+	let refused = h.call(Method::DELETE, "/p/api/upstreams/far", Some(&session), None, "10.0.0.1").await;
+	assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY, "{}", String::from_utf8_lossy(&refused.body));
+	assert!(fake.calls.lock().unwrap().is_empty(), "the provider heard nothing");
+	for _ in 0..4 {assert_eq!(h.call(Method::POST, "/p/api/upstreams/previews", Some(&session), Some(json!({"link": native.veilway()})), "10.0.0.1").await.status, StatusCode::OK);}
+	let full = h.call(Method::POST, "/p/api/upstreams/previews", Some(&session), Some(json!({"link": native.veilway()})), "10.0.0.1").await;
+	assert_eq!((full.status, full.json()["error"]["code"].clone()), (StatusCode::CONFLICT, json!("previews_full")));
+	assert_eq!(fake.calls.lock().unwrap().len(), 4);
+	assert_eq!(h.call(Method::DELETE, "/p/api/upstreams/previews/pv0", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::POST, "/p/api/upstreams/previews", Some(&session), Some(json!({"link": native.veilway()})), "10.0.0.1").await.status, StatusCode::OK, "a declined place is free again");
 }

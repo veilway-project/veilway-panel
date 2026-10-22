@@ -5,6 +5,7 @@ import {check, type Issue, type Schema} from "../check.ts";
 import {Copyable, dnsName, ErrorNote, Issues, lines, LinesField, Mark, moved, PageHead, useGuard, useLoad, useP, useReorder, useSay} from "../kit.tsx";
 import type {PanelKey} from "../locales/en.ts";
 import {drawPreset, presetOf, ShapeFields, shapeProblems} from "../shape.tsx";
+import {UpstreamsTab} from "./upstreams.tsx";
 import {XrayForm, XraySheet} from "./xray.tsx";
 
 type Section = "inbounds" | "outbounds" | "exits" | "routing";
@@ -15,7 +16,7 @@ type StreamErrors = Partial<Record<"path" | "origin" | "certFile" | "keyFile" | 
 type Cond = {key: string, values: string};
 type Listed = {kind: "veilway" | "wireguard" | "xray", tag: string, index: number, item?: Item, xray?: XrayRow};
 type XrayRow = {tag: string, protocol: string, listen: string, port: number, security: string, clients: number, host: string, managed: boolean, certificate_missing: boolean};
-const TABS = ["exits", "routing", "outbounds"] as const;
+const TABS = ["exits", "routing", "outbounds", "upstreams"] as const;
 const TRANSPORTS = ["udp", "udp-obfs", "tls", "ws", "ws-plain", "fronted", "fronted-shaped", "faketls"];
 const PATHED = ["tls", "ws", "ws-plain", "fronted", "fronted-shaped"];
 const CONDITIONS = ["user", "group", "inbound", "link", "ip", "domain", "protocol", "port", "icmp_type", "icmp_code"];
@@ -114,7 +115,7 @@ export function RoutingPage({tab}: {tab: string}) {
 	useEffect(() => { document.querySelector(".vw-tab[data-state=active]")?.scrollIntoView({block: "nearest", inline: "nearest"}); }, [current]);
 	return <>
 		<PageHead title={t("nav.routing")} lead={t("routing.lead")}/>
-		<Tabs label={t("nav.routing")} value={current} onChange={id => { location.hash = "#/routing/" + id; }} items={TABS.map(id => ({id, label: t(`node.tab.${id}`), content: <SectionTab section={id}/>}))}/>
+		<Tabs label={t("nav.routing")} value={current} onChange={id => { location.hash = "#/routing/" + id; }} items={TABS.map(id => ({id, label: t(`node.tab.${id}`), content: id === "upstreams" ? <UpstreamsTab/> : <SectionTab section={id}/>}))}/>
 	</>;
 }
 
@@ -138,7 +139,7 @@ function SectionTab({section}: {section: Exclude<Section, "inbounds">}) {
 				...(section === "outbounds" ? [
 					{id: "target", header: t("config.col.target"), cell: ({item}: {item: Item}) => item.type === "socks5" ? <span className="p-user"><span className="vw-code">{str(item.server)}</span>{str(item.via) && <span className="vw-muted vw-small">{t("config.viaName", {outbound: str(item.via)})}</span>}</span> : <span className="vw-muted">{(item.bind ? t("config.bind", {address: str(item.bind)}) : t("config.fromNode")) + (item.interface ? t("config.onInterface", {name: str(item.interface)}) : "")}</span>}
 				] : [
-					{id: "backend", header: t("config.col.backend"), cell: ({item}: {item: Item}) => { const backend = (item.backend ?? {}) as Item; return backend.type === "netstack" ? t("config.backend.netstackVia", {outbound: str(backend.outbound)}) : backend.type === "chain" ? t("config.backend.chainVia", {links: (backend.links as string[] | undefined ?? []).join(", ")}) : t(`config.backend.${backend.type === "l3" ? "l3" : "block"}`); }}
+					{id: "backend", header: t("config.col.backend"), cell: ({item}: {item: Item}) => { const backend = (item.backend ?? {}) as Item; return backend.type === "netstack" ? t("config.backend.netstackVia", {outbound: str(backend.outbound)}) : backend.type === "chain" ? t("config.backend.chainVia", {links: (backend.links as string[] | undefined ?? []).join(", ")}) : backend.type === "upstream" ? t("config.backend.upstreamVia", {upstream: str(backend.upstream)}) : t(`config.backend.${backend.type === "l3" ? "l3" : "block"}`); }}
 				]),
 				{id: "edit", header: "", align: "end", cell: ({item, index}) => <div className="p-cluster p-end"><Button size="sm" variant="quiet" aria-label={t("config.editName", {name: str(item.tag)})} onClick={() => edit(index)}>{t("user.edit")}</Button><Button size="sm" variant="quiet" aria-label={t("config.removeName", {name: str(item.tag)})} onClick={() => remove(index)}>{t("common.remove")}</Button></div>}
 			]}/>
@@ -479,7 +480,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 					<TextField label={t("config.exitName")} hint={t("config.exitNameHint")} value={str(draft.name)} onChange={value => set("name", value)} maxLength={64} optional/>
 					<TextField label={t("config.country")} hint={t("config.countryHint")} value={str(draft.country)} onChange={value => set("country", value.toUpperCase())} maxLength={2} technical optional/>
 				</div>
-				<SelectField label={t("config.col.backend")} value={str(back.type)} onChange={type => set("backend", type === "netstack" ? {type, outbound: outbounds[0] ?? ""} : type === "chain" ? {type, links: []} : {type})} options={["netstack", "l3", "block", "chain"].map(type => ({value: type, label: t(`config.backend.${type}` as PanelKey), detail: t(`config.backend.${type}Detail` as PanelKey)}))}/>
+				<SelectField label={t("config.col.backend")} value={str(back.type)} onChange={type => set("backend", type === "netstack" ? {type, outbound: outbounds[0] ?? ""} : type === "chain" ? {type, links: []} : {type})} options={["netstack", "l3", "block", "chain", ...(back.type === "upstream" ? ["upstream"] : [])].map(type => ({value: type, label: t(`config.backend.${type}` as PanelKey), detail: t(`config.backend.${type}Detail` as PanelKey)}))}/>
 				{back.type === "netstack" && <SelectField label={t("config.outboundLabel")} value={str(back.outbound)} onChange={value => setBackend("outbound", value)} options={outbounds.map(tag => ({value: tag, label: tag}))}/>}
 				{back.type === "netstack" && <fieldset className="p-mirror">
 					<legend className="vw-label">{t("exit.unsupported")}</legend>

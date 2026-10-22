@@ -1,6 +1,65 @@
 {
   "components": {
     "schemas": {
+      "AddIn": {
+        "additionalProperties": false,
+        "properties": {
+          "allow": {
+            "default": [],
+            "description": "The classes besides `cover` that the operator allows: no_cover, exposed, plain.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "exit": {
+            "description": "The provider's exit to leave through. Left out: the provider's default.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "The exit's display name. Defaults to the tag.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile": {
+            "description": "The profile of the provider to use. Left out: the first one the node would use.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tag": {
+            "description": "The tag of the upstream in the node's config, and of the exit that leaves through it: 1 to 64 of a-z, 0-9, - and _.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag"
+        ],
+        "type": "object"
+      },
+      "Added": {
+        "properties": {
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tag": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag",
+          "generation"
+        ],
+        "type": "object"
+      },
       "AdminRowOut": {
         "properties": {
           "created": {
@@ -183,6 +242,25 @@
         ],
         "type": "object"
       },
+      "Bytes": {
+        "properties": {
+          "down_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "up_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "up_bytes",
+          "down_bytes"
+        ],
+        "type": "object"
+      },
       "Changed": {
         "properties": {
           "node": {
@@ -252,6 +330,65 @@
         "required": [
           "typed",
           "revision"
+        ],
+        "type": "object"
+      },
+      "Counters": {
+        "properties": {
+          "dropped": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "refresh_failures": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "refreshes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "refused": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "sent": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "starts": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "state_flips": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "traffic": {
+            "$ref": "#/components/schemas/Bytes"
+          },
+          "unsent": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sent",
+          "unsent",
+          "refused",
+          "dropped",
+          "state_flips",
+          "starts",
+          "refreshes",
+          "refresh_failures",
+          "traffic"
         ],
         "type": "object"
       },
@@ -1000,6 +1137,35 @@
         ],
         "type": "object"
       },
+      "InspectIn": {
+        "additionalProperties": false,
+        "properties": {
+          "link": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "link"
+        ],
+        "type": "object"
+      },
+      "Inspected": {
+        "properties": {
+          "fingerprint": {
+            "description": "The fingerprint of the provider's signing key, as 8 groups of 4 hex digits. The provider can read it out for comparison.",
+            "type": "string"
+          },
+          "host": {
+            "description": "The host and port of the provider's endpoint. This is where the node will connect.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "fingerprint"
+        ],
+        "type": "object"
+      },
       "KeyOut": {
         "properties": {
           "created": {
@@ -1259,6 +1425,26 @@
         },
         "type": "object"
       },
+      "MoveIn2": {
+        "additionalProperties": false,
+        "properties": {
+          "hosts": {
+            "description": "Take the refresh hosts the node reported as pending.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "move": {
+            "description": "Follow the move of the provider's endpoint the node reported as pending.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "MoveOut": {
         "properties": {
           "applied": {
@@ -1298,6 +1484,21 @@
           "changes_check",
           "to_plain",
           "names"
+        ],
+        "type": "object"
+      },
+      "Moved": {
+        "properties": {
+          "hosts": {
+            "type": "boolean"
+          },
+          "moved": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "moved",
+          "hosts"
         ],
         "type": "object"
       },
@@ -1662,6 +1863,143 @@
         ],
         "type": "object"
       },
+      "PreviewIn2": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_private": {
+            "description": "Whether the node may dial private addresses the profiles name. Default false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "link": {
+            "description": "The native `veilway://sub/` link of the provider.",
+            "type": "string"
+          },
+          "via": {
+            "description": "The tag of a direct or socks5 outbound the node reaches the provider through. Left out: from the node itself.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "link"
+        ],
+        "type": "object"
+      },
+      "PrivateIn": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_private": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "allow_private"
+        ],
+        "type": "object"
+      },
+      "Profile": {
+        "properties": {
+          "classes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "exits": {
+            "items": {
+              "$ref": "#/components/schemas/ProfileExit"
+            },
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "mtu": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "private_addresses": {
+            "description": "Private addresses the profile names to dial.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "rating": {
+            "description": "\"protected\", \"detectable\" or \"unsafe\": what a censor can see, worked out by the node.",
+            "type": "string"
+          },
+          "refused": {
+            "description": "Why this node would not use the profile under the settings of the preview. Null when it would.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "transports": {
+            "description": "Transport types in the provider's order.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "transports",
+          "classes",
+          "rating",
+          "private_addresses",
+          "mtu",
+          "exits"
+        ],
+        "type": "object"
+      },
+      "ProfileExit": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "tag": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag",
+          "name"
+        ],
+        "type": "object"
+      },
+      "Quota": {
+        "properties": {
+          "quota_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "used_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "used_bytes",
+          "quota_bytes"
+        ],
+        "type": "object"
+      },
       "Reauth": {
         "additionalProperties": false,
         "properties": {
@@ -1772,6 +2110,24 @@
           "name",
           "address",
           "enabled"
+        ],
+        "type": "object"
+      },
+      "Removed": {
+        "properties": {
+          "confirmed": {
+            "description": "Whether the provider took the word that the device left. False: its place stays until the provider removes it. Null: the node never ran this upstream, so there was nothing to tell.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "tag": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag"
         ],
         "type": "object"
       },
@@ -1966,6 +2322,112 @@
           "destroy_at",
           "accounts_recent",
           "accounts"
+        ],
+        "type": "object"
+      },
+      "Retried": {
+        "properties": {
+          "tag": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag"
+        ],
+        "type": "object"
+      },
+      "Review": {
+        "description": "What the provider's document holds, verified by the node under the key of the link. It names no key and no secret.",
+        "properties": {
+          "account_expires_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "allow_private": {
+            "default": false,
+            "description": "Filled in by the panel: whether the node may dial private addresses of the profiles under this preview.",
+            "type": "boolean"
+          },
+          "classes": {
+            "description": "The classes the profiles list. The operator consents to each besides `cover`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "device_limit": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "devices": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "expires_at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "expires_in_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "fingerprint": {
+            "description": "The fingerprint of the key the document is signed with, which is the one in the link.",
+            "type": "string"
+          },
+          "host": {
+            "default": "",
+            "description": "Filled in by the panel: the host and port of the provider's endpoint, as the link names them.",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "profiles": {
+            "items": {
+              "$ref": "#/components/schemas/Profile"
+            },
+            "type": "array"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "quota": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Quota"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "serial": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "expires_in_secs",
+          "provider",
+          "fingerprint",
+          "serial",
+          "expires_at",
+          "devices",
+          "classes",
+          "profiles"
         ],
         "type": "object"
       },
@@ -2740,6 +3202,145 @@
           "can_update",
           "updating",
           "node_updating"
+        ],
+        "type": "object"
+      },
+      "Upstream": {
+        "description": "What the node is doing for one upstream.",
+        "properties": {
+          "counters": {
+            "$ref": "#/components/schemas/Counters"
+          },
+          "exit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "mtu": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "notices": {
+            "description": "What the provider says to the device, as plain text.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "offered_exits": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pending_hosts": {
+            "description": "Refresh hosts that wait for the operator.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "pending_move": {
+            "description": "A move of the provider's endpoint that waits for the operator.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quota": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Quota"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "description": "Plain words for why the state is what it is. Empty while it is up.",
+            "type": "string"
+          },
+          "refresh_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "refreshed_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "state": {
+            "description": "\"fetching\", \"connecting\", \"up\" or \"down\".",
+            "type": "string"
+          },
+          "state_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tag": {
+            "type": "string"
+          },
+          "transport": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "tag",
+          "state",
+          "reason",
+          "state_secs",
+          "offered_exits",
+          "notices",
+          "pending_hosts",
+          "counters"
+        ],
+        "type": "object"
+      },
+      "Upstreams": {
+        "properties": {
+          "upstreams": {
+            "items": {
+              "$ref": "#/components/schemas/Upstream"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "upstreams"
         ],
         "type": "object"
       },
@@ -4011,7 +4612,7 @@
             "description": "Rate limited."
           }
         },
-        "summary": "Replaces the whole document: validated on the node, then applied with If-Match set to the revision given. The panel's users are put in. No API token may change exits, outbounds, links, log, dns or notices here, and links, log, dns and notices need a recent re-authentication. The answer is the node's.",
+        "summary": "Replaces the whole document: validated on the node, then applied with If-Match set to the revision given. The panel's users are put in. No API token may change exits, outbounds, links, log, dns, notices or upstreams here, and links, log, dns, notices and upstreams need a recent re-authentication. The answer is the node's.",
         "x-access": "full"
       }
     },
@@ -7445,6 +8046,650 @@
         "x-access": "session-reauth"
       }
     },
+    "/upstreams": {
+      "get": {
+        "operationId": "listUpstreams",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Upstreams"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The subscriptions of other providers that exits of the node use, with their state and why, quota, expiry, notices as plain text, the largest packet they take, the last refresh and its error, what waits for the operator, and counters. No key, secret or link.",
+        "x-access": "read"
+      }
+    },
+    "/upstreams/inspect": {
+      "post": {
+        "operationId": "inspectUpstreamLink",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InspectIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Inspected"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Step 1, offline: the host and the signing key fingerprint a pasted native link names. Nothing is sent. Links that are not native veilway://sub/ links are refused.",
+        "x-access": "session"
+      }
+    },
+    "/upstreams/previews": {
+      "post": {
+        "operationId": "previewUpstream",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewIn2"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Step 2, after the operator said fetch: the panel makes a device key and secret, which stay on the panel in memory for ten minutes and are in no answer, and the node enrolls that device with the provider and returns what the provider's document holds. The provider sees the node's address. At most four wait. Slow: it waits on the provider.",
+        "x-access": "session"
+      }
+    },
+    "/upstreams/previews/{preview}": {
+      "delete": {
+        "operationId": "declineUpstream",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "preview",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Says no to a preview: the provider is told to release the place and the panel forgets the device.",
+        "x-access": "session"
+      }
+    },
+    "/upstreams/previews/{preview}/confirm": {
+      "post": {
+        "operationId": "addUpstream",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "preview",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Added"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Step 3: puts the upstream and an exit that leaves through it into the node's config, through the same apply as putConfig. The node takes the fetched document for that config. Needs a recent re-authentication, so no API token can do it.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/upstreams/previews/{preview}/private": {
+      "post": {
+        "operationId": "previewUpstreamAgain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "preview",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrivateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Declines the preview and fetches again, with a new device, answering whether the node may dial private addresses the profiles name.",
+        "x-access": "session"
+      }
+    },
+    "/upstreams/{tag}": {
+      "delete": {
+        "operationId": "removeUpstream",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Removed"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Tells the provider the device left (up to ten seconds), then applies the config without the upstream and the exits that use it. The config without them is checked first. Needs a recent re-authentication.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/upstreams/{tag}/confirm": {
+      "post": {
+        "operationId": "confirmUpstreamMove",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveIn2"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Moved"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Says yes to the move of the provider's endpoint and to the refresh hosts it announced, which the node holds back until then. A field left out is false when the other is given; with no body both are confirmed. Needs a recent re-authentication.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/upstreams/{tag}/retry": {
+      "post": {
+        "operationId": "retryUpstream",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Retried"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Asks the upstream to connect again now.",
+        "x-access": "full"
+      }
+    },
     "/users": {
       "get": {
         "operationId": "listUsers",
@@ -8877,7 +10122,7 @@
             "name": "tag",
             "required": true,
             "schema": {
-              "type": "integer"
+              "type": "string"
             }
           }
         ],
@@ -8944,7 +10189,7 @@
             "name": "tag",
             "required": true,
             "schema": {
-              "type": "integer"
+              "type": "string"
             }
           }
         ],
