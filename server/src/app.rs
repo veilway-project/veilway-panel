@@ -135,7 +135,7 @@ pub struct Settings {
 	pub idle_device_days: u32,
 	/// Minutes an account waits after adding a device before it may add another, which slows down a leaked link. 0 lets devices be added one after another; the device limit still holds.
 	pub new_device_minutes: u32,
-	/// Days the first transport key of a `veilway` inbound stays first before the panel makes a new one, 7 to 30. The old key keeps working for two days or three refresh intervals, whichever is longer, and is then destroyed.
+	/// Days the first transport key of a `veilway` inbound stays first before the panel makes a new one, 7 to 30 (a `ws-plain` transport's key at most 7). The node then holds the two keys, the old one second, and the old key keeps working for one more period of this length before it is destroyed.
 	pub transport_key_days: u32,
 	/// Other endpoints of the same subscription, put in every document as `refresh_urls`. A string, or an object with `url` and `pins`.
 	pub refresh_mirrors: Vec<Value>,
@@ -168,12 +168,12 @@ pub struct Settings {
 	/// The public half of the first transport key of each `veilway` inbound, by inbound tag, which its profile carries as `transport_public_key` for its `tls`, `ws` and `fronted` transports, and of each of its `ws-plain` transports (own keys), by tag, a newline and the path. Made the same way as `inbound_keys`.
 	#[schemars(extend("readOnly" = true))]
 	pub transport_keys: BTreeMap<String, String>,
-	/// When the first transport key of each `veilway` inbound and of each `ws-plain` transport (named as in `transport_keys`) became first, and where its rotation stands. Owned by the server: read-only in the API.
+	/// When the first transport key of each `veilway` inbound and of each `ws-plain` transport (named as in `transport_keys`) became first, the key held second, the keys destroyed and where its rotation stands. Owned by the server: read-only in the API.
 	#[schemars(extend("readOnly" = true))]
 	pub transport_clocks: BTreeMap<String, TransportClock>,
 }
 
-/// Where the rotation of one inbound's transport key stands.
+/// Where the rotation of one transport slot stands. A slot holds at most two keys, and a rotation puts the fresh one first and keeps the current one second, so the old key lives one more period.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct TransportClock {
@@ -181,12 +181,25 @@ pub struct TransportClock {
 	pub public: String,
 	/// Unix time the key became first.
 	pub since: i64,
-	/// Unix time the previous key is destroyed, or 0 when none waits.
-	pub retire_at: i64,
+	/// The public half of the key the node holds second, or empty when none is known. It is destroyed by the next rotation, so no profile may carry it.
+	pub previous: String,
+	/// Public halves of keys the node destroyed, newest last and at most 16. A settings form that was loaded before a rotation may bring one back, and it is rewritten to the current key.
+	pub dropped: Vec<String>,
 	/// The public half of the key a rotation is putting in force, written before the node is asked so that a rotation the node took is finished later.
 	pub next: String,
-	/// The node's marker of the key that was first when a rotation began. When the node took the rotation but its answer was lost, it holds that marker second, which tells the next pass to finish the rotation.
+	/// The node's marker of the key that was first when a rotation began. Markers last as long as the node's process. When the node took the rotation but its answer was lost, it holds that marker second, which tells the next pass to finish the rotation.
 	pub old_marker: String,
+	/// Unix time `next` was written, or 0 when no rotation waits. A rotation that is still not confirmed 2 days later is given up.
+	pub started: i64,
+}
+
+impl TransportClock {
+	/// Remembers keys the node destroyed, without repeats, at most 16.
+	pub fn drop_keys(&mut self, gone: &[&str]) {
+		for public in gone {if !public.is_empty() && !self.dropped.iter().any(|held| held == public) {self.dropped.push(public.to_string())}}
+		let excess = self.dropped.len().saturating_sub(16);
+		self.dropped.drain(..excess);
+	}
 }
 
 impl Default for Settings {

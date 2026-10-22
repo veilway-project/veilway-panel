@@ -2152,7 +2152,7 @@ export interface components {
              */
             terms_url: string;
             /**
-             * @description When the first transport key of each `veilway` inbound and of each `ws-plain` transport (named as in `transport_keys`) became first, and where its rotation stands. Owned by the server: read-only in the API.
+             * @description When the first transport key of each `veilway` inbound and of each `ws-plain` transport (named as in `transport_keys`) became first, the key held second, the keys destroyed and where its rotation stands. Owned by the server: read-only in the API.
              * @default {}
              */
             readonly transport_clocks: {
@@ -2160,7 +2160,7 @@ export interface components {
             };
             /**
              * Format: uint32
-             * @description Days the first transport key of a `veilway` inbound stays first before the panel makes a new one, 7 to 30. The old key keeps working for two days or three refresh intervals, whichever is longer, and is then destroyed.
+             * @description Days the first transport key of a `veilway` inbound stays first before the panel makes a new one, 7 to 30 (a `ws-plain` transport's key at most 7). The node then holds the two keys, the old one second, and the old key keeps working for one more period of this length before it is destroyed.
              * @default 30
              */
             transport_key_days: number;
@@ -2277,18 +2277,28 @@ export interface components {
             /** @description Base32, for an authenticator app. Shown once, whatever two-step sign-in is set to. */
             totp_secret: string;
         };
-        /** @description Where the rotation of one inbound's transport key stands. */
+        /** @description Where the rotation of one transport slot stands. A slot holds at most two keys, and a rotation puts the fresh one first and keeps the current one second, so the old key lives one more period. */
         TransportClock: {
+            /**
+             * @description Public halves of keys the node destroyed, newest last and at most 16. A settings form that was loaded before a rotation may bring one back, and it is rewritten to the current key.
+             * @default []
+             */
+            dropped: string[];
             /**
              * @description The public half of the key a rotation is putting in force, written before the node is asked so that a rotation the node took is finished later.
              * @default
              */
             next: string;
             /**
-             * @description The node's marker of the key that was first when a rotation began. When the node took the rotation but its answer was lost, it holds that marker second, which tells the next pass to finish the rotation.
+             * @description The node's marker of the key that was first when a rotation began. Markers last as long as the node's process. When the node took the rotation but its answer was lost, it holds that marker second, which tells the next pass to finish the rotation.
              * @default
              */
             old_marker: string;
+            /**
+             * @description The public half of the key the node holds second, or empty when none is known. It is destroyed by the next rotation, so no profile may carry it.
+             * @default
+             */
+            previous: string;
             /**
              * @description The public half of the first key when the clock started. A first key that differs was changed by hand, which restarts the clock.
              * @default
@@ -2296,16 +2306,16 @@ export interface components {
             public: string;
             /**
              * Format: int64
-             * @description Unix time the previous key is destroyed, or 0 when none waits.
-             * @default 0
-             */
-            retire_at: number;
-            /**
-             * Format: int64
              * @description Unix time the key became first.
              * @default 0
              */
             since: number;
+            /**
+             * Format: int64
+             * @description Unix time `next` was written, or 0 when no rotation waits. A rotation that is still not confirmed 2 days later is given up.
+             * @default 0
+             */
+            started: number;
         };
         UpdateInfo: {
             /** @description Whether the folder for update requests exists, which a host installed or updated by `veilway.sh` has. */

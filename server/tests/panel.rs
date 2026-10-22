@@ -2709,62 +2709,170 @@ async fn published_transport_key(h: &Harness) -> String {h.app.settings().profil
 
 fn node_keys(fake: &Fake) -> Vec<String> {fake.document.lock().unwrap()["inbounds"][0]["transport_keys"].as_array().unwrap().iter().map(|key| key.as_str().unwrap().to_string()).collect()}
 
-#[tokio::test]
-async fn a_transport_key_is_rotated_when_it_is_old_and_retired_after_the_overlap() {
+fn public_from(key: &str) -> String {STANDARD.encode(veilway_proto::proof::public_key(&<[u8; 32]>::try_from(STANDARD.decode(key).unwrap()).unwrap()))}
+
+async fn pass(h: &Harness) {upkeep_once(&h.app, &mut Upkeep::default()).await}
+
+async fn age(h: &Harness, days: i64) {let seconds = days * 86_400; h.app.update_settings(move |settings| for clock in settings.transport_clocks.values_mut() {clock.since = crypto::now() - seconds}).await.unwrap()}
+
+/// A node whose inbound `Main` holds `keys` and whose profile is published, with the clock started.
+async fn rotating_node(keys: &[String]) -> (Arc<Fake>, Harness, Session) {
 	let (fake, h, session) = borrowed_node().await;
-	let old = STANDARD.encode([5u8; 32]);
-	let public = |key: &str| STANDARD.encode(veilway_proto::proof::public_key(&<[u8; 32]>::try_from(STANDARD.decode(key).unwrap()).unwrap()));
 	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32])}})), "10.0.0.1").await.status, StatusCode::OK);
-	assert_eq!(put_inbounds(&h, &session, 1, rotating_inbound(&old)).await.status, StatusCode::OK);
+	let mut inbounds = rotating_inbound(&keys[0]);
+	inbounds[0]["transport_keys"] = json!(keys);
+	assert_eq!(put_inbounds(&h, &session, 1, inbounds).await.status, StatusCode::OK);
 	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	pass(&h).await;
+	(fake, h, session)
+}
+
+async fn audit_text(h: &Harness, session: &Session) -> String {h.call(Method::GET, "/p/api/audit?limit=1000", Some(session), None, "10.0.0.1").await.json().to_string()}
+
+/// Saves the settings as a form loaded earlier would, with the key of the published profile `main` set to `key`.
+async fn stale_form(h: &Harness, session: &Session, key: &str) {
+	let mut settings = h.call(Method::GET, "/p/api/settings", Some(session), None, "10.0.0.1").await.json();
+	settings["profiles"].as_array_mut().unwrap().iter_mut().find(|profile| profile["id"] == "main").unwrap()["transport_public_key"] = json!(key);
+	let answer = h.call(Method::PUT, "/p/api/settings", Some(session), Some(settings), "10.0.0.1").await;
+	assert_eq!(answer.status, StatusCode::OK, "{}", String::from_utf8_lossy(&answer.body));
+}
+
+#[tokio::test]
+async fn a_transport_key_is_rotated_when_it_is_old_and_the_old_one_lives_one_more_period() {
+	let old = STANDARD.encode([5u8; 32]);
+	let (fake, h, session) = rotating_node(&[old.clone()]).await;
 	let first = published_transport_key(&h).await;
-	assert_eq!(first, public(&old));
-	let pass = || async {upkeep_once(&h.app, &mut Upkeep::default()).await};
-	let age = |days: i64| {let days = days * 86_400; h.app.update_settings(move |settings| for clock in settings.transport_clocks.values_mut() {clock.since = crypto::now() - days})};
-	pass().await;
-	assert_eq!(h.app.settings().transport_clocks["Main"].public, first, "an inbound seen for the first time starts its clock now");
-	age(29).await.unwrap();
-	pass().await;
+	assert_eq!((first.clone(), h.app.settings().transport_clocks["Main"].public.clone()), (public_from(&old), first.clone()), "an inbound seen for the first time starts its clock now");
+	age(&h, 29).await;
+	pass(&h).await;
 	assert_eq!((node_keys(&fake), published_transport_key(&h).await), (vec![old.clone()], first.clone()), "nothing before the age");
-	age(31).await.unwrap();
+	age(&h, 31).await;
 	fake.refuse.store(true, Ordering::Relaxed);
-	pass().await;
-	assert_eq!((node_keys(&fake), published_transport_key(&h).await, h.app.settings().transport_keys["Main"].clone()), (vec![old.clone()], first.clone(), first.clone()), "a refused apply changes nothing the apps or the panel go by");
+	pass(&h).await;
+	assert_eq!((node_keys(&fake), published_transport_key(&h).await, h.app.settings().transport_keys["Main"].clone(), h.app.settings().transport_clocks["Main"].next.clone()), (vec![old.clone()], first.clone(), first.clone(), String::new()), "a refused apply changes nothing the apps go by and leaves nothing waiting");
 	fake.refuse.store(false, Ordering::Relaxed);
-	pass().await;
+	pass(&h).await;
 	let keys = node_keys(&fake);
-	assert_eq!((keys.len(), keys[1].clone()), (2, old.clone()), "the new key first, the old one still held");
+	assert_eq!((keys.len(), keys[1].clone()), (2, old.clone()), "the fresh key first, the current one second");
 	let fresh = published_transport_key(&h).await;
-	assert_eq!((fresh.clone(), h.app.settings().transport_keys["Main"].clone()), (public(&keys[0]), public(&keys[0])), "the published profile carries the new public key");
+	assert_eq!((fresh.clone(), h.app.settings().transport_keys["Main"].clone()), (public_from(&keys[0]), public_from(&keys[0])), "the published profile carries the fresh public key");
 	assert_ne!(fresh, first);
 	let clock = h.app.settings().transport_clocks["Main"].clone();
-	assert_eq!((clock.public, clock.next, clock.retire_at - crypto::now() > 86_000), (fresh.clone(), String::new(), true));
-	pass().await;
-	assert_eq!(node_keys(&fake).len(), 2, "the overlap has not ended");
-	h.app.update_settings(|settings| settings.transport_clocks.get_mut("Main").unwrap().retire_at = crypto::now() - 1).await.unwrap();
-	pass().await;
-	assert_eq!(node_keys(&fake), vec![keys[0].clone()], "the old key is gone from the node");
-	assert_eq!(published_transport_key(&h).await, fresh);
-	// A rotation whose answer was lost: the node holds the new key first and the old one second, and the next pass finishes it.
-	age(31).await.unwrap();
+	assert_eq!((clock.public, clock.previous, clock.next, clock.started, clock.dropped.len()), (fresh.clone(), first.clone(), String::new(), 0, 0));
+	pass(&h).await;
+	assert_eq!(node_keys(&fake), keys, "nothing before the next age");
+	age(&h, 31).await;
+	pass(&h).await;
+	let again = node_keys(&fake);
+	assert_eq!((again.len(), again[1].clone(), again.contains(&old)), (2, keys[0].clone(), false), "the key that was second is gone, the previous first lives one more period");
+	assert_eq!((published_transport_key(&h).await, h.app.settings().transport_clocks["Main"].previous.clone(), h.app.settings().transport_clocks["Main"].dropped.clone()), (public_from(&again[0]), fresh.clone(), vec![first.clone()]));
+	// A rotation whose answer was lost: the node took it, and the panel finishes it from the marker.
+	age(&h, 31).await;
 	fake.lose.store(true, Ordering::Relaxed);
-	pass().await;
+	pass(&h).await;
 	fake.lose.store(false, Ordering::Relaxed);
 	let lost = node_keys(&fake);
-	assert_eq!((lost.len(), lost[1].clone(), published_transport_key(&h).await), (2, keys[0].clone(), fresh.clone()), "the node took it, the apps still get the key the node also holds");
-	pass().await;
-	assert_eq!((published_transport_key(&h).await, h.app.settings().transport_keys["Main"].clone()), (public(&lost[0]), public(&lost[0])), "the next pass finishes the rotation");
-	h.app.update_settings(|settings| settings.transport_clocks.get_mut("Main").unwrap().retire_at = crypto::now() - 1).await.unwrap();
-	pass().await;
-	assert_eq!(node_keys(&fake), vec![lost[0].clone()]);
-	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await.json().to_string();
-	assert!(audit.contains("transport_key.rotate") && audit.contains("transport_key.retire"));
-	assert!(!audit.contains(&keys[0]) && !audit.contains(&old), "no key material in the audit log");
+	assert_eq!((lost.len(), lost[1].clone(), published_transport_key(&h).await, h.app.settings().transport_clocks["Main"].dropped.clone()), (2, again[0].clone(), public_from(&lost[0]), vec![first.clone(), fresh.clone()]));
+	let audit = audit_text(&h, &session).await;
+	assert!(audit.contains("transport_key.rotate") && !audit.contains("transport_key.retire"));
+	for key in [&old, &keys[0], &again[0], &lost[0]] {assert!(!audit.contains(key.as_str()) && !audit.contains(&public_from(key)), "no key material in the audit log");}
 	let generation = *fake.generation.lock().unwrap() as u32;
 	assert_eq!(put_inbounds(&h, &session, generation, rotating_inbound(&STANDARD.encode([9u8; 32]))).await.status, StatusCode::OK);
-	pass().await;
+	pass(&h).await;
 	let clock = h.app.settings().transport_clocks["Main"].clone();
-	assert_eq!((clock.public, crypto::now() - clock.since < 60), (public(&STANDARD.encode([9u8; 32])), true), "a first key changed by hand restarts the clock");
+	assert_eq!((clock.public, crypto::now() - clock.since < 60, clock.dropped.contains(&public_from(&lost[0]))), (public_from(&STANDARD.encode([9u8; 32])), true, true), "a first key changed by hand restarts the clock and the old first is remembered as gone");
+}
+
+#[tokio::test]
+async fn a_stale_settings_form_cannot_bring_back_a_key_the_node_will_destroy() {
+	let old = STANDARD.encode([5u8; 32]);
+	let (fake, h, session) = rotating_node(&[old.clone()]).await;
+	let first = published_transport_key(&h).await;
+	age(&h, 31).await;
+	pass(&h).await;
+	let fresh = published_transport_key(&h).await;
+	stale_form(&h, &session, &first).await;
+	assert_eq!(published_transport_key(&h).await, fresh, "the key held second is not published");
+	stale_form(&h, &session, "Zm9yZ290dGVuIGtleSB0aGF0IG5vYm9keSBrbm93cw==").await;
+	assert_eq!(published_transport_key(&h).await, "Zm9yZ290dGVuIGtleSB0aGF0IG5vYm9keSBrbm93cw==", "a key the panel never knew stays as written");
+	stale_form(&h, &session, &fresh).await;
+	age(&h, 31).await;
+	pass(&h).await;
+	let current = published_transport_key(&h).await;
+	assert_ne!(current, fresh);
+	stale_form(&h, &session, &first).await;
+	assert_eq!(published_transport_key(&h).await, current, "a key the node destroyed is rewritten too");
+	stale_form(&h, &session, &fresh).await;
+	assert_eq!(published_transport_key(&h).await, current, "so is the one held second");
+	assert_eq!(node_keys(&fake).len(), 2);
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(published_transport_key(&h).await, current, "publishing keeps it");
+}
+
+#[tokio::test]
+async fn a_published_profile_under_another_id_is_patched_before_its_key_is_destroyed() {
+	let old = STANDARD.encode([5u8; 32]);
+	let (fake, h, _) = rotating_node(&[old.clone()]).await;
+	let first = published_transport_key(&h).await;
+	age(&h, 31).await;
+	pass(&h).await;
+	let fresh = published_transport_key(&h).await;
+	let (held_first, held_fresh) = (first.clone(), fresh.clone());
+	h.app.update_settings(move |settings| {
+		settings.profiles.push(json!({"id": "by-hand", "name": "By hand", "type": "veilway", "transport_public_key": held_first, "transports": [{"type": "ws-plain", "path": "/p", "transport_public_key": held_first}]}));
+		settings.profiles.push(json!({"id": "by-hand-too", "name": "Too", "type": "veilway", "transport_public_key": held_fresh}));
+	}).await.unwrap();
+	age(&h, 31).await;
+	pass(&h).await;
+	let current = public_from(&node_keys(&fake)[0]);
+	assert_ne!(current, fresh);
+	let settings = h.app.settings();
+	let carried: Vec<Value> = ["main", "by-hand", "by-hand-too"].iter().map(|id| settings.profiles.iter().find(|profile| profile["id"] == *id).unwrap()["transport_public_key"].clone()).collect();
+	assert_eq!(carried, vec![json!(current); 3], "every published profile carries the key that is first");
+	assert_eq!(settings.profiles.iter().find(|profile| profile["id"] == "by-hand").unwrap()["transports"][0]["transport_public_key"], json!(current), "also a transport's own");
+}
+
+#[tokio::test]
+async fn a_rotation_the_node_never_confirms_is_given_up_after_two_days_without_a_lockout() {
+	let old = STANDARD.encode([5u8; 32]);
+	let (fake, h, session) = rotating_node(&[old.clone()]).await;
+	let first = published_transport_key(&h).await;
+	// The node took a rotation and its answer was lost, but the panel only finds out in a later pass.
+	let took = STANDARD.encode([8u8; 32]);
+	fake.document.lock().unwrap()["inbounds"][0]["transport_keys"] = json!([took, old]);
+	let (next, marker) = (public_from(&took), marked(&json!(old)).as_str().unwrap().to_string());
+	h.app.update_settings(move |settings| {let clock = settings.transport_clocks.get_mut("Main").unwrap(); clock.next = next; clock.old_marker = marker; clock.started = crypto::now() - 3_600;}).await.unwrap();
+	pass(&h).await;
+	assert_eq!((published_transport_key(&h).await, h.app.settings().transport_clocks["Main"].previous.clone()), (public_from(&took), first.clone()), "a later pass finishes it");
+	// One that the node never took, with markers that match nothing (it restarted).
+	age(&h, 31).await;
+	let stuck = STANDARD.encode(veilway_proto::proof::public_key(&[3u8; 32]));
+	let held = stuck.clone();
+	h.app.update_settings(move |settings| {let clock = settings.transport_clocks.get_mut("Main").unwrap(); clock.next = held; clock.old_marker = "<redacted:deadbeef>".into(); clock.started = crypto::now() - 86_400;}).await.unwrap();
+	let before = node_keys(&fake);
+	pass(&h).await;
+	assert_eq!((node_keys(&fake), h.app.settings().transport_clocks["Main"].next.clone()), (before.clone(), stuck.clone()), "no other rotation starts while it waits");
+	h.app.update_settings(|settings| settings.transport_clocks.get_mut("Main").unwrap().started = crypto::now() - 3 * 86_400).await.unwrap();
+	pass(&h).await;
+	let clock = h.app.settings().transport_clocks["Main"].clone();
+	assert_eq!((clock.next, clock.old_marker, clock.started), (String::new(), String::new(), 0), "given up");
+	assert!(audit_text(&h, &session).await.contains("transport_key.reset"));
+	pass(&h).await;
+	let after = node_keys(&fake);
+	assert_ne!(after, before, "the next pass rotates again");
+	assert_eq!(published_transport_key(&h).await, public_from(&after[0]));
+}
+
+#[tokio::test]
+async fn a_slot_that_already_holds_two_keys_drops_the_stale_one_at_its_next_rotation() {
+	let (a, b) = (STANDARD.encode([5u8; 32]), STANDARD.encode([6u8; 32]));
+	let (fake, h, _) = rotating_node(&[a.clone(), b.clone()]).await;
+	assert_eq!((h.app.settings().transport_clocks["Main"].public.clone(), h.app.settings().transport_clocks["Main"].previous.clone()), (public_from(&a), String::new()), "the clock starts, the second key is not known");
+	age(&h, 31).await;
+	pass(&h).await;
+	let keys = node_keys(&fake);
+	assert_eq!((keys.len(), keys[1].clone(), keys.contains(&b)), (2, a.clone(), false));
+	assert_eq!(h.app.settings().transport_clocks["Main"].previous, public_from(&a));
 }
 
 #[tokio::test]
@@ -2798,7 +2906,6 @@ async fn published_plain(h: &Harness) -> Value {h.app.settings().profiles.iter()
 async fn a_ws_plain_transport_keeps_its_own_public_key_and_rotates_it_every_seven_days() {
 	let (fake, h, session) = borrowed_node().await;
 	let (old, inbound_key) = (STANDARD.encode([5u8; 32]), STANDARD.encode([6u8; 32]));
-	let public = |key: &str| STANDARD.encode(veilway_proto::proof::public_key(&<[u8; 32]>::try_from(STANDARD.decode(key).unwrap()).unwrap()));
 	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32]), "plain_host": "plain.example.org", "plain_port": 8080}})), "10.0.0.1").await.status, StatusCode::OK);
 	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"plain_host": "192.0.2.1"}})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "a host name, not an address");
 	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"plain_host": "plain.example.org", "plain_port": 0}})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
@@ -2806,27 +2913,29 @@ async fn a_ws_plain_transport_keeps_its_own_public_key_and_rotates_it_every_seve
 	assert_eq!(put_inbounds(&h, &session, 1, plain_inbound(&inbound_key, &old)).await.status, StatusCode::OK);
 	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
 	let slot = "Main\n/a-plain-long-path";
-	assert_eq!(h.app.settings().transport_keys[slot], public(&old), "the public half is kept when the keys are applied");
+	assert_eq!(h.app.settings().transport_keys[slot], public_from(&old), "the public half is kept when the keys are applied");
 	let published = published_plain(&h).await;
-	assert_eq!((published["transport_public_key"].clone(), published["cookie"].clone(), published["candidates"].clone()), (json!(public(&old)), json!("session_id"), json!([{"address": "192.0.2.10:80", "host": "plain.example.org"}])));
-	assert_ne!(published["transport_public_key"], json!(public(&inbound_key)), "not the inbound's key");
+	assert_eq!((published["transport_public_key"].clone(), published["cookie"].clone(), published["candidates"].clone()), (json!(public_from(&old)), json!("session_id"), json!([{"address": "192.0.2.10:80", "host": "plain.example.org"}])));
+	assert_ne!(published["transport_public_key"], json!(public_from(&inbound_key)), "not the inbound's key");
 	assert!(!serde_json::to_string(&h.call(Method::GET, "/p/api/config", Some(&session), None, "10.0.0.1").await.json()).unwrap().contains(&old), "the API shows no key");
-	let pass = || async {upkeep_once(&h.app, &mut Upkeep::default()).await};
-	let age = |days: i64| {let days = days * 86_400; h.app.update_settings(move |settings| for clock in settings.transport_clocks.values_mut() {clock.since = crypto::now() - days})};
-	pass().await;
+	pass(&h).await;
 	assert!(h.app.settings().transport_clocks.contains_key(slot), "the transport has a clock of its own");
-	age(6).await.unwrap();
-	pass().await;
+	age(&h, 6).await;
+	pass(&h).await;
 	assert_eq!(plain_keys(&fake), vec![old.clone()], "nothing before seven days");
-	age(8).await.unwrap();
-	pass().await;
+	age(&h, 8).await;
+	pass(&h).await;
 	let keys = plain_keys(&fake);
 	assert_eq!((keys.len(), keys[1].clone(), node_keys(&fake)), (2, old.clone(), vec![inbound_key.clone()]), "the plain key is rotated at seven days, the inbound's is not");
-	assert_eq!((published_plain(&h).await["transport_public_key"].clone(), h.app.settings().transport_keys[slot].clone()), (json!(public(&keys[0])), public(&keys[0])), "the profile carries the new half once the node holds the key");
-	assert_eq!(published_transport_key(&h).await, public(&inbound_key), "the profile's own key is untouched");
-	h.app.update_settings(move |settings| settings.transport_clocks.get_mut(slot).unwrap().retire_at = crypto::now() - 1).await.unwrap();
-	pass().await;
-	assert_eq!(plain_keys(&fake), vec![keys[0].clone()], "the old key is gone after the overlap");
-	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await.json().to_string();
+	assert_eq!((published_plain(&h).await["transport_public_key"].clone(), h.app.settings().transport_keys[slot].clone()), (json!(public_from(&keys[0])), public_from(&keys[0])), "the profile carries the new half once the node holds the key");
+	assert_eq!(published_transport_key(&h).await, public_from(&inbound_key), "the profile's own key is untouched");
+	assert_eq!(h.app.settings().transport_clocks[slot].previous, public_from(&old));
+	age(&h, 8).await;
+	pass(&h).await;
+	let again = plain_keys(&fake);
+	assert_eq!((again.len(), again[1].clone(), again.contains(&old), node_keys(&fake)), (2, keys[0].clone(), false, vec![inbound_key.clone()]), "the next rotation destroys the old key and keeps the one before it");
+	assert_eq!(published_plain(&h).await["transport_public_key"], json!(public_from(&again[0])));
+	let audit = audit_text(&h, &session).await;
 	assert!(audit.contains("transport_key.rotate") && !audit.contains(&keys[0]) && !audit.contains(&old));
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"plain_host": "plain.example.org", "transports": [{"type": "ws-plain", "path": "/by-hand"}]}})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "an override cannot write a ws-plain transport");
 }

@@ -498,6 +498,7 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 	if input.new_device_minutes > 1440 {return Err(Failure::bad("new_device_minutes is 0 to 1440."))}
 	if !(7..=30).contains(&input.transport_key_days) {return Err(Failure::bad("transport_key_days is 7 to 30."))}
 	if input.profiles.len() > 64 || input.profiles.iter().any(|profile| !profile.is_object() || profile.get("device").is_some()) || input.refresh_mirrors.len() > 4 {return Err(Failure::bad("profiles are at most 64 objects without a device, and refresh_mirrors at most 4."))}
+	if input.profile_overrides.values().any(|edits| edits.as_object().is_some_and(crate::nodecfg::plain_written)) {return Err(Failure::bad("An override of transports may not hold a ws-plain transport."))}
 	crate::statics::check(&input).map_err(Failure::bad)?;
 	if let Some(page) = &input.not_found {
 		if !(200..=599).contains(&page.status) || page.headers.len() > 16 || page.body.len() > 65_536 || page.headers.iter().any(|(name, value)| HeaderName::try_from(name.as_str()).is_err() || HeaderValue::from_str(value).is_err()) {return Err(Failure::bad("not_found is a status from 200 to 599, at most 16 valid headers and a body of at most 64 KB."))}
@@ -512,6 +513,8 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 		saved.inbound_keys = before.inbound_keys.clone();
 		saved.transport_keys = before.transport_keys.clone();
 		saved.transport_clocks = before.transport_clocks.clone();
+		// A form loaded before a rotation may carry a key the node no longer accepts, or soon will not.
+		crate::nodecfg::retarget(&mut saved.profiles, &crate::nodecfg::stale_keys(&before));
 		crate::endpoints::in_use(&tx, &saved).map_err(Failure::conflict)?;
 		let known: Vec<i64> = tx.prepare("select id from users")?.query_map([], |row| row.get(0))?.collect::<Result<_, _>>()?;
 		if let Some(id) = saved.relays.iter().flat_map(|relay| relay.users.iter().copied()).find(|id| !known.contains(id)) {return Err(Failure::bad(format!("A relay names the account {id}, which does not exist. Take it off the relay first.")))}

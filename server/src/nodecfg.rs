@@ -314,13 +314,14 @@ pub fn remember_keys(settings: &mut Settings, document: &Value) {
 fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, exposure: &Exposure) -> Vec<Value> {
 	let inbounds = document.get("inbounds").and_then(Value::as_array).cloned().unwrap_or_default();
 	let reached = reaching(relays, user);
-	inbounds.iter().filter(|inbound| inbound["type"] == "veilway").flat_map(|inbound| {
+	// Every profile is made up to its overrides first, since the host names and paths a `ws-plain` transport must not share are those of all the inbounds: one subscription carries them all.
+	let bases: Vec<(&Value, String, Value, Vec<Value>, Vec<Value>)> = inbounds.iter().filter(|inbound| inbound["type"] == "veilway").map(|inbound| {
 		let (tag, host) = (inbound["tag"].as_str().unwrap_or_default().to_string(), settings.node_host.as_str());
 		let transports: Vec<&Value> = inbound["transports"].as_array().map(|list| list.iter().collect()).unwrap_or_default();
 		let obfs = transports.iter().any(|transport| transport["type"] == "udp-obfs");
 		let gateways: Vec<Value> = inbound["address"].as_array().into_iter().flatten().filter_map(|address| address.as_str()?.split('/').next().map(|ip| json!(ip))).collect();
 		let mut refused: Vec<Value> = Vec::new();
-		let mut listed: Vec<Value> = transports.iter().filter_map(|transport| {
+		let listed: Vec<Value> = transports.iter().filter_map(|transport| {
 			let listen = transport["listen"].as_str()?;
 			let reached = hosts(settings, &tag, listen);
 			let endpoints: Vec<String> = reached.iter().filter_map(|host| host_port(host, listen)).collect();
@@ -341,9 +342,20 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 				_ => return None,
 			})
 		}).collect();
-		// A `ws-plain` transport shares no host name with a covered one, so its host is judged against the hosts of the others.
-		let covered: Vec<String> = listed.iter().flat_map(|stream| stream["candidates"].as_array().into_iter().flatten().flat_map(|candidate| [candidate["host"].as_str(), candidate["sni"].as_str()]).flatten().map(str::to_lowercase)).collect();
+		let mut profile = json!({"id": tag.to_lowercase(), "name": tag, "type": "veilway", "gateways": gateways, "mtu": inbound["mtu"].as_u64().unwrap_or(if obfs {1390} else {1420}), "transports": listed});
+		if let Some(public) = settings.inbound_keys.get(&tag) {profile["inbound_public_key"] = json!(public);}
+		if let Some(public) = settings.transport_keys.get(&tag).filter(|_| profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport.get("candidates").is_some() && transport["type"] != "ws-plain"))) {profile["transport_public_key"] = json!(public);}
+		if let Some(edits) = settings.profile_overrides.get(&tag).and_then(Value::as_object) {for (key, value) in edits.iter().filter(|(key, _)| *key != crate::borrowed::ADDRESSES && !NOT_MEMBERS.contains(&key.as_str())) {profile[key] = value.clone();}}
+		(inbound, tag, profile, refused, gateways)
+	}).collect();
+	// A `ws-plain` transport shares no host name and no path with a covered one, on any inbound.
+	let streams: Vec<&Value> = bases.iter().flat_map(|(_, _, profile, _, _)| profile["transports"].as_array().into_iter().flatten()).filter(|stream| stream.get("candidates").is_some() && stream["type"] != "ws-plain").collect();
+	let names: Vec<String> = streams.iter().flat_map(|stream| stream["candidates"].as_array().into_iter().flatten().flat_map(|candidate| [candidate["host"].as_str(), candidate["sni"].as_str()]).flatten().map(str::to_lowercase)).collect();
+	let paths: Vec<String> = streams.iter().filter_map(|stream| stream["path"].as_str()).map(str::to_string).collect();
+	bases.into_iter().flat_map(|(inbound, tag, mut profile, mut refused, gateways)| {
+		let transports: Vec<&Value> = inbound["transports"].as_array().map(|list| list.iter().collect()).unwrap_or_default();
 		let edits = settings.profile_overrides.get(&tag);
+		if let Some(list) = profile.get_mut("transports").and_then(Value::as_array_mut) {list.retain(|transport| transport["type"] != "ws-plain")}
 		for transport in transports.iter().filter(|transport| transport["type"] == "ws-plain") {
 			let (path, listen) = (transport["path"].as_str().unwrap_or_default(), transport["listen"].as_str().unwrap_or_default());
 			let endpoints: Vec<String> = hosts(settings, &tag, listen).iter().filter_map(|host| host_port(host, &format!("web:{}", edits.and_then(|edits| edits[PLAIN_PORT].as_u64()).unwrap_or(80)))).collect();
@@ -354,13 +366,10 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 				refused.push(json!({"transport": transport["listen"], "code": code, "reason": reason}));
 				continue;
 			};
-			if covered.iter().any(|used| used == name) {refused.push(json!({"transport": transport["listen"], "code": "plain_shared", "reason": "its host name is also used by another transport of this profile, so the network could tie them together: use a host name of its own"})); continue}
-			listed.push(json!({"type": "ws-plain", "path": path, "cookie": cookie, "transport_public_key": public, "candidates": endpoints.iter().map(|endpoint| json!({"address": endpoint, "host": name})).collect::<Vec<_>>()}));
+			if names.iter().any(|used| used == name) {refused.push(json!({"transport": transport["listen"], "code": "plain_shared", "reason": "its host name is also used by another transport of the profiles, so the network could tie them together: use a host name of its own"})); continue}
+			if paths.iter().any(|used| used == path) {refused.push(json!({"transport": transport["listen"], "code": "plain_shared", "reason": "its path is also used by another transport of the profiles, so the network could tie them together: use a path of its own"})); continue}
+			if let Some(list) = profile.get_mut("transports").and_then(Value::as_array_mut) {list.push(json!({"type": "ws-plain", "path": path, "cookie": cookie, "transport_public_key": public, "candidates": endpoints.iter().map(|endpoint| json!({"address": endpoint, "host": name})).collect::<Vec<_>>()}));}
 		}
-		let mut profile = json!({"id": tag.to_lowercase(), "name": tag, "type": "veilway", "gateways": gateways, "mtu": inbound["mtu"].as_u64().unwrap_or(if obfs {1390} else {1420}), "transports": listed});
-		if let Some(public) = settings.inbound_keys.get(&tag) {profile["inbound_public_key"] = json!(public);}
-		if let Some(public) = settings.transport_keys.get(&tag).filter(|_| profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport.get("candidates").is_some() && transport["type"] != "ws-plain"))) {profile["transport_public_key"] = json!(public);}
-		if let Some(edits) = settings.profile_overrides.get(&tag).and_then(Value::as_object) {for (key, value) in edits.iter().filter(|(key, _)| *key != crate::borrowed::ADDRESSES && !NOT_MEMBERS.contains(&key.as_str())) {profile[key] = value.clone();}}
 		// The Xray inbounds answer on the addresses a profile names, so one that shares an address may not claim more than Detectable. An override of `unsafe` is the operator's own choice and stays.
 		if exposure.shares(&addresses(&profile)) && profile["rating_cap"] != "unsafe" {profile["rating_cap"] = json!("detectable");}
 		// Relays come after the overrides, so a transport an override wrote gets them too.
@@ -429,6 +438,7 @@ pub async fn put_override(State(app): State<Arc<App>>, Extension(ctx): Extension
 	if input.set.get(WEB_PORT).is_some_and(|port| !port.as_u64().is_some_and(|port| (1..=65535).contains(&port))) {return Err(Failure::bad(format!("{WEB_PORT} is the port of the web server in front of the node, 1 to 65535.")))}
 	if input.set.get(PLAIN_HOST).is_some_and(|host| !host.as_str().is_some_and(is_host)) {return Err(Failure::bad(format!("{PLAIN_HOST} is a lowercase host name such as plain.example.org, not an IP address.")))}
 	if input.set.get(PLAIN_PORT).is_some_and(|port| !port.as_u64().is_some_and(|port| (1..=65535).contains(&port))) {return Err(Failure::bad(format!("{PLAIN_PORT} is the port of the web server for plain HTTP, 1 to 65535.")))}
+	if plain_written(&input.set) {return Err(Failure::bad("An override of transports may not hold a ws-plain transport: the panel makes it from the node's config, with a key and a host name of its own."))}
 	let (tag, set) = (inbound.clone(), input.set);
 	app.update_settings(move |settings| if set.is_empty() {settings.profile_overrides.remove(&tag);} else {settings.profile_overrides.insert(tag, Value::Object(set));}).await.map_err(Failure::internal)?;
 	app.db.audit(&ctx.actor, &ctx.source, "profile.override", &inbound, "").await;
@@ -453,6 +463,8 @@ pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Exten
 	app.update_settings(move |settings| {
 		settings.profiles.retain(|profile| !ids.contains(&profile["id"]));
 		settings.profiles.extend(fresh);
+		let stale = stale_keys(settings);
+		retarget(&mut settings.profiles, &stale);
 		settings.relay_profiles = carrying;
 		settings.published_relays = relays;
 	}).await.map_err(Failure::internal)?;
@@ -469,7 +481,24 @@ fn keys_at<'a>(document: &'a mut Value, tag: &str, path: &str) -> Option<&'a mut
 	if path.is_empty() {Some(&mut inbound["transport_keys"])} else {inbound["transports"].as_array_mut()?.iter_mut().find(|stream| stream["type"] == "ws-plain" && stream["path"] == path).map(|stream| &mut stream["transport_keys"])}
 }
 
-/// The hourly rotation of the transport keys the panel makes: the first key of each `veilway` inbound (every `transport_key_days`) and of each of its `ws-plain` transports (every 7 days at most, since its proofs travel in clear). A key older than that is joined by a new first one, the published profiles take the new public half, and after the overlap the old key is dropped from the node's config. Every step is retried by the next pass, and a profile is changed only after the node holds the key it names. The panel keeps no private key: the new one goes to the node and the old one is only ever a marker here.
+/// Rewrites, in profiles, each `transport_public_key` (the profile's own and its transports') that is a `from` of `pairs` to the matching `to`. A pair with an empty side does nothing.
+pub fn retarget(profiles: &mut [Value], pairs: &[(String, String)]) {
+	let swap = |key: &Value| key.as_str().and_then(|key| pairs.iter().find(|(from, to)| !from.is_empty() && !to.is_empty() && from == key)).map(|(_, to)| json!(to));
+	for profile in profiles.iter_mut() {
+		if let Some(to) = swap(&profile["transport_public_key"]) {profile["transport_public_key"] = to;}
+		for transport in profile.get_mut("transports").and_then(Value::as_array_mut).into_iter().flatten() {if let Some(to) = swap(&transport["transport_public_key"]) {transport["transport_public_key"] = to;}}
+	}
+}
+
+/// The keys no profile may carry, each with the key of its slot that replaces it: the one the node holds second, which the next rotation destroys, and the ones it destroyed before.
+pub fn stale_keys(settings: &Settings) -> Vec<(String, String)> {
+	settings.transport_clocks.iter().filter_map(|(name, clock)| Some((settings.transport_keys.get(name)?, clock))).flat_map(|(current, clock)| std::iter::once(&clock.previous).chain(&clock.dropped).filter(|old| *old != current).map(|old| (old.clone(), current.clone())).collect::<Vec<_>>()).collect()
+}
+
+/// Whether an override puts a `ws-plain` transport in a profile. Those are made from the node's config, with a key and a host name of their own, and never written by hand.
+pub fn plain_written(edits: &serde_json::Map<String, Value>) -> bool {edits.get("transports").and_then(Value::as_array).is_some_and(|list| list.iter().any(|transport| transport["type"] == "ws-plain"))}
+
+/// The hourly rotation of the transport keys the panel makes: the first key of each `veilway` inbound (every `transport_key_days`) and of each of its `ws-plain` transports (every 7 days at most, since its proofs travel in clear). A slot holds two keys at most, so a rotation sets the node's list to the fresh key and the current one: the one that was second is destroyed and the current one lives one more period. Before that, no published profile may carry the key that is destroyed, and once the node holds the fresh key the profiles that carry the current one take the fresh one. A rotation is written before the node is asked, so one whose answer was lost is finished by a later pass, and one that stays unconfirmed for 2 days (the node's markers change when it restarts) is given up. The panel keeps no private key: the new one goes to the node and the old one is only ever a marker here.
 pub async fn rotate_keys(app: &Arc<App>, at: i64) {
 	let ctx = Ctx {actor: "system".into(), admin_id: 0, token_id: None, session_id: None, source: "upkeep".into()};
 	let _turn = app.node_lock.lock().await;
@@ -487,53 +516,61 @@ pub async fn rotate_keys(app: &Arc<App>, at: i64) {
 		let settings = app.settings();
 		let public = settings.transport_keys.get(&name).cloned().unwrap_or_default();
 		let days = if path.is_empty() {i64::from(settings.transport_key_days)} else {i64::from(settings.transport_key_days).min(7)};
-		let overlap = (2 * 86_400).max(3 * i64::from(settings.update_interval));
 		let clock = match settings.transport_clocks.get(&name).cloned() {
 			Some(clock) if clock.public == public || (!clock.next.is_empty() && clock.next == public) => clock,
 			_ => {
-				// A first key nobody here chose, so its age starts now. A rotation that is waiting for its end is left to the operator from here.
-				let fresh = TransportClock {public: public.clone(), since: at, ..TransportClock::default()};
-				let (kept, held) = (fresh.clone(), name.clone());
-				if let Err(error) = app.update_settings(move |settings| {settings.transport_clocks.insert(held, kept);}).await {tracing::warn!("transport keys of {label}: the clock was not saved: {error}")}
+				// A first key nobody here chose, so its age starts now. What the old clock knew of destroyed keys is kept, since a form may still bring them back.
+				if keys.len() == 2 {tracing::info!("transport keys of {label}: a clock starts on a slot that holds 2 keys, so the next rotation destroys the second one")}
+				let (held, old) = (name.clone(), settings.transport_clocks.get(&name).cloned().unwrap_or_default());
+				let result = app.update_settings(move |settings| {
+					let mut fresh = TransportClock {public: public.clone(), since: at, dropped: old.dropped.clone(), ..TransportClock::default()};
+					fresh.drop_keys(&[old.public.as_str(), old.previous.as_str()]);
+					fresh.dropped.retain(|gone| *gone != public);
+					settings.transport_clocks.insert(held, fresh);
+				}).await;
+				if let Err(error) = result {tracing::warn!("transport keys of {label}: the clock was not saved: {error}")}
 				continue;
 			}
 		};
-		if clock.next != public && keys.len() == 1 && clock.retire_at == 0 && at - clock.since >= days * 86_400 {
+		let mut failed = false;
+		if clock.next.is_empty() && (1..=2).contains(&keys.len()) && at - clock.since >= days * 86_400 {
 			let fresh: [u8; 32] = random();
 			let next = STANDARD.encode(veilway_proto::proof::public_key(&fresh));
-			let (intent, held) = (TransportClock {next: next.clone(), old_marker: keys[0].as_str().unwrap_or_default().to_string(), ..clock.clone()}, name.clone());
-			if let Err(error) = app.update_settings(move |settings| {settings.transport_clocks.insert(held, intent);}).await {tracing::warn!("transport keys of {label}: the rotation was not started: {error}"); continue}
+			let (held, before, marker, intent) = (name.clone(), clock.clone(), keys[0].as_str().unwrap_or_default().to_string(), next.clone());
+			let result = app.update_settings(move |settings| {
+				retarget(&mut settings.profiles, &[(before.previous.clone(), before.public.clone())]);
+				settings.transport_clocks.insert(held, TransportClock {next: intent, old_marker: marker, started: at, ..before});
+			}).await;
+			if let Err(error) = result {tracing::warn!("transport keys of {label}: the rotation was not started: {error}"); continue}
 			keys_at(&mut document, &tag, &path).map(|list| *list = json!([STANDARD.encode(fresh), keys[0]]));
-			if let Err(error) = apply(app, &ctx, document.clone(), &revision, &tag).await {tracing::warn!("transport keys of {label}: the node did not take the new key, so the profiles keep the old one and the rotation is tried again: {}", error.message); continue}
+			if let Err(error) = apply(app, &ctx, document, &revision, &tag).await {tracing::warn!("transport keys of {label}: the node did not take the new key, so the profiles keep the old one: {}", error.message); failed = true}
 		}
 		let settings = app.settings();
 		let (public, clock) = (settings.transport_keys.get(&name).cloned().unwrap_or_default(), settings.transport_clocks.get(&name).cloned().unwrap_or_default());
-		let keys = match running(app).await {Ok((_, _, mut found)) => keys_at(&mut found, &tag, &path).and_then(|list| list.as_array().cloned()).unwrap_or_default(), Err(_) => keys};
+		if clock.next.is_empty() {continue}
+		let held = running(app).await.ok().and_then(|(_, _, mut found)| keys_at(&mut found, &tag, &path).and_then(|list| list.as_array().cloned()));
 		// The node holds the old key second only when it took this rotation, also when its answer to the apply was lost.
-		let taken = !clock.next.is_empty() && (clock.next == public || (keys.len() == 2 && !clock.old_marker.is_empty() && keys[1] == clock.old_marker.as_str()));
+		let taken = clock.next == public || held.as_ref().is_some_and(|keys| keys.len() == 2 && !clock.old_marker.is_empty() && keys[1] == clock.old_marker.as_str());
 		if taken {
-			let (held, owner, route, done) = (name.clone(), tag.clone(), path.clone(), TransportClock {public: clock.next.clone(), since: at, retire_at: at + overlap, ..TransportClock::default()});
+			let (held, done) = (name.clone(), clock.clone());
 			let result = app.update_settings(move |settings| {
-				settings.transport_keys.insert(held.clone(), done.public.clone());
-				for profile in settings.profiles.iter_mut().filter(|profile| profile["type"] == "veilway" && (profile["id"] == owner.to_lowercase().as_str() || settings.relay_profiles.get(profile["id"].as_str().unwrap_or_default()) == Some(&owner))) {
-					if route.is_empty() {if profile.get("transport_public_key").is_some() {profile["transport_public_key"] = json!(done.public);}} else {for stream in profile["transports"].as_array_mut().into_iter().flatten().filter(|stream| stream["type"] == "ws-plain" && stream["path"] == route.as_str()) {stream["transport_public_key"] = json!(done.public);}}
-				}
-				settings.transport_clocks.insert(held, done);
+				retarget(&mut settings.profiles, &[(done.previous.clone(), done.next.clone()), (done.public.clone(), done.next.clone())]);
+				settings.transport_keys.insert(held.clone(), done.next.clone());
+				let mut now_first = TransportClock {public: done.next.clone(), since: at, previous: done.public.clone(), dropped: done.dropped.clone(), ..TransportClock::default()};
+				now_first.drop_keys(&[done.previous.as_str()]);
+				settings.transport_clocks.insert(held, now_first);
 			}).await;
 			if let Err(error) = result {tracing::warn!("transport keys of {label}: the node holds the new key but the profiles were not updated, this is tried again: {error}"); continue}
-			tracing::info!("transport keys of {label}: a new first key is in force and the profiles carry it, the old key is destroyed in {overlap} seconds");
-			app.db.audit(&ctx.actor, &ctx.source, "transport_key.rotate", &label, &format!("overlap {overlap} seconds")).await;
-		} else if clock.retire_at != 0 && clock.public == public {
-			if keys.len() < 2 {
-				let held = name.clone();
-				let _ = app.update_settings(move |settings| {if let Some(clock) = settings.transport_clocks.get_mut(&held) {clock.retire_at = 0}}).await;
-			} else if at >= clock.retire_at {
-				keys_at(&mut document, &tag, &path).map(|list| *list = json!([keys[0]]));
-				if let Err(error) = apply(app, &ctx, document, &revision, &tag).await {tracing::warn!("transport keys of {label}: the old key was not removed, this is tried again: {}", error.message); continue}
-				let held = name.clone();
-				let _ = app.update_settings(move |settings| {if let Some(clock) = settings.transport_clocks.get_mut(&held) {clock.retire_at = 0}}).await;
-				tracing::info!("transport keys of {label}: the old key was removed from the node's config");
-				app.db.audit(&ctx.actor, &ctx.source, "transport_key.retire", &label, "").await;
+			tracing::info!("transport keys of {label}: a new first key is in force and the profiles carry it, the old key is held one more period");
+			app.db.audit(&ctx.actor, &ctx.source, "transport_key.rotate", &label, "").await;
+		} else {
+			let expired = at - clock.started >= 2 * 86_400;
+			if !expired && !(failed && held.is_some()) {tracing::warn!("transport keys of {label}: the node's answer to the rotation is not confirmed yet, no other rotation starts until it is or 2 days pass"); continue}
+			let held = name.clone();
+			let _ = app.update_settings(move |settings| if let Some(clock) = settings.transport_clocks.get_mut(&held) {clock.next.clear(); clock.old_marker.clear(); clock.started = 0}).await;
+			if expired {
+				tracing::warn!("transport keys of {label}: a rotation stayed unconfirmed for 2 days and is given up, the next pass may start another");
+				app.db.audit(&ctx.actor, &ctx.source, "transport_key.reset", &label, "a rotation stayed unconfirmed for 2 days").await;
 			}
 		}
 	}
@@ -778,6 +815,27 @@ mod tests {
 		assert_eq!(template["refused"][0]["code"], "plain_shared");
 		assert!(template["profile"]["transports"].as_array().unwrap().iter().all(|transport| transport["type"] != "ws-plain"));
 		assert!(template["missing"].as_array().unwrap().is_empty() || template["missing"] == json!(["inbound_public_key", "transport_public_key"]), "the covered transports are not blocked by it");
+	}
+
+	#[test]
+	fn a_ws_plain_transport_shares_no_host_or_path_with_a_covered_transport_of_any_inbound() {
+		let mut document = plain_document([9u8; 32]);
+		document["inbounds"][1]["transports"].as_array_mut().unwrap().push(json!({"type": "tls", "listen": "0.0.0.0:444", "tls": {"self_signed": true, "name": "other.example.org"}, "decoy": "127.0.0.1:8443", "path": "/other-long-path-here"}));
+		let mut settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
+		remember_keys(&mut settings, &document);
+		settings.profile_overrides.insert("Main".into(), json!({PLAIN_HOST: "other.example.org"}));
+		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		assert_eq!(template["refused"][0]["code"], "plain_shared", "the host of another inbound's transport");
+		settings.profile_overrides.insert("Main".into(), json!({PLAIN_HOST: "plain.example.org"}));
+		assert_eq!(derive(&settings, &document, &[], None, &Exposure::default()).remove(0)["refused"], json!([]), "a host of its own is fine");
+		document["inbounds"][1]["transports"][1]["path"] = json!("/a-plain-long-path");
+		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		assert_eq!(template["refused"][0]["code"], "plain_shared", "the path of another inbound's transport");
+		document["inbounds"][1]["transports"][1]["path"] = json!("/other-long-path-here");
+		settings.profile_overrides.insert("Main".into(), json!({PLAIN_HOST: "plain.example.org", "transports": [{"type": "ws-plain", "path": "/by-hand", "transport_public_key": "key", "candidates": [{"address": "192.0.2.10:80", "host": "plain.example.org"}]}]}));
+		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		let plain: Vec<&Value> = template["profile"]["transports"].as_array().unwrap().iter().filter(|transport| transport["type"] == "ws-plain").collect();
+		assert_eq!((plain.len(), plain[0]["path"].clone()), (1, json!("/a-plain-long-path")), "a ws-plain written by hand never stays");
 	}
 
 	#[test]
