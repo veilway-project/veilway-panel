@@ -2633,6 +2633,21 @@ async fn the_console_lists_admins_and_resets_a_password() {
 }
 
 #[tokio::test]
+async fn the_wait_between_new_devices_is_a_setting_and_0_lets_them_come_one_after_another() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	let refused = h.call(Method::PUT, "/p/api/settings", Some(&session), Some({let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json(); settings["new_device_minutes"] = json!(1441); settings}), "10.0.0.1").await;
+	assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+	h.configure(&session, json!({"new_device_minutes": 10})).await;
+	let (_, link) = h.user(&session, "ann", json!({"device_limit": 4})).await;
+	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
+	assert!(matches!(opened(&h.fetch(&link, &kids, 1, "confirm", None).await, &[key.clone()]), Payload::Subscription(_)));
+	assert_eq!(refusal_of(&h.fetch(&link, &kids, 2, "confirm", None).await, &[key.clone()]), Reason::RateLimited);
+	h.configure(&session, json!({"new_device_minutes": 0})).await;
+	for device in [2, 3] {assert!(matches!(opened(&h.fetch(&link, &kids, device, "confirm", None).await, &[key.clone()]), Payload::Subscription(_)))}
+}
+
+#[tokio::test]
 async fn devices_that_have_not_refreshed_for_the_set_days_are_removed_and_their_places_freed() {
 	let h = Harness::new().await;
 	let session = h.login("10.0.0.1").await;

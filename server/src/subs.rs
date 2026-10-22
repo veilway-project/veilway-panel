@@ -227,7 +227,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	// A key that is some inbound's public key of this node is never a device's: the node would take the device for the node itself.
 	let node_key = settings.profiles.iter().chain(settings.profile_overrides.values()).filter_map(|profile| profile.get("inbound_public_key")?.as_str()).any(|key| STANDARD.decode(key).is_ok_and(|bytes| STANDARD.encode(bytes) == public_key));
 	let (changed, outcome) = {
-		let (handle, held, user, dirty, pool) = (app.db.clone(), app.clone(), user.clone(), app.dirty.clone(), settings.pool_v4.clone());
+		let (handle, held, user, dirty, pool, wait) = (app.db.clone(), app.clone(), user.clone(), app.dirty.clone(), settings.pool_v4.clone(), i64::from(settings.new_device_minutes) * 60);
 		match handle.call(move |db| -> rusqlite::Result<(bool, Result<Option<DeviceRow>, &'static str>)> {
 			let (keys, mut changed, tx) = (held.keys.as_ref().expect("checked before the lookup"), false, db.transaction()?);
 			changed |= tx.execute("delete from devices where user_id = ? and state = 'pending' and created < ?", params![user.id, at - PENDING_LAPSE])? > 0;
@@ -259,7 +259,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 					let limit = if user.device_limit == 0 {NODE_DEVICES_MAX} else {user.device_limit.min(NODE_DEVICES_MAX)};
 					let (address, enroll) = (allocate(&tx, &pool), op == "confirm");
 					if total >= limit || (!enroll && pending >= PENDING_PLACES) || address.is_none() {Err("device_limit")}
-					else if !held.sub_limits.hit(&format!("new:{}:{}", user.id, user.token_gen), 1, 600) {Err("rate_limited")}
+					else if wait > 0 && !held.sub_limits.hit(&format!("new:{}:{}", user.id, user.token_gen), 1, wait) {Err("rate_limited")}
 					else {
 						let secret = keys.seal_secret(&user.record_id, &format!("transport_secret:{}", public_key), &crypto::random::<32>());
 						tx.execute("insert into devices (user_id, name, public_key, secret_hash, address, transport_secret, state, token_gen, created, confirmed_at, last_seen) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![user.id, name.clone().unwrap_or_default(), public_key, hash.as_slice(), address, secret, if enroll {"enrolled"} else {"pending"}, user.token_gen, at, enroll.then_some(at), at])?;

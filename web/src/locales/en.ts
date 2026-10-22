@@ -380,6 +380,8 @@ export const en = {
 	"subs.days": "Documents stay valid for",
 	"subs.daysUnit": "days",
 	"subs.idle": "Remove devices that have not refreshed for",
+	"subs.newWait": "Wait between new devices of one account",
+	"subs.newWaitHint": "After a device is added, the account waits this long before it can add another. 0 means no wait. The device limit still applies.",
 	"subs.idleHint": "0 keeps them. This frees the places of apps that were uninstalled or phones that were lost. Devices whose key the panel made are kept.",
 	"subs.minutesUnit": "minutes",
 	"subs.once": "Show links once",

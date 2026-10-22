@@ -2174,6 +2174,13 @@
             "readOnly": true,
             "type": "object"
           },
+          "new_device_minutes": {
+            "default": 10,
+            "description": "Minutes an account waits after adding a device before it may add another, which slows down a leaked link. 0 lets devices be added one after another; the device limit still holds.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "node_host": {
             "default": "",
             "description": "The public host or address of this node, which the profiles' endpoints are made with.",

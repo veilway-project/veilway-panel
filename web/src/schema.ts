@@ -2072,6 +2072,12 @@ export interface components {
                 [key: string]: string;
             };
             /**
+             * Format: uint32
+             * @description Minutes an account waits after adding a device before it may add another, which slows down a leaked link. 0 lets devices be added one after another; the device limit still holds.
+             * @default 10
+             */
+            new_device_minutes: number;
+            /**
              * @description The public host or address of this node, which the profiles' endpoints are made with.
              * @default
              */
