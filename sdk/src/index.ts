@@ -126,6 +126,8 @@ export class Client {
 
 	/** Whether a newer panel or node is out. */
 	getUpdate(): Promise<UpdateInfo> {return this.json("GET", "/update")}
+	/** Checks GitHub for newer releases now, at most once a minute, and answers as `getUpdate`. */
+	checkUpdates(): Promise<UpdateInfo> {return this.json("POST", "/update/check")}
 
 	/** The profiles the panel makes from the node's inbounds, before overrides. */
 	derivedProfiles(): Promise<unknown> {return this.json("GET", "/profiles/derived")}

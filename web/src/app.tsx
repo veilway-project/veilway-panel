@@ -184,6 +184,7 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 function UpdateBanner() {
 	const {t} = useP(), guard = useGuard(), info = useLoad(() => api("get", "/update"), []), [asked, setAsked] = useState<Part | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null);
 	const data = info.data, from = data?.current, nodeFrom = data?.node_current, start = useLoad(() => api("get", "/status"), []), startId = start.data?.start_id;
+	useEffect(() => { const again = () => info.reload(); window.addEventListener("veilway:update", again); return () => window.removeEventListener("veilway:update", again); }, [info.reload]);
 	const panelBusy = asked === "panel" || asked === "both" || !!data?.updating, nodeBusy = asked === "node" || asked === "both" || !!data?.node_updating, updating = panelBusy || nodeBusy;
 	useEffect(() => {
 		if (!updating || !from || !startId) return;

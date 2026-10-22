@@ -156,22 +156,30 @@ fn record(slot: &mut Option<Found>, name: &str, answer: Result<Option<Found>, St
 	}
 }
 
-/// One check of each repository, at start and every six hours. A failure is logged and tried again in half an hour, and the last good answer stays until then.
+/// One check of each repository. Says whether both answered; the last good answer stays for one that did not.
+async fn check_once(app: &App) -> bool {
+	let (panel, node) = (fetch(PANEL_PATH).await.and_then(|body| release(&body, PANEL_NOTES)), fetch(NODE_PATH).await.and_then(|body| release(&body, NODE_NOTES)));
+	let failed = panel.is_err() || node.is_err();
+	let mut state = app.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+	record(&mut state.found, "panel", panel);
+	record(&mut state.node_found, "node", node);
+	if !failed {state.checked_at = Some(now())}
+	!failed
+}
+
+/// A check at start and every six hours. A failure is logged and tried again in half an hour.
 pub fn spawn_checks(app: Arc<App>) {
 	if !app.cfg.update_check {return}
-	tokio::spawn(async move {
-		loop {
-			let (panel, node) = (fetch(PANEL_PATH).await.and_then(|body| release(&body, PANEL_NOTES)), fetch(NODE_PATH).await.and_then(|body| release(&body, NODE_NOTES)));
-			let failed = panel.is_err() || node.is_err();
-			{
-				let mut state = app.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-				record(&mut state.found, "panel", panel);
-				record(&mut state.node_found, "node", node);
-				if !failed {state.checked_at = Some(now())}
-			}
-			tokio::time::sleep(if failed {RETRY} else {EVERY}).await;
-		}
-	});
+	tokio::spawn(async move {loop {let done = check_once(&app).await; tokio::time::sleep(if done {EVERY} else {RETRY}).await;}});
+}
+
+/// The operator's "Check for updates": one check now, at most once a minute, then the same answer as `info`.
+pub async fn check(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {
+	if !app.cfg.update_check {return Err(Failure::conflict("Update checks are off in panel.json (update_check)."))}
+	if !app.limits.hit("update-check", 1, 60) {return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Checked a moment ago. Try again in a minute."))}
+	if !check_once(&app).await {return Err(Failure::new(StatusCode::BAD_GATEWAY, "check_failed", "GitHub could not be reached. The last check's answer stays."))}
+	app.db.audit(&ctx.actor, &ctx.source, "update.check", "", "").await;
+	info(State(app)).await
 }
 
 #[derive(Serialize, JsonSchema)]
