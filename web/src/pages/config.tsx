@@ -2,7 +2,7 @@ import {Banner, Button, Checkbox, DataTable, Dialog, Field, Glass, Icon, IconBut
 import {useEffect, useState} from "react";
 import {api, ApiError, type Diff, type Report, type Running} from "../api.ts";
 import {check, type Issue, type Schema} from "../check.ts";
-import {dnsName, ErrorNote, Issues, lines, LinesField, Mark, moved, PageHead, useGuard, useLoad, useP, useReorder, useSay} from "../kit.tsx";
+import {Copyable, dnsName, ErrorNote, Issues, lines, LinesField, Mark, moved, PageHead, useGuard, useLoad, useP, useReorder, useSay} from "../kit.tsx";
 import type {PanelKey} from "../locales/en.ts";
 import {drawPreset, presetOf, ShapeFields, shapeProblems} from "../shape.tsx";
 import {XrayForm, XraySheet} from "./xray.tsx";
@@ -223,6 +223,22 @@ const newKey = (clamped: boolean) => { const key = crypto.getRandomValues(new Ui
 
 const toRow = (tr: Item, at: number): Row => { const tls = (tr.tls ?? {}) as Item, site = (tr.site ?? {}) as Item, shape = (tr.shape ?? {}) as Item; return {limits: {...((tr.limits ?? {}) as Record<string, number>)}, proxyProtocol: ((tr.decoy ?? {}) as Item).proxy_protocol === true, http2: tr.http2 === "on", type: str(tr.type), listen: str(tr.listen), path: str(tr.path), at, cert: tls.cert !== undefined ? "files" : "self", name: str(tls.name), certFile: str(tls.cert), keyFile: str(tls.key), origin: str(((tr.decoy ?? {}) as Item).origin), proxies: Array.isArray(tr.trusted_proxies) && tr.trusted_proxies.length ? tr.trusted_proxies as string[] : [""], header: str(tr.client_address_header), preset: presetOf(shape), shape, siteHost: str(site.host), siteNames: Array.isArray(site.names) ? site.names.map(str) : [], sitePort: typeof site.port === "number" ? site.port : "", siteAddress: str(site.address), acknowledged: site.acknowledged === true, siteKey: str(tr.transport_key), keys: Array.isArray(tr.transport_keys) ? tr.transport_keys.map(str) : []}; };
 
+// The lines a transport behind the operator's web server needs in its site file. handle, never handle_path: the node wants the path kept.
+function WebLines({row}: {row: Row}) {
+	const {t} = useP(), listen = row.listen.trim().replace(/^0\.0\.0\.0:/, "127.0.0.1:").replace(/^\[::\]:/, "[::1]:"), path = row.path.trim(), proxies = row.proxies.map(proxy => proxy.trim()).filter(Boolean), fronted = row.type !== "ws";
+	const caddy = `handle ${path}* {\n\treverse_proxy ${listen}\n}`, nginx = `location ${path} {\n\tproxy_pass http://${listen};\n\tproxy_http_version 1.1;\n\tproxy_set_header Upgrade $http_upgrade;\n\tproxy_set_header Connection "upgrade";\n\tproxy_set_header Host $host;\n\tproxy_set_header X-Forwarded-For $remote_addr;${fronted ? "\n\tproxy_buffering off;\n\tproxy_read_timeout 1h;" : ""}\n}`;
+	return <details className="p-details p-wide" open>
+		<summary>{t("web.title")}</summary>
+		<p className="vw-muted vw-small">{t("web.lead")}</p>
+		<Copyable label={t("web.caddy")} value={caddy} multiline/>
+		<Copyable label={t("web.nginx")} value={nginx} multiline/>
+		<p className="vw-muted vw-small">{t("web.where")}</p>
+		<p className="vw-muted vw-small">{t("web.decoy")}</p>
+		{!loopback(listen) && <Mark tone="warning">{t("web.warnListen")}</Mark>}
+		{proxies.length > 0 && !proxies.some(proxy => loopback(proxy)) && <Mark tone="warning">{t("web.warnProxy")}</Mark>}
+	</details>;
+}
+
 // The checks the node's validator runs on a tls, ws or fronted transport of a veilway inbound, so a mistake shows at its field before the review. Errors stop the review; warnings repeat the node's own.
 function streamProblems(row: Row, rows: Row[]) {
 	const errors: StreamErrors = {}, warnings: PanelKey[] = [], proxies = row.proxies.map(proxy => proxy.trim()).filter(Boolean), host = row.listen.trim().slice(0, row.listen.trim().lastIndexOf(":")), origin = row.origin.trim().replace(/^http:\/\//, "").replace(/\/$/, "").replace(/:\d+$/, "");
@@ -406,6 +422,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 									{row.keys.length > 1 && <p className="vw-muted vw-small">{t("stream.keyRotating")}</p>}
 									<p className="vw-muted vw-small">{t("stream.plainCookie")}</p>
 								</>}
+								{["ws", "fronted", "fronted-shaped"].includes(row.type) && !problem.errors.path && /^(\[[0-9A-Fa-f:.]+\]|[0-9A-Za-z.-]+):[1-9][0-9]{0,4}$/.test(row.listen.trim()) && <WebLines row={row}/>}
 								{problem.warnings.map(key => <Mark key={key} tone="warning">{t(key)}</Mark>)}
 							</div>}
 							{veilway && POOLS[row.type] && <details className="p-details p-wide" open={(POOLS[row.type] ?? []).some(key => outside(row, key)) || undefined}>
