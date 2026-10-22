@@ -2152,6 +2152,19 @@ export interface components {
              */
             terms_url: string;
             /**
+             * @description When the first transport key of each `veilway` inbound became first, and where its rotation stands. Owned by the server: read-only in the API.
+             * @default {}
+             */
+            readonly transport_clocks: {
+                [key: string]: components["schemas"]["TransportClock"];
+            };
+            /**
+             * Format: uint32
+             * @description Days the first transport key of a `veilway` inbound stays first before the panel makes a new one, 7 to 30. The old key keeps working for two days or three refresh intervals, whichever is longer, and is then destroyed.
+             * @default 30
+             */
+            transport_key_days: number;
+            /**
              * @description The public half of the first transport key of each `veilway` inbound, by inbound tag, which its profile carries as `transport_public_key` for its `tls`, `ws` and `fronted` transports. Made the same way as `inbound_keys`.
              * @default {}
              */
@@ -2263,6 +2276,36 @@ export interface components {
             otpauth: string;
             /** @description Base32, for an authenticator app. Shown once, whatever two-step sign-in is set to. */
             totp_secret: string;
+        };
+        /** @description Where the rotation of one inbound's transport key stands. */
+        TransportClock: {
+            /**
+             * @description The public half of the key a rotation is putting in force, written before the node is asked so that a rotation the node took is finished later.
+             * @default
+             */
+            next: string;
+            /**
+             * @description The node's marker of the key that was first when a rotation began. When the node took the rotation but its answer was lost, it holds that marker second, which tells the next pass to finish the rotation.
+             * @default
+             */
+            old_marker: string;
+            /**
+             * @description The public half of the first key when the clock started. A first key that differs was changed by hand, which restarts the clock.
+             * @default
+             */
+            public: string;
+            /**
+             * Format: int64
+             * @description Unix time the previous key is destroyed, or 0 when none waits.
+             * @default 0
+             */
+            retire_at: number;
+            /**
+             * Format: int64
+             * @description Unix time the key became first.
+             * @default 0
+             */
+            since: number;
         };
         UpdateInfo: {
             /** @description Whether the folder for update requests exists, which a host installed or updated by `veilway.sh` has. */

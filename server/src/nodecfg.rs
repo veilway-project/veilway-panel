@@ -1,5 +1,5 @@
 //! The node's config through its control API: the schema, the document as a whole and by section, dry runs, the one path that applies a change, and the profile templates derived from the inbounds.
-use crate::{app::{store_settings, App, Settings}, auth::reauthed, crypto::now, http::{json, ok, Body, Ctx, Failure}, node, subs::UserRow, users::name_ok, xray::{self, addresses, Exposure}};
+use crate::{app::{store_settings, App, Settings, TransportClock}, auth::reauthed, crypto::{now, random}, http::{json, ok, Body, Ctx, Failure}, node, subs::UserRow, users::name_ok, xray::{self, addresses, Exposure}};
 use axum::{extract::{Path, State}, http::{header::CONTENT_TYPE, HeaderValue, StatusCode}, response::{IntoResponse, Response}, Extension};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::Connection;
@@ -429,6 +429,68 @@ pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Exten
 	}).await.map_err(Failure::internal)?;
 	app.db.audit(&ctx.actor, &ctx.source, "settings.update", "settings", &format!("profiles changed at {}", now())).await;
 	ok(&json!({"profiles": app.settings().profiles}))
+}
+
+/// The hourly rotation of the first transport key of each `veilway` inbound. A key older than `transport_key_days` is joined by a new first one, the published profiles of the inbound take the new public half, and after the overlap the old key is dropped from the node's config. Every step is retried by the next pass, and a profile is changed only after the node holds the key it names. The panel keeps no private key: the new one goes to the node and the old one is only ever a marker here.
+pub async fn rotate_keys(app: &Arc<App>, at: i64) {
+	let ctx = Ctx {actor: "system".into(), admin_id: 0, token_id: None, session_id: None, source: "upkeep".into()};
+	let _turn = app.node_lock.lock().await;
+	let (_, _, listed) = match running(app).await {Ok(found) => found, Err(error) => {tracing::warn!("transport keys: the node's config could not be read, so no key was checked: {}", error.message); return}};
+	let tags: Vec<String> = listed["inbounds"].as_array().into_iter().flatten().filter(|inbound| inbound["type"] == "veilway" && inbound["transport_keys"].as_array().is_some_and(|keys| !keys.is_empty())).filter_map(|inbound| inbound["tag"].as_str().map(str::to_string)).collect();
+	for tag in tags {
+		let (revision, _, mut document) = match running(app).await {Ok(found) => found, Err(error) => {tracing::warn!("transport keys: the node's config could not be read again: {}", error.message); return}};
+		let Some(inbound) = document["inbounds"].as_array_mut().and_then(|list| list.iter_mut().find(|inbound| inbound["tag"] == tag.as_str())) else {continue};
+		let keys = inbound["transport_keys"].as_array().cloned().unwrap_or_default();
+		let settings = app.settings();
+		let public = settings.transport_keys.get(&tag).cloned().unwrap_or_default();
+		let overlap = (2 * 86_400).max(3 * i64::from(settings.update_interval));
+		let clock = match settings.transport_clocks.get(&tag).cloned() {
+			Some(clock) if clock.public == public || (!clock.next.is_empty() && clock.next == public) => clock,
+			_ => {
+				// A first key nobody here chose, so its age starts now. A rotation that is waiting for its end is left to the operator from here.
+				let fresh = TransportClock {public: public.clone(), since: at, ..TransportClock::default()};
+				let (kept, name) = (fresh.clone(), tag.clone());
+				if let Err(error) = app.update_settings(move |settings| {settings.transport_clocks.insert(name, kept);}).await {tracing::warn!("transport keys of {tag}: the clock was not saved: {error}")}
+				continue;
+			}
+		};
+		if clock.next != public && keys.len() == 1 && clock.retire_at == 0 && at - clock.since >= i64::from(settings.transport_key_days) * 86_400 {
+			let fresh: [u8; 32] = random();
+			let next = STANDARD.encode(veilway_proto::proof::public_key(&fresh));
+			let (intent, name) = (TransportClock {next: next.clone(), old_marker: keys[0].as_str().unwrap_or_default().to_string(), ..clock.clone()}, tag.clone());
+			if let Err(error) = app.update_settings(move |settings| {settings.transport_clocks.insert(name, intent);}).await {tracing::warn!("transport keys of {tag}: the rotation was not started: {error}"); continue}
+			document["inbounds"].as_array_mut().and_then(|list| list.iter_mut().find(|inbound| inbound["tag"] == tag.as_str())).map(|inbound| inbound["transport_keys"] = json!([STANDARD.encode(fresh), keys[0]]));
+			if let Err(error) = apply(app, &ctx, document.clone(), &revision, &tag).await {tracing::warn!("transport keys of {tag}: the node did not take the new key, so the profiles keep the old one and the rotation is tried again: {}", error.message); continue}
+		}
+		let settings = app.settings();
+		let (public, clock) = (settings.transport_keys.get(&tag).cloned().unwrap_or_default(), settings.transport_clocks.get(&tag).cloned().unwrap_or_default());
+		let keys = match running(app).await {Ok((_, _, found)) => found["inbounds"].as_array().and_then(|list| list.iter().find(|inbound| inbound["tag"] == tag.as_str())).and_then(|inbound| inbound["transport_keys"].as_array().cloned()).unwrap_or_default(), Err(_) => keys};
+		// The node holds the old key second only when it took this rotation, also when its answer to the apply was lost.
+		let taken = !clock.next.is_empty() && (clock.next == public || (keys.len() == 2 && !clock.old_marker.is_empty() && keys[1] == clock.old_marker.as_str()));
+		if taken {
+			let (name, done) = (tag.clone(), TransportClock {public: clock.next.clone(), since: at, retire_at: at + overlap, ..TransportClock::default()});
+			let result = app.update_settings(move |settings| {
+				settings.transport_keys.insert(name.clone(), done.public.clone());
+				for profile in settings.profiles.iter_mut().filter(|profile| profile["type"] == "veilway" && profile.get("transport_public_key").is_some() && (profile["id"] == name.to_lowercase().as_str() || settings.relay_profiles.get(profile["id"].as_str().unwrap_or_default()) == Some(&name))) {profile["transport_public_key"] = json!(done.public);}
+				settings.transport_clocks.insert(name, done);
+			}).await;
+			if let Err(error) = result {tracing::warn!("transport keys of {tag}: the node holds the new key but the profiles were not updated, this is tried again: {error}"); continue}
+			tracing::info!("transport keys of {tag}: a new first key is in force and the profiles carry it, the old key is destroyed in {overlap} seconds");
+			app.db.audit(&ctx.actor, &ctx.source, "transport_key.rotate", &tag, &format!("overlap {overlap} seconds")).await;
+		} else if clock.retire_at != 0 && clock.public == public {
+			if keys.len() < 2 {
+				let name = tag.clone();
+				let _ = app.update_settings(move |settings| {if let Some(clock) = settings.transport_clocks.get_mut(&name) {clock.retire_at = 0}}).await;
+			} else if at >= clock.retire_at {
+				document["inbounds"].as_array_mut().and_then(|list| list.iter_mut().find(|inbound| inbound["tag"] == tag.as_str())).map(|inbound| inbound["transport_keys"] = json!([keys[0]]));
+				if let Err(error) = apply(app, &ctx, document, &revision, &tag).await {tracing::warn!("transport keys of {tag}: the old key was not removed, this is tried again: {}", error.message); continue}
+				let name = tag.clone();
+				let _ = app.update_settings(move |settings| {if let Some(clock) = settings.transport_clocks.get_mut(&name) {clock.retire_at = 0}}).await;
+				tracing::info!("transport keys of {tag}: the old key was removed from the node's config");
+				app.db.audit(&ctx.actor, &ctx.source, "transport_key.retire", &tag, "").await;
+			}
+		}
+	}
 }
 
 #[cfg(test)]

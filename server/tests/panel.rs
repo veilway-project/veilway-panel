@@ -2,7 +2,7 @@ use axum::{body::Body, extract::{ConnectInfo, State}, http::{header::{CONTENT_TY
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use std::{future::Future, net::SocketAddr, path::PathBuf, sync::{atomic::Ordering, Arc, Mutex}};
+use std::{future::Future, net::SocketAddr, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}};
 use tower::ServiceExt;
 use veilway_panel::{admin, app::{bucket, App, Limiter, Signing}, build, config::{Config, TrustedMirror}, crypto, mirrors, openapi, router, upkeep_once, Upkeep};
 use veilway_proto::subscription::{envelope::{self, Kid}, exchange::{self, GatewayKey}, link::Link, payload::{self, Payload, Reason}, sealed_file, BODY_MAX};
@@ -647,14 +647,14 @@ fn signing_keys_must_be_private() {
 }
 
 /// A node that keeps one config and answers the way the real control API does: a revision per applied change, If-Match, validate and diff, and the stats routes.
-struct Fake {document: Mutex<Value>, generation: Mutex<u64>, status: Mutex<Value>, stats: Mutex<Value>, sessions: Mutex<Value>, applied: Mutex<Vec<Value>>, dir: PathBuf}
+struct Fake {document: Mutex<Value>, generation: Mutex<u64>, status: Mutex<Value>, stats: Mutex<Value>, sessions: Mutex<Value>, applied: Mutex<Vec<Value>>, refuse: AtomicBool, lose: AtomicBool, dir: PathBuf}
 
 impl Fake {
 	async fn start(document: Value) -> (Arc<Fake>, PathBuf) {
 		let dir = std::env::temp_dir().join(format!("vwfake-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
 		std::fs::create_dir_all(&dir).unwrap();
 		let socket = dir.join("control.sock");
-		let fake = Arc::new(Fake {document: Mutex::new(document), generation: Mutex::new(1), status: Mutex::new(json!({"version": "0.0.0", "uptime_secs": 5, "generation": 1})), stats: Mutex::new(json!({})), sessions: Mutex::new(json!({"sessions": []})), applied: Mutex::new(Vec::new()), dir});
+		let fake = Arc::new(Fake {document: Mutex::new(document), generation: Mutex::new(1), status: Mutex::new(json!({"version": "0.0.0", "uptime_secs": 5, "generation": 1})), stats: Mutex::new(json!({})), sessions: Mutex::new(json!({"sessions": []})), applied: Mutex::new(Vec::new()), refuse: AtomicBool::new(false), lose: AtomicBool::new(false), dir});
 		let node = Router::new()
 			.route("/v1/config", get(|State(fake): State<Arc<Fake>>| async move {
 				let generation = *fake.generation.lock().unwrap();
@@ -662,9 +662,20 @@ impl Fake {
 			}).put(|State(fake): State<Arc<Fake>>, headers: HeaderMap, Json(document): Json<Value>| async move {
 				let mut generation = fake.generation.lock().unwrap();
 				if headers.get("if-match").unwrap() != &format!("\"rev{generation}\"") {return (StatusCode::CONFLICT, Json(json!({"error": {"code": "stale"}})))}
+				if fake.refuse.load(Ordering::Relaxed) {return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": {"code": "refused"}})))}
+				let mut document = document;
+				let held = fake.document.lock().unwrap().clone();
+				for inbound in document["inbounds"].as_array_mut().into_iter().flatten() {
+					let was: Vec<Value> = held["inbounds"].as_array().into_iter().flatten().find(|was| was["tag"] == inbound["tag"]).and_then(|was| was["transport_keys"].as_array().cloned()).unwrap_or_default();
+					for key in inbound["transport_keys"].as_array_mut().into_iter().flatten().filter(|key| key.as_str().is_some_and(|key| key.starts_with("<redacted"))) {
+						*key = was.iter().find(|kept| marked(kept) == *key).cloned().unwrap_or(Value::Null);
+					}
+				}
 				*generation += 1;
 				fake.applied.lock().unwrap().push(document.clone());
 				*fake.document.lock().unwrap() = document;
+				// The node took the change and its answer never arrives.
+				if fake.lose.load(Ordering::Relaxed) {return (StatusCode::BAD_GATEWAY, Json(json!({"error": {"code": "lost"}})))}
 				(StatusCode::OK, Json(json!({"revision": format!("rev{generation}"), "generation": *generation, "saved": true, "diff": {}, "report": {}})))
 			}))
 			.route("/v1/config/validate", post(|Json(document): Json<Value>| async move {Json(json!({"valid": document.get("invalid").is_none(), "report": {"errors": [], "warnings": []}}))}))
@@ -686,9 +697,13 @@ impl Drop for Fake {
 	fn drop(&mut self) {let _ = std::fs::remove_dir_all(&self.dir);}
 }
 
+/// The marker the fake node shows for a transport key: the first bytes of the key.
+fn marked(key: &Value) -> Value {json!(format!("<redacted:{}>", STANDARD.decode(key.as_str().unwrap_or_default()).unwrap_or_default().iter().take(4).map(|byte| format!("{byte:02x}")).collect::<String>()))}
+
 /// What the node shows of a document: the key of a borrowed-site transport only as a marker made of its first bytes, as the real node shows every secret once it holds it.
 fn redacted(mut document: Value) -> Value {
 	for inbound in document["inbounds"].as_array_mut().into_iter().flatten() {
+		for key in inbound["transport_keys"].as_array_mut().into_iter().flatten() {*key = marked(key);}
 		for transport in inbound["transports"].as_array_mut().into_iter().flatten().filter(|transport| transport["type"] == "faketls") {
 			if let Some(bytes) = transport["transport_key"].as_str().filter(|key| !key.starts_with("<redacted")).and_then(|key| STANDARD.decode(key).ok()) {transport["transport_key"] = json!(format!("<redacted:{}>", bytes.iter().take(4).map(|byte| format!("{byte:02x}")).collect::<String>()))}
 		}
@@ -2676,4 +2691,84 @@ async fn devices_that_have_not_refreshed_for_the_set_days_are_removed_and_their_
 	let devices = h.call(Method::GET, &format!("/p/api/users/{id}/devices"), Some(&session), None, "10.0.0.1").await.json();
 	assert_eq!(devices["devices"].as_array().unwrap().iter().map(|device| device["public_key"].as_str().unwrap().to_owned()).collect::<Vec<_>>(), [STANDARD.encode([2u8; 32])]);
 	assert!(matches!(opened(&h.fetch(&link, &kids, 3, "confirm", None).await, &[key]), Payload::Subscription(_)));
+}
+
+fn rotating_inbound(key: &str) -> Value {json!([{"tag": "Main", "type": "veilway", "private_key": "<redacted>", "address": ["10.66.0.1/24"], "transport_keys": [key], "transports": [{"type": "udp", "listen": "0.0.0.0:51820"}, {"type": "tls", "listen": "0.0.0.0:443", "tls": {"self_signed": true, "name": "node.example.org"}, "decoy": "127.0.0.1:8443", "path": "/a-long-enough-path"}]}])}
+
+async fn published_transport_key(h: &Harness) -> String {h.app.settings().profiles.iter().find(|profile| profile["id"] == "main").unwrap()["transport_public_key"].as_str().unwrap().to_string()}
+
+fn node_keys(fake: &Fake) -> Vec<String> {fake.document.lock().unwrap()["inbounds"][0]["transport_keys"].as_array().unwrap().iter().map(|key| key.as_str().unwrap().to_string()).collect()}
+
+#[tokio::test]
+async fn a_transport_key_is_rotated_when_it_is_old_and_retired_after_the_overlap() {
+	let (fake, h, session) = borrowed_node().await;
+	let old = STANDARD.encode([5u8; 32]);
+	let public = |key: &str| STANDARD.encode(veilway_proto::proof::public_key(&<[u8; 32]>::try_from(STANDARD.decode(key).unwrap()).unwrap()));
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32])}})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(put_inbounds(&h, &session, 1, rotating_inbound(&old)).await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	let first = published_transport_key(&h).await;
+	assert_eq!(first, public(&old));
+	let pass = || async {upkeep_once(&h.app, &mut Upkeep::default()).await};
+	let age = |days: i64| {let days = days * 86_400; h.app.update_settings(move |settings| for clock in settings.transport_clocks.values_mut() {clock.since = crypto::now() - days})};
+	pass().await;
+	assert_eq!(h.app.settings().transport_clocks["Main"].public, first, "an inbound seen for the first time starts its clock now");
+	age(29).await.unwrap();
+	pass().await;
+	assert_eq!((node_keys(&fake), published_transport_key(&h).await), (vec![old.clone()], first.clone()), "nothing before the age");
+	age(31).await.unwrap();
+	fake.refuse.store(true, Ordering::Relaxed);
+	pass().await;
+	assert_eq!((node_keys(&fake), published_transport_key(&h).await, h.app.settings().transport_keys["Main"].clone()), (vec![old.clone()], first.clone(), first.clone()), "a refused apply changes nothing the apps or the panel go by");
+	fake.refuse.store(false, Ordering::Relaxed);
+	pass().await;
+	let keys = node_keys(&fake);
+	assert_eq!((keys.len(), keys[1].clone()), (2, old.clone()), "the new key first, the old one still held");
+	let fresh = published_transport_key(&h).await;
+	assert_eq!((fresh.clone(), h.app.settings().transport_keys["Main"].clone()), (public(&keys[0]), public(&keys[0])), "the published profile carries the new public key");
+	assert_ne!(fresh, first);
+	let clock = h.app.settings().transport_clocks["Main"].clone();
+	assert_eq!((clock.public, clock.next, clock.retire_at - crypto::now() > 86_000), (fresh.clone(), String::new(), true));
+	pass().await;
+	assert_eq!(node_keys(&fake).len(), 2, "the overlap has not ended");
+	h.app.update_settings(|settings| settings.transport_clocks.get_mut("Main").unwrap().retire_at = crypto::now() - 1).await.unwrap();
+	pass().await;
+	assert_eq!(node_keys(&fake), vec![keys[0].clone()], "the old key is gone from the node");
+	assert_eq!(published_transport_key(&h).await, fresh);
+	// A rotation whose answer was lost: the node holds the new key first and the old one second, and the next pass finishes it.
+	age(31).await.unwrap();
+	fake.lose.store(true, Ordering::Relaxed);
+	pass().await;
+	fake.lose.store(false, Ordering::Relaxed);
+	let lost = node_keys(&fake);
+	assert_eq!((lost.len(), lost[1].clone(), published_transport_key(&h).await), (2, keys[0].clone(), fresh.clone()), "the node took it, the apps still get the key the node also holds");
+	pass().await;
+	assert_eq!((published_transport_key(&h).await, h.app.settings().transport_keys["Main"].clone()), (public(&lost[0]), public(&lost[0])), "the next pass finishes the rotation");
+	h.app.update_settings(|settings| settings.transport_clocks.get_mut("Main").unwrap().retire_at = crypto::now() - 1).await.unwrap();
+	pass().await;
+	assert_eq!(node_keys(&fake), vec![lost[0].clone()]);
+	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await.json().to_string();
+	assert!(audit.contains("transport_key.rotate") && audit.contains("transport_key.retire"));
+	assert!(!audit.contains(&keys[0]) && !audit.contains(&old), "no key material in the audit log");
+	let generation = *fake.generation.lock().unwrap() as u32;
+	assert_eq!(put_inbounds(&h, &session, generation, rotating_inbound(&STANDARD.encode([9u8; 32]))).await.status, StatusCode::OK);
+	pass().await;
+	let clock = h.app.settings().transport_clocks["Main"].clone();
+	assert_eq!((clock.public, crypto::now() - clock.since < 60), (public(&STANDARD.encode([9u8; 32])), true), "a first key changed by hand restarts the clock");
+}
+
+#[tokio::test]
+async fn transport_key_days_is_seven_to_thirty() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(settings["transport_key_days"], json!(30));
+	for (days, status) in [(6, StatusCode::BAD_REQUEST), (31, StatusCode::BAD_REQUEST), (7, StatusCode::OK), (30, StatusCode::OK)] {
+		settings["transport_key_days"] = json!(days);
+		let mut body = settings.clone();
+		body["provider_name"] = json!("Test Net");
+		body["endpoints"] = json!([{"name": "main", "url": "https://panel.example.org/s", "pins": []}]);
+		body["default_endpoint"] = json!("main");
+		assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(body), "10.0.0.1").await.status, status, "{days}");
+	}
 }

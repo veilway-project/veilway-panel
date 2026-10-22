@@ -95,6 +95,9 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 						<NumberField label={t("subs.idle")} hint={t("subs.idleHint")} unit={t("subs.daysUnit")} min={0} max={365} value={draft.idle_device_days ?? 0} onChange={value => patch({idle_device_days: value === "" ? 0 : value})}/>
 						<NumberField label={t("subs.newWait")} hint={t("subs.newWaitHint")} unit={t("subs.minutesUnit")} min={0} max={1440} value={draft.new_device_minutes ?? 1} onChange={value => patch({new_device_minutes: value === "" ? 1 : value})}/>
 					</div>
+					<div className="p-pair">
+						<NumberField label={t("subs.keyDays")} hint={t("subs.keyDaysHint")} unit={t("subs.daysUnit")} min={7} max={30} value={draft.transport_key_days ?? 30} onChange={value => patch({transport_key_days: value === "" ? 30 : value})}/>
+					</div>
 				</div>
 			</section>
 			<section className="p-section" id="set-new-users">

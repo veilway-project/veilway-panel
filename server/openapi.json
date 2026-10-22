@@ -2278,6 +2278,22 @@
             "description": "The provider's own terms and privacy policy, put in every document as its `agreement`, which the apps ask users to accept. An `https` URL, or empty for none.",
             "type": "string"
           },
+          "transport_clocks": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/TransportClock"
+            },
+            "default": {},
+            "description": "When the first transport key of each `veilway` inbound became first, and where its rotation stands. Owned by the server: read-only in the API.",
+            "readOnly": true,
+            "type": "object"
+          },
+          "transport_key_days": {
+            "default": 30,
+            "description": "Days the first transport key of a `veilway` inbound stays first before the panel makes a new one, 7 to 30. The old key keeps working for two days or three refresh intervals, whichever is longer, and is then destroyed.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "transport_keys": {
             "additionalProperties": {
               "type": "string"
@@ -2601,6 +2617,40 @@
           "totp_secret",
           "otpauth"
         ],
+        "type": "object"
+      },
+      "TransportClock": {
+        "additionalProperties": false,
+        "description": "Where the rotation of one inbound's transport key stands.",
+        "properties": {
+          "next": {
+            "default": "",
+            "description": "The public half of the key a rotation is putting in force, written before the node is asked so that a rotation the node took is finished later.",
+            "type": "string"
+          },
+          "old_marker": {
+            "default": "",
+            "description": "The node's marker of the key that was first when a rotation began. When the node took the rotation but its answer was lost, it holds that marker second, which tells the next pass to finish the rotation.",
+            "type": "string"
+          },
+          "public": {
+            "default": "",
+            "description": "The public half of the first key when the clock started. A first key that differs was changed by hand, which restarts the clock.",
+            "type": "string"
+          },
+          "retire_at": {
+            "default": 0,
+            "description": "Unix time the previous key is destroyed, or 0 when none waits.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "since": {
+            "default": 0,
+            "description": "Unix time the key became first.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
         "type": "object"
       },
       "UpdateInfo": {

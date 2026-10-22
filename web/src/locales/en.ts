@@ -382,6 +382,8 @@ export const en = {
 	"subs.idle": "Remove devices that have not refreshed for",
 	"subs.newWait": "Wait between new devices of one account",
 	"subs.newWaitHint": "After a device is added, the account waits this long before it can add another. 0 means no wait. The device limit still applies.",
+	"subs.keyDays": "Rotate transport keys every",
+	"subs.keyDaysHint": "The panel makes a new transport key for each inbound after this many days and puts it in the published profiles. The old key keeps working for two days or three refresh intervals, then it is destroyed.",
 	"subs.idleHint": "0 keeps them. This frees the places of apps that were uninstalled or phones that were lost. Devices whose key the panel made are kept.",
 	"subs.minutesUnit": "minutes",
 	"subs.once": "Show links once",

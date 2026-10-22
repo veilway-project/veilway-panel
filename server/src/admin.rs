@@ -496,6 +496,7 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 	// An app refreshes once every `update_interval` at best, so a limit shorter than three of them would take devices that are in use.
 	if input.idle_device_days > 365 || (input.idle_device_days > 0 && i64::from(input.idle_device_days) * 86_400 < 3 * i64::from(input.update_interval)) {return Err(Failure::bad("idle_device_days is 0, or 1 to 365 and at least three refresh intervals."))}
 	if input.new_device_minutes > 1440 {return Err(Failure::bad("new_device_minutes is 0 to 1440."))}
+	if !(7..=30).contains(&input.transport_key_days) {return Err(Failure::bad("transport_key_days is 7 to 30."))}
 	if input.profiles.len() > 64 || input.profiles.iter().any(|profile| !profile.is_object() || profile.get("device").is_some()) || input.refresh_mirrors.len() > 4 {return Err(Failure::bad("profiles are at most 64 objects without a device, and refresh_mirrors at most 4."))}
 	crate::statics::check(&input).map_err(Failure::bad)?;
 	if let Some(page) = &input.not_found {
@@ -510,6 +511,7 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 		saved.faketls_keys = before.faketls_keys.clone();
 		saved.inbound_keys = before.inbound_keys.clone();
 		saved.transport_keys = before.transport_keys.clone();
+		saved.transport_clocks = before.transport_clocks.clone();
 		crate::endpoints::in_use(&tx, &saved).map_err(Failure::conflict)?;
 		let known: Vec<i64> = tx.prepare("select id from users")?.query_map([], |row| row.get(0))?.collect::<Result<_, _>>()?;
 		if let Some(id) = saved.relays.iter().flat_map(|relay| relay.users.iter().copied()).find(|id| !known.contains(id)) {return Err(Failure::bad(format!("A relay names the account {id}, which does not exist. Take it off the relay first.")))}

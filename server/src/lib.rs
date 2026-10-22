@@ -139,6 +139,7 @@ pub async fn upkeep_once(app: &Arc<App>, state: &mut Upkeep) {
 		}
 		if !loaded {tracing::error!("no gateway key can be read: the subscription endpoint answers every request as an unknown path. Load the next key, or make new gateway keys in the panel")}
 		if due {tracing::warn!("the active gateway key is more than 180 days old: load the next key")}
+		nodecfg::rotate_keys(app, at).await;
 		if app.keys.is_none() {tracing::error!("the key file is missing: the subscription endpoint answers every request as an unknown path and no secret can be opened")}
 	}
 	if at - state.polled_at >= stats::POLL {

@@ -135,6 +135,8 @@ pub struct Settings {
 	pub idle_device_days: u32,
 	/// Minutes an account waits after adding a device before it may add another, which slows down a leaked link. 0 lets devices be added one after another; the device limit still holds.
 	pub new_device_minutes: u32,
+	/// Days the first transport key of a `veilway` inbound stays first before the panel makes a new one, 7 to 30. The old key keeps working for two days or three refresh intervals, whichever is longer, and is then destroyed.
+	pub transport_key_days: u32,
 	/// Other endpoints of the same subscription, put in every document as `refresh_urls`. A string, or an object with `url` and `pins`.
 	pub refresh_mirrors: Vec<Value>,
 	/// Base URLs of static mirrors, put in every document as `static_mirrors`: plain file hosting that holds each device's sealed document. `https`, a path ending in `/`, no pins and no IP literal, at most 4, and none shares host and port with the endpoint or a relay mirror.
@@ -166,11 +168,30 @@ pub struct Settings {
 	/// The public half of the first transport key of each `veilway` inbound, by inbound tag, which its profile carries as `transport_public_key` for its `tls`, `ws` and `fronted` transports. Made the same way as `inbound_keys`.
 	#[schemars(extend("readOnly" = true))]
 	pub transport_keys: BTreeMap<String, String>,
+	/// When the first transport key of each `veilway` inbound became first, and where its rotation stands. Owned by the server: read-only in the API.
+	#[schemars(extend("readOnly" = true))]
+	pub transport_clocks: BTreeMap<String, TransportClock>,
+}
+
+/// Where the rotation of one inbound's transport key stands.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct TransportClock {
+	/// The public half of the first key when the clock started. A first key that differs was changed by hand, which restarts the clock.
+	pub public: String,
+	/// Unix time the key became first.
+	pub since: i64,
+	/// Unix time the previous key is destroyed, or 0 when none waits.
+	pub retire_at: i64,
+	/// The public half of the key a rotation is putting in force, written before the node is asked so that a rotation the node took is finished later.
+	pub next: String,
+	/// The node's marker of the key that was first when a rotation began. When the node took the rotation but its answer was lost, it holds that marker second, which tells the next pass to finish the rotation.
+	pub old_marker: String,
 }
 
 impl Default for Settings {
 	fn default() -> Self {
-		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, idle_device_days: 0, new_device_minutes: 1, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), published_relays: Vec::new(), faketls_keys: BTreeMap::new(), inbound_keys: BTreeMap::new(), transport_keys: BTreeMap::new()}
+		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, idle_device_days: 0, new_device_minutes: 1, transport_key_days: 30, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), published_relays: Vec::new(), faketls_keys: BTreeMap::new(), inbound_keys: BTreeMap::new(), transport_keys: BTreeMap::new(), transport_clocks: BTreeMap::new()}
 	}
 }
 
