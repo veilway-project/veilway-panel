@@ -93,7 +93,7 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 					</div>
 					<div className="p-pair">
 						<NumberField label={t("subs.idle")} hint={t("subs.idleHint")} unit={t("subs.daysUnit")} min={0} max={365} value={draft.idle_device_days ?? 0} onChange={value => patch({idle_device_days: value === "" ? 0 : value})}/>
-						<NumberField label={t("subs.newWait")} hint={t("subs.newWaitHint")} unit={t("subs.minutesUnit")} min={0} max={1440} value={draft.new_device_minutes ?? 10} onChange={value => patch({new_device_minutes: value === "" ? 10 : value})}/>
+						<NumberField label={t("subs.newWait")} hint={t("subs.newWaitHint")} unit={t("subs.minutesUnit")} min={0} max={1440} value={draft.new_device_minutes ?? 1} onChange={value => patch({new_device_minutes: value === "" ? 1 : value})}/>
 					</div>
 				</div>
 			</section>

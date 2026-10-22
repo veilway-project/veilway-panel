@@ -2175,7 +2175,7 @@
             "type": "object"
           },
           "new_device_minutes": {
-            "default": 10,
+            "default": 1,
             "description": "Minutes an account waits after adding a device before it may add another, which slows down a leaked link. 0 lets devices be added one after another; the device limit still holds.",
             "format": "uint32",
             "minimum": 0,
