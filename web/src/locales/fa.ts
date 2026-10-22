@@ -1431,6 +1431,7 @@ export const fa: Record<PanelKey, string> = {
 	"nodes.restartPanelTitle": "پنل دوباره راه‌اندازی شود؟",
 	"nodes.restartPanelBody": "پنل چند ثانیه می‌ایستد و این صفحه دوباره بارگذاری می‌شود. دستگاه‌ها وصل می‌مانند.",
 	"nodes.restartAsked": "راه‌اندازی دوباره درخواست شد",
+	"nodes.restartSlow": "پنل پس از ۵ دقیقه برنگشته است. سرور را با «sudo bash veilway.sh logs panel» بررسی کنید.",
 	"nodes.restartAskedBody": "سرور آن را در چند ثانیه دوباره راه‌اندازی می‌کند. سروری که ⁦veilway.sh⁩ آن قدیمی‌تر از v0.2.9 است کاری نمی‌کند: یک بار به‌روزرسانی کنید و از آن به بعد دکمه کار می‌کند.",
 	"nodes.version": "نسخه",
 	"nodes.upFor": "مدت برقراری",

@@ -1430,6 +1430,7 @@ export const en = {
 	"nodes.restartPanelTitle": "Restart the panel?",
 	"nodes.restartPanelBody": "The panel stops for a few seconds and this page reloads. Devices stay connected.",
 	"nodes.restartAsked": "Restart requested",
+	"nodes.restartSlow": "The panel has not come back after 5 minutes. Check the server with \"sudo bash veilway.sh logs panel\".",
 	"nodes.restartAskedBody": "The server restarts it within a few seconds. A server whose veilway.sh is older than v0.2.9 does nothing: update once, and the button works from then on.",
 	"nodes.version": "Version",
 	"nodes.upFor": "Up for",

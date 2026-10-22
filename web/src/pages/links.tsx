@@ -74,7 +74,20 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 		{running.data && !flow && !answering && <TunnelCards running={running.data} onChanged={running.reload} onAdd={() => setTunnelPreset("tcp")}/>}
 		{links.data && !(links.data.links ?? []).length && !flow && <Glass className="p-panel"><StateBlock kind="empty" title={t("links.empty")} action={<Button variant="primary" icon="plus" onClick={() => setFlow("offer")}>{t("links.offer")}</Button>}>{t("links.emptyBody")}</StateBlock></Glass>}
 		{editing && <LinkDialog link={editing} exits={((running.data?.document.exits ?? []) as {tag: string, backend?: {type?: string}}[]).filter(exit => exit.backend?.type !== "chain").map(exit => exit.tag)} outbounds={(running.data?.document.outbounds ?? []) as Record<string, unknown>[]} onClose={() => setEditing(null)} onSave={changed => { setEditing(null); setProposed({value: configured.map(link => link.tag === changed.tag ? changed : link), summary: t("links.summaryEdit", {name: changed.tag})}); }}/>}
-		<ConfirmDialog open={restarting !== null} onOpenChange={open => { if (!open) setRestarting(null); }} danger={restarting === "node"} title={t(restarting === "panel" ? "nodes.restartPanelTitle" : "nodes.restartNodeTitle")} body={t(restarting === "panel" ? "nodes.restartPanelBody" : "nodes.restartNodeBody")} confirmLabel={t(restarting === "panel" ? "nodes.restartPanel" : "nodes.restartNode")} onConfirm={() => { const part = restarting!; setRestarting(null); void guard(() => api("post", "/restart", {body: {part}})).then(() => { toast({tone: "success", title: t("nodes.restartAsked"), body: t("nodes.restartAskedBody")}); if (part === "panel") setTimeout(() => location.reload(), 8000); }, failure => toast({tone: "danger", title: say(failure)})); }}/>
+		<ConfirmDialog open={restarting !== null} onOpenChange={open => { if (!open) setRestarting(null); }} danger={restarting === "node"} title={t(restarting === "panel" ? "nodes.restartPanelTitle" : "nodes.restartNodeTitle")} body={t(restarting === "panel" ? "nodes.restartPanelBody" : "nodes.restartNodeBody")} confirmLabel={t(restarting === "panel" ? "nodes.restartPanel" : "nodes.restartNode")} onConfirm={() => {
+			const part = restarting!;
+			setRestarting(null);
+			// The panel picks a new start id each time it starts: the page reloads once the id changed, which means the new panel answers. Without the old id it falls back to a fixed wait.
+			void (part === "panel" ? api("get", "/status").then(status => status.start_id, () => "") : Promise.resolve("")).then(before => guard(() => api("post", "/restart", {body: {part}})).then(() => {
+				toast({tone: "success", title: t("nodes.restartAsked"), body: t("nodes.restartAskedBody")});
+				if (part !== "panel") return;
+				if (!before) { setTimeout(() => location.reload(), 8000); return; }
+				const started = Date.now(), timer = setInterval(() => {
+					if (Date.now() - started > 5 * 60_000) { clearInterval(timer); toast({tone: "danger", title: t("nodes.restartSlow")}); return; }
+					void api("get", "/status").then(next => { if (next.start_id !== before) location.reload(); }, () => {});
+				}, 3000);
+			}, failure => toast({tone: "danger", title: say(failure)})));
+		}}/>
 		<ConfirmDialog open={removing !== null} onOpenChange={open => { if (!open) setRemoving(null); }} danger title={t("links.removeTitle", {name: removing?.tag ?? ""})} body={t("links.removeBody", {name: removing?.tag ?? ""})} confirmLabel={t("links.removeConfirm")} onConfirm={() => { const gone = removing!; setRemoving(null); setProposed({value: configured.filter(link => link.tag !== gone.tag), summary: t("links.summaryRemove", {name: gone.tag})}); }}/>
 		{proposed && running.data && <SectionReview section="links" running={running.data} value={proposed.value} summary={<p>{proposed.summary}</p>} onClose={() => setProposed(null)} onDone={() => { setProposed(null); running.reload(); refresh(); }}/>}
 		{pairings.data && waiting > 0 && <Glass className="p-panel">
