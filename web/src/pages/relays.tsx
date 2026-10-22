@@ -39,7 +39,7 @@ function AccountSearch({label, exclude, onPick}: {label: string, exclude: number
 // The relays save with the rest of the settings. The preview asks the server what every profile would carry with the relays as they are on screen, so it shows the effect before anything is saved.
 export function RelaysEditor({value, onChange}: {value: Relay[], onChange: (relays: Relay[]) => void}) {
 	const {t} = useP(), derived = useLoad(() => api("get", "/profiles/derived") as Promise<{templates: Template[]}>, []), groupRows = useLoad(() => api("get", "/endpoints"), []), [preview, setPreview] = useState<Template[] | null>(null), [error, setError] = useState<unknown>(null), [previewFor, setPreviewFor] = useState<Account | null>(null), [scoped, setScoped] = useState<number[]>([]);
-	const tags = derived.data?.templates.map(template => template.inbound) ?? [], groups = groupRows.data?.groups ?? [], ready = value.filter(relay => relay.name.trim() && relay.address.trim()), key = JSON.stringify([ready, previewFor?.id ?? null]);
+	const tags = derived.data?.templates.map(template => template.inbound) ?? [], held: Record<string, string[]> = Object.fromEntries((derived.data?.templates ?? []).filter(template => template.kind !== "faketls").map(template => [template.inbound, ((template.profile.transports ?? []) as {type?: string}[]).map(transport => transport.type ?? "")])), groups = groupRows.data?.groups ?? [], ready = value.filter(relay => relay.name.trim() && relay.address.trim()), key = JSON.stringify([ready, previewFor?.id ?? null]);
 	useEffect(() => {
 		let current = true;
 		const timer = setTimeout(() => void (api("post", "/profiles/preview", {body: {relays: ready, user: previewFor?.id ?? null}}) as Promise<{templates: Template[]}>).then(answer => { if (current) { setPreview(answer.templates); setError(null); } }, failure => { if (current) setError(failure); }), 400);
@@ -64,7 +64,11 @@ export function RelaysEditor({value, onChange}: {value: Relay[], onChange: (rela
 					<span className="vw-label">{t("relays.transports")}</span>
 					<div className="p-cluster">{KINDS.map(kind => <Checkbox key={kind} label={kind} checked={kinds.includes(kind)} disabled={kinds.length === 1 && kinds.includes(kind)} onChange={on => edit(i, {transports: pick([...KINDS], relay.transports, kind, on)})}/>)}</div>
 					<p className="vw-small vw-muted">{t("relays.noFaketls")}</p>
-					<div className="p-relay-ports">{KINDS.filter(kind => kinds.includes(kind)).map(kind => <NumberField key={kind} label={t("relays.port", {kind})} unit={kind.startsWith("udp") ? "UDP" : "TCP"} placeholder={t("relays.samePort")} min={1} max={65535} value={relay.ports[kind] ?? ""} onChange={port => { const ports = {...relay.ports}; if (port === "") delete ports[kind]; else ports[kind] = port; edit(i, {ports}); }}/>)}</div>
+					<div className="p-relay-ports">{KINDS.filter(kind => kinds.includes(kind)).flatMap(kind => {
+						const sharing = inbounds.filter(tag => held[tag]?.includes(kind)), unit = kind.startsWith("udp") ? "UDP" : "TCP";
+						if (sharing.length < 2) return [<NumberField key={kind} label={t("relays.port", {kind})} unit={unit} placeholder={t("relays.samePort")} min={1} max={65535} value={relay.ports[kind] ?? ""} onChange={port => { const ports = {...relay.ports}; if (port === "") delete ports[kind]; else ports[kind] = port; edit(i, {ports}); }}/>];
+						return sharing.map(tag => <NumberField key={tag + "/" + kind} label={t("relays.portFor", {inbound: tag, kind})} unit={unit} placeholder={relay.ports[kind] ? String(relay.ports[kind]) : t("relays.samePort")} min={1} max={65535} value={relay.inbound_ports[tag + "/" + kind] ?? ""} onChange={port => { const found = {...relay.inbound_ports}; if (port === "") delete found[tag + "/" + kind]; else found[tag + "/" + kind] = port; edit(i, {inbound_ports: found}); }}/>);
+					})}</div>
 				</div>
 				{tags.length > 1 && <div className="p-relay-carry" role="group" aria-label={t("relays.inbounds")}>
 					<span className="vw-label">{t("relays.inbounds")}</span>
@@ -97,7 +101,7 @@ export function RelaysEditor({value, onChange}: {value: Relay[], onChange: (rela
 				<Switch label={t("relays.prefer")} hint={t("relays.preferHint")} checked={relay.prefer} onChange={on => edit(i, {prefer: on})}/>
 			</fieldset>;
 		})}
-		{value.length < MOST && <div><Button size="sm" icon="plus" onClick={() => onChange([...value, {name: "", address: "", inbounds: [], transports: [], ports: {}, prefer: false, enabled: true, groups: [], users: []}])}>{t("relays.add")}</Button></div>}
+		{value.length < MOST && <div><Button size="sm" icon="plus" onClick={() => onChange([...value, {name: "", address: "", inbounds: [], transports: [], ports: {}, inbound_ports: {}, prefer: false, enabled: true, groups: [], users: []}])}>{t("relays.add")}</Button></div>}
 		<div className="p-relay-preview">
 			<div><h3 className="vw-label">{t("relays.preview")}</h3><p className="vw-small vw-muted">{t("relays.previewLead")} <a className="p-link" href="#/profiles">{t("relays.publish")}</a></p></div>
 			<AccountSearch label={t("relays.previewFor")} exclude={[]} onPick={setPreviewFor}/>

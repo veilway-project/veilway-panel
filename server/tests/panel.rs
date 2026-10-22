@@ -1027,6 +1027,45 @@ async fn relays_reach_the_accounts_they_are_for_in_their_documents() {
 }
 
 #[tokio::test]
+async fn a_relay_port_per_inbound_and_transport_is_saved_checked_and_previewed() {
+	let (_fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"node_host": "192.0.2.10"})).await;
+	let relays = json!([{"name": "edge", "address": "198.51.100.7", "enabled": true, "ports": {"udp-obfs": 4000}, "inbound_ports": {"Main/udp-obfs": 4001}}]);
+	let preview = h.call(Method::POST, "/p/api/profiles/preview", Some(&session), Some(json!({"relays": relays})), "10.0.0.1").await.json();
+	assert_eq!(preview["templates"][0]["profile"]["transports"][1]["endpoints"], json!(["192.0.2.10:51821", "198.51.100.7:4001"]), "the port of the inbound wins over the port of the type");
+	let bad = json!([{"name": "edge", "address": "198.51.100.7", "enabled": true, "inbound_ports": {"Main/udp": 0}}]);
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/preview", Some(&session), Some(json!({"relays": bad})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_relays_only_inbound_gives_a_document_no_address_of_the_node_and_nothing_to_whom_no_relay_reaches() {
+	let (_fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"node_host": "192.0.2.10"})).await;
+	let (ann_id, ann) = h.user(&session, "ann", json!({})).await;
+	let (_, bob) = h.user(&session, "bob", json!({})).await;
+	h.configure(&session, json!({"node_host": "192.0.2.10", "relays": [{"name": "ann", "address": "198.51.100.9", "users": [ann_id], "enabled": true}]})).await;
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32]), "relays_only": "yes"}})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "the switch is a boolean");
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32]), "relays_only": true}})), "10.0.0.1").await.status, StatusCode::OK);
+	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((derived["templates"][0]["profile"]["transports"].clone(), derived["templates"][0]["profile"].get("relays_only").is_none(), derived["templates"][0]["refused"][0]["code"].clone()), (json!([]), true, json!("relays_only")), "for the accounts no relay of everyone reaches the template is empty and says why");
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	let published = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	assert!(!published["profiles"].to_string().contains("192.0.2.10"), "no snapshot holds the node's address: {}", published["profiles"]);
+	let (key, kids) = (key_of(&ann), [key_of(&ann).kid()]);
+	let answer = h.fetch(&ann, &kids, 1, "fetch", None).await;
+	let Payload::Subscription(for_ann) = opened(&answer, &[key]) else {panic!("a document {:?}", refusal_of(&answer, &[key]))};
+	assert_eq!(dialed(&for_ann.profiles[0]), ["198.51.100.9:51820"]);
+	assert!(!String::from_utf8_lossy(envelope::verify(&answer.body, &[key], BODY_MAX).unwrap().payload()).contains("192.0.2.1"), "the signed document names no address of the node");
+	let (key, kids) = (key_of(&bob), [key_of(&bob).kid()]);
+	let answer = h.fetch(&bob, &kids, 2, "fetch", None).await;
+	assert!(!matches!(envelope::verify(&answer.body, &[key], BODY_MAX).ok().and_then(|bytes| payload::parse(&bytes).ok()), Some(Payload::Subscription(_))), "an account no relay reaches gets no profile of the inbound");
+}
+
+#[tokio::test]
 async fn stats_are_recorded_per_bucket_and_survive_a_node_restart() {
 	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
 	let h = Harness::with_socket(Some(socket)).await;

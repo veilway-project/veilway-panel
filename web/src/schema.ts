@@ -1871,6 +1871,13 @@ export interface components {
              */
             groups: string[];
             /**
+             * @description The relay's port per inbound and transport type, keyed `<inbound tag>/<type>`. It wins over `ports`. Every transport of that type in the inbound gets it: two of one type in an inbound share the web port or the address anyway. A key naming no inbound or transport of the node is ignored.
+             * @default {}
+             */
+            inbound_ports: {
+                [key: string]: number;
+            };
+            /**
              * @description The tags of the `veilway` inbounds it carries. Empty for all of them.
              * @default []
              */

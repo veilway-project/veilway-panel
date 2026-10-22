@@ -91,10 +91,13 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 	if let Some(sealed) = &this.private_key {device["private_key"] = json!(STANDARD.encode(keys.open_secret(&user.record_id, &format!("private_key:{}", this.public_key), sealed).ok_or("a private key does not open")?));}
 	let groups: Vec<String> = serde_json::from_str(&user.groups).unwrap_or_default();
 	let reaching = crate::nodecfg::reaching(&settings.published_relays, Some((user.id, groups.as_slice())));
-	let profiles: Vec<Value> = settings.profiles.iter().cloned().map(|mut profile| {
-		if let Some(tag) = profile["id"].as_str().and_then(|id| settings.relay_profiles.get(id)) {crate::nodecfg::carry(&mut profile, tag, &reaching);}
+	let profiles: Vec<Value> = settings.profiles.iter().cloned().filter_map(|mut profile| {
+		// A relays-only inbound is switched on at once, before the next publish: the node's own addresses of an older snapshot are dropped here, and a profile no relay reaches this account with is not given.
+		let only = profile["id"].as_str().and_then(|id| settings.relay_profiles.get(id)).is_some_and(|tag| crate::nodecfg::relays_only(&settings, tag)) || crate::xray::addresses(&profile).iter().any(|host| host == crate::nodecfg::NO_ADDRESS);
+		if let Some(tag) = profile["id"].as_str().and_then(|id| settings.relay_profiles.get(id)) {crate::nodecfg::carry(&mut profile, tag, &reaching, only);}
+		if only && profile["transports"].as_array().is_none_or(Vec::is_empty) {return None}
 		profile["device"] = device.clone();
-		profile
+		Some(profile)
 	}).collect();
 	let profiles = app.names.resolve(profiles).await;
 	if profiles.is_empty() {return Err("no profile has an address that resolves".into())}

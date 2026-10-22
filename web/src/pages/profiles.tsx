@@ -1,4 +1,4 @@
-import {Banner, Button, Field, Glass, NumberField, StateBlock, TextField, useToast} from "@veilway/ui";
+import {Banner, Button, Field, Glass, NumberField, StateBlock, Switch, TextField, useToast} from "@veilway/ui";
 import {useContext, useState} from "react";
 import {api, type Template} from "../api.ts";
 import {ErrorNote, Mark, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
@@ -6,7 +6,7 @@ import type {PanelKey} from "../locales/en.ts";
 import {SettingsContext} from "../settings.ts";
 
 const MISSING = ["inbound_public_key", "transport_public_key", "node_host"];
-const REFUSALS = ["not_acknowledged", "behind_proxy", "key_shared", "no_public_key", "bad_site", "node_host", "profile_id", "no_name", "plain_host", "plain_shared", "plain_key", "plain_cookie"];
+const REFUSALS = ["not_acknowledged", "behind_proxy", "key_shared", "no_public_key", "bad_site", "node_host", "profile_id", "no_name", "plain_host", "plain_shared", "plain_key", "plain_cookie", "relays_only"];
 
 // A profile with every transport left out is not published, so what it lacks blocks nothing.
 const emptyTemplate = (template: Template) => !(Array.isArray(template.profile.transports) && template.profile.transports.length) && (template.kind === "faketls" || (template.refused ?? []).length > 0);
@@ -77,6 +77,8 @@ function Override({template, onSaved}: {template: Template, onSaved: () => void}
 			<TextField label={t("profiles.inboundKey")} hint={t("profiles.inboundKeyHint")} value={key} onChange={setKey} technical/>
 			<Button type="submit" disabled={busy || !key.trim()}>{t("common.save")}</Button>
 		</form>}
+		<Switch label={t("profiles.relaysOnly")} hint={t("profiles.relaysOnlyHint")} checked={current.relays_only === true} disabled={busy} onChange={on => { const {relays_only: _old, ...rest} = current; void save(on ? {...rest, relays_only: true} : rest); }}/>
+		{current.relays_only === true && !(shared.settings?.relays ?? []).some(relay => relay.enabled && (relay.inbounds.length === 0 || relay.inbounds.includes(template.inbound))) && <Banner tone="warning" title={t("profiles.relaysOnly")}>{t("profiles.relaysOnlyNone")}</Banner>}
 		<form className="p-inline-form" onSubmit={event => { event.preventDefault(); const list = hosts.split(/[\s,]+/).filter(Boolean), {node_addresses: _old, ...rest} = current; void save(list.length ? {...rest, node_addresses: list} : rest); }}>
 			<TextField label={t("profiles.addresses")} hint={t("profiles.addressesHint")} placeholder="203.0.113.10, vpn.example.org" value={hosts} onChange={setHosts} technical/>
 			<Button type="submit" disabled={busy}>{t("common.save")}</Button>

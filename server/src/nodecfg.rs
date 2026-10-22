@@ -41,6 +41,9 @@ pub struct Relay {
 	/// The relay's port per transport type, where it is not the node's own port.
 	#[serde(default)]
 	pub ports: BTreeMap<String, u16>,
+	/// The relay's port per inbound and transport type, keyed `<inbound tag>/<type>`. It wins over `ports`. Every transport of that type in the inbound gets it: two of one type in an inbound share the web port or the address anyway. A key naming no inbound or transport of the node is ignored.
+	#[serde(default)]
+	pub inbound_ports: BTreeMap<String, u16>,
 	/// Put its candidates before the node's own address instead of after it.
 	#[serde(default)]
 	pub prefer: bool,
@@ -62,7 +65,7 @@ pub fn checked_relays<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<
 		let name = relay.name.trim();
 		if name.is_empty() || name != relay.name || name.chars().count() > 32 || relays[..index].iter().any(|other| other.name == relay.name) {return fail(format!("relay {}: the name is 1 to 32 characters, without spaces around it, and no other relay has it.", index + 1))}
 		if !reachable(&relay.address) {return fail(format!("relay {name}: the address is a host name or an IP address that apps may dial, not a loopback, link-local or multicast address."))}
-		if relay.transports.len() > RELAYED.len() || relay.transports.iter().enumerate().any(|(i, kind)| !RELAYED.contains(&kind.as_str()) || relay.transports[..i].contains(kind)) || relay.ports.iter().any(|(kind, port)| !RELAYED.contains(&kind.as_str()) || *port == 0) {return fail(format!("relay {name}: transports and ports name udp, udp-obfs, tls, ws, fronted or fronted-shaped once each, and a port is 1 to 65535."))}
+		if relay.transports.len() > RELAYED.len() || relay.transports.iter().enumerate().any(|(i, kind)| !RELAYED.contains(&kind.as_str()) || relay.transports[..i].contains(kind)) || relay.ports.iter().any(|(kind, port)| !RELAYED.contains(&kind.as_str()) || *port == 0) || relay.inbound_ports.len() > 64 || relay.inbound_ports.iter().any(|(key, port)| *port == 0 || !key.rsplit_once('/').is_some_and(|(tag, kind)| !tag.is_empty() && tag.len() <= 64 && RELAYED.contains(&kind))) {return fail(format!("relay {name}: transports and ports name udp, udp-obfs, tls, ws, fronted or fronted-shaped once each, and a port is 1 to 65535."))}
 		if relay.inbounds.len() > 16 || relay.inbounds.iter().enumerate().any(|(i, tag)| tag.is_empty() || tag.len() > 64 || relay.inbounds[..i].contains(tag)) {return fail(format!("relay {name}: inbounds is at most 16 different tags of 1 to 64 characters."))}
 		if relay.groups.len() > 64 || relay.groups.iter().any(|group| !name_ok(group, true)) || relay.users.len() > 1000 {return fail(format!("relay {name}: groups is at most 64 group names and users at most 1000 account ids."))}
 	}
@@ -144,7 +147,7 @@ pub(crate) async fn apply(app: &Arc<App>, ctx: &Ctx, document: Value, revision: 
 			let republished = app.update_settings(move |settings| {
 				crate::borrowed::remember(settings, &kept);
 				remember_keys(settings, &kept);
-				let templates = derive(settings, &kept, &[], None, &Exposure::default());
+				let templates = derive(settings, &kept, &[], None, &Exposure::default(), false);
 				let ids: Vec<String> = settings.relay_profiles.keys().filter(|id| id.ends_with("-faketls") && settings.profiles.iter().any(|profile| profile["id"] == id.as_str() && profile["transports"].as_array().is_some_and(|list| !list.is_empty() && list.iter().all(|transport| transport["type"] == "faketls")))).cloned().collect();
 				for id in ids {
 					let fresh = templates.iter().find(|template| template["kind"] == "faketls" && template["profile"]["id"] == id.as_str() && template["missing"].as_array().is_some_and(Vec::is_empty) && template["profile"]["transports"].as_array().is_some_and(|list| !list.is_empty())).map(|template| template["profile"].clone());
@@ -234,8 +237,14 @@ pub const WEB_PORT: &str = "web_port";
 pub const PLAIN_HOST: &str = "plain_host";
 /// The port of that web server for plain HTTP. 80 when not set.
 pub const PLAIN_PORT: &str = "plain_port";
+/// When true, apps get only relay addresses for the inbound: the node's own are in no profile, no published snapshot and no document. A transport no relay that reaches the account carries is left out.
+pub const RELAYS_ONLY: &str = "relays_only";
 /// The override members that steer how a profile is made and are no member of the profile.
-pub const NOT_MEMBERS: [&str; 4] = [NODE_ADDRESSES, WEB_PORT, PLAIN_HOST, PLAIN_PORT];
+pub const NOT_MEMBERS: [&str; 5] = [NODE_ADDRESSES, WEB_PORT, PLAIN_HOST, PLAIN_PORT, RELAYS_ONLY];
+/// Stands in for the node's address in the published profile of a relays-only inbound, which keeps the ports and names the relays are given. It never resolves, and each document replaces it with relay addresses.
+pub const NO_ADDRESS: &str = "relays.invalid";
+
+pub fn relays_only(settings: &Settings, tag: &str) -> bool {settings.profile_overrides.get(tag).is_some_and(|edits| edits[RELAYS_ONLY] == true)}
 
 /// Whether apps may be sent to `host`: an IP address they may dial, or a host name, which each document turns into the addresses it has then.
 pub fn reachable(host: &str) -> bool {host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().map_or_else(|_| is_host(host), dialable)}
@@ -262,9 +271,10 @@ pub fn reaching<'a>(relays: &'a [Relay], user: Option<(i64, &[String])>) -> Vec<
 	}).collect()
 }
 
-/// Adds the relays that reach an account to the candidates of the transports they carry in the profile of the inbound `tag`. Within the cap of a transport, the account's own relays come first, then its groups', then everyone's. Returns what the cap cut, as `transport` and `relay`.
-pub fn carry(profile: &mut Value, tag: &str, reaching: &[(u8, &Relay)]) -> Vec<Value> {
+/// Adds the relays that reach an account to the candidates of the transports they carry in the profile of the inbound `tag`. Within the cap of a transport, the account's own relays come first, then its groups', then everyone's. Returns what the cap cut, as `transport` and `relay`. With `only`, the profile's own addresses are dropped and only the relays stay, and a transport left with none (or that no relay can carry) is removed.
+pub fn carry(profile: &mut Value, tag: &str, reaching: &[(u8, &Relay)], only: bool) -> Vec<Value> {
 	let mut trimmed = Vec::new();
+	if only {if let Some(list) = profile["transports"].as_array_mut() {list.retain(|transport| transport["type"] != "faketls" && transport["type"] != "ws-plain")}}
 	for transport in profile["transports"].as_array_mut().into_iter().flatten() {
 		let (kind, list) = (transport["type"].as_str().unwrap_or_default().to_string(), if transport["endpoints"].is_array() {"endpoints"} else {"candidates"});
 		// A forwarder in front of the borrowed-site handshake would sit between the app and the node's answer, which is made to look like the site's own.
@@ -273,17 +283,18 @@ pub fn carry(profile: &mut Value, tag: &str, reaching: &[(u8, &Relay)]) -> Vec<V
 		let address_of = |entry: &Value| entry.as_str().or_else(|| entry["address"].as_str()).map(str::to_string);
 		let first_port = address_of(&own[0]).and_then(|address| address.rsplit_once(':')?.1.parse::<u16>().ok());
 		let mut carried: Vec<(u8, bool, String, Value)> = reaching.iter().filter(|(_, relay)| (relay.inbounds.is_empty() || relay.inbounds.iter().any(|held| held == tag)) && (relay.transports.is_empty() || relay.transports.contains(&kind))).filter_map(|(tier, relay)| {
-			let address = host_port(&relay.address, &format!(":{}", relay.ports.get(&kind).copied().or(first_port)?))?;
+			let address = host_port(&relay.address, &format!(":{}", relay.inbound_ports.get(&format!("{tag}/{kind}")).or_else(|| relay.ports.get(&kind)).copied().or(first_port)?))?;
 			Some((*tier, relay.prefer, relay.name.clone(), if list == "endpoints" {json!(address)} else {let mut candidate = own[0].clone(); candidate["address"] = json!(address); candidate}))
 		}).collect();
 		carried.sort_by_key(|(tier, prefer, _, _)| (*tier, !prefer));
-		let mut seen: BTreeSet<String> = own.iter().filter_map(address_of).collect();
+		let mut seen: BTreeSet<String> = if only {BTreeSet::new()} else {own.iter().filter_map(address_of).collect()};
 		let unique: Vec<(bool, String, Value)> = carried.into_iter().filter(|(_, _, _, entry)| address_of(entry).is_some_and(|address| seen.insert(address))).map(|(_, prefer, name, entry)| (prefer, name, entry)).collect();
-		let room = CANDIDATES_MAX.saturating_sub(own.len());
+		let room = if only {CANDIDATES_MAX} else {CANDIDATES_MAX.saturating_sub(own.len())};
 		trimmed.extend(unique.iter().skip(room).map(|(_, name, _)| json!({"transport": kind, "relay": name})));
 		let picked: Vec<(bool, Value)> = unique.into_iter().take(room).map(|(prefer, _, entry)| (prefer, entry)).collect();
-		transport[list] = picked.iter().filter(|(prefer, _)| *prefer).map(|(_, entry)| entry.clone()).chain(own).chain(picked.iter().filter(|(prefer, _)| !prefer).map(|(_, entry)| entry.clone())).collect();
+		transport[list] = if only {picked.into_iter().map(|(_, entry)| entry).collect()} else {picked.iter().filter(|(prefer, _)| *prefer).map(|(_, entry)| entry.clone()).chain(own).chain(picked.iter().filter(|(prefer, _)| !prefer).map(|(_, entry)| entry.clone())).collect()};
 	}
+	if only {if let Some(list) = profile["transports"].as_array_mut() {list.retain(|transport| transport["endpoints"].as_array().or_else(|| transport["candidates"].as_array()).is_some_and(|found| !found.is_empty()))}}
 	trimmed
 }
 
@@ -311,7 +322,8 @@ pub fn remember_keys(settings: &mut Settings, document: &Value) {
 }
 
 /// One template per `veilway` inbound, with the overrides laid over it and the relays that reach `user` carried in. `user` is the account's id and groups, or None for the relays that reach everyone. `missing` lists what a profile still needs from the operator, since the node never reveals a public key and does not know its own public address.
-fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, exposure: &Exposure) -> Vec<Value> {
+/// With `skeleton`, a relays-only inbound keeps its transports with `NO_ADDRESS` for the node's address, which is what is published: each document then carries the relays that reach its account.
+fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, exposure: &Exposure, skeleton: bool) -> Vec<Value> {
 	let inbounds = document.get("inbounds").and_then(Value::as_array).cloned().unwrap_or_default();
 	let reached = reaching(relays, user);
 	// Every profile is made up to its overrides first, since the host names and paths a `ws-plain` transport must not share are those of all the inbounds: one subscription carries them all.
@@ -320,10 +332,11 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 		let transports: Vec<&Value> = inbound["transports"].as_array().map(|list| list.iter().collect()).unwrap_or_default();
 		let obfs = transports.iter().any(|transport| transport["type"] == "udp-obfs");
 		let gateways: Vec<Value> = inbound["address"].as_array().into_iter().flatten().filter_map(|address| address.as_str()?.split('/').next().map(|ip| json!(ip))).collect();
+		let only = relays_only(settings, &tag);
 		let mut refused: Vec<Value> = Vec::new();
 		let listed: Vec<Value> = transports.iter().filter_map(|transport| {
 			let listen = transport["listen"].as_str()?;
-			let reached = hosts(settings, &tag, listen);
+			let reached = if only {vec![NO_ADDRESS.to_string()]} else {hosts(settings, &tag, listen)};
 			let endpoints: Vec<String> = reached.iter().filter_map(|host| host_port(host, listen)).collect();
 			if endpoints.is_empty() {return None}
 			Some(match transport["type"].as_str()? {
@@ -331,7 +344,7 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 				kind @ ("tls" | "ws" | "fronted-shaped") if transport.get("decoy").is_some() => {
 					// `tls` ends TLS on the node's own listener. `ws` and `fronted-shaped` sit behind the operator's web server, so apps get that server's port and not the listener's.
 					let endpoints: Vec<String> = if kind == "tls" {endpoints} else {let port = settings.profile_overrides.get(&tag).and_then(|edits| edits[WEB_PORT].as_u64()).unwrap_or(443); reached.iter().filter_map(|host| host_port(host, &format!("web:{port}"))).collect()};
-					let Some(name) = [transport["tls"]["name"].as_str(), transport["decoy"]["origin"].as_str().and_then(|origin| origin.split("://").last()?.split(['/', ':']).next()), Some(host)].into_iter().flatten().chain(reached.iter().map(String::as_str)).find(|name| is_host(name)) else {
+					let Some(name) = [transport["tls"]["name"].as_str(), transport["decoy"]["origin"].as_str().and_then(|origin| origin.split("://").last()?.split(['/', ':']).next()), (!only).then_some(host)].into_iter().flatten().chain(reached.iter().map(String::as_str).filter(|_| !only)).find(|name| is_host(name)) else {
 						refused.push(json!({"transport": transport["listen"], "code": "no_name", "reason": "apps need a host name to send and check: the certificate names none, the decoy's origin is not a host name, and the node's address is an IP address"}));
 						return None;
 					};
@@ -354,9 +367,10 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 	let paths: Vec<String> = streams.iter().filter_map(|stream| stream["path"].as_str()).map(str::to_string).collect();
 	bases.into_iter().flat_map(|(inbound, tag, mut profile, mut refused, gateways)| {
 		let transports: Vec<&Value> = inbound["transports"].as_array().map(|list| list.iter().collect()).unwrap_or_default();
-		let edits = settings.profile_overrides.get(&tag);
+		let (edits, only) = (settings.profile_overrides.get(&tag), relays_only(settings, &tag));
 		if let Some(list) = profile.get_mut("transports").and_then(Value::as_array_mut) {list.retain(|transport| transport["type"] != "ws-plain")}
 		for transport in transports.iter().filter(|transport| transport["type"] == "ws-plain") {
+			if only {refused.push(json!({"transport": transport["listen"], "code": "relays_only", "reason": "a relay cannot sit in front of a ws-plain transport, and the node's own address is not given to apps"})); continue}
 			let (path, listen) = (transport["path"].as_str().unwrap_or_default(), transport["listen"].as_str().unwrap_or_default());
 			let endpoints: Vec<String> = hosts(settings, &tag, listen).iter().filter_map(|host| host_port(host, &format!("web:{}", edits.and_then(|edits| edits[PLAIN_PORT].as_u64()).unwrap_or(80)))).collect();
 			if endpoints.is_empty() {continue}
@@ -373,29 +387,39 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 		// The Xray inbounds answer on the addresses a profile names, so one that shares an address may not claim more than Detectable. An override of `unsafe` is the operator's own choice and stays.
 		if exposure.shares(&addresses(&profile)) && profile["rating_cap"] != "unsafe" {profile["rating_cap"] = json!("detectable");}
 		// Relays come after the overrides, so a transport an override wrote gets them too.
-		let trimmed = carry(&mut profile, &tag, &reached);
+		let kinds: Vec<Value> = profile["transports"].as_array().into_iter().flatten().map(|transport| transport["type"].clone()).collect();
+		let trimmed = if only && skeleton {Vec::new()} else {carry(&mut profile, &tag, &reached, only)};
+		if only && !skeleton {
+			let kept: Vec<&Value> = profile["transports"].as_array().into_iter().flatten().map(|transport| &transport["type"]).collect();
+			let lost: Vec<Value> = kinds.iter().enumerate().filter(|(at, kind)| !kept.contains(kind) && !kinds[..*at].contains(kind)).map(|(_, kind)| json!({"transport": kind, "code": "relays_only", "reason": "no relay that reaches this account carries this transport, and the node's own address is not given to apps"})).collect();
+			refused.extend(lost);
+		}
 		let mut missing = Vec::new();
 		if profile.get("inbound_public_key").is_none() {missing.push("inbound_public_key")}
 		let used: Vec<String> = transports.iter().filter_map(|transport| transport["listen"].as_str()).flat_map(|listen| hosts(settings, &tag, listen)).collect();
-		if used.is_empty() || !used.iter().all(|host| reachable(host)) {missing.push("node_host")}
+		if !only && (used.is_empty() || !used.iter().all(|host| reachable(host))) {missing.push("node_host")}
 		if profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport["type"] == "tls" || transport["type"] == "ws" || transport["type"] == "fronted-shaped")) && profile.get("transport_public_key").is_none() {missing.push("transport_public_key")}
 		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES && !NOT_MEMBERS.contains(&key.as_str())).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed, "refused": refused});
-		std::iter::once(own).chain(crate::borrowed::template(settings, document, inbound, &gateways)).collect::<Vec<_>>()
+		let faketls = crate::borrowed::template(settings, document, inbound, &gateways).map(|mut template| {
+			if only {template["profile"]["transports"] = json!([]); template["missing"] = json!([]); template["refused"] = json!([{"transport": "faketls", "code": "relays_only", "reason": "a relay cannot sit in front of the borrowed-site handshake, and the node's own address is not given to apps"}]);}
+			template
+		});
+		std::iter::once(own).chain(faketls).collect::<Vec<_>>()
 	}).collect()
 }
 
 /// The templates with each profile's rating decided by the Xray inbounds it shares an address with. The names the profiles carry are looked up first, so the derivation itself does no lookup.
-pub async fn rated(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, hosts: &[(String, String)]) -> Vec<Value> {
-	let names: Vec<String> = derive(settings, document, relays, user, &Exposure::default()).iter().flat_map(|template| addresses(&template["profile"])).collect();
+pub async fn rated(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, hosts: &[(String, String)], skeleton: bool) -> Vec<Value> {
+	let names: Vec<String> = derive(settings, document, relays, user, &Exposure::default(), skeleton).iter().flat_map(|template| addresses(&template["profile"])).collect();
 	let exposure = xray::exposure(document, hosts, &settings.node_host, names).await;
-	derive(settings, document, relays, user, &exposure)
+	derive(settings, document, relays, user, &exposure, skeleton)
 }
 
 pub async fn derived_profiles(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let (revision, _, document) = running(&app).await?;
 	let settings = app.settings();
 	let hosts = app.db.call(|db| xray::inbound_hosts(db)).await??;
-	ok(&json!({"revision": revision, "templates": rated(&settings, &document, &settings.relays, None, &hosts).await}))
+	ok(&json!({"revision": revision, "templates": rated(&settings, &document, &settings.relays, None, &hosts, false).await}))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -416,7 +440,7 @@ pub async fn preview_profiles(State(app): State<Arc<App>>, Body(input): Body<Pre
 	};
 	let groups: Vec<String> = account.as_ref().map(|user| serde_json::from_str(&user.groups).unwrap_or_default()).unwrap_or_default();
 	let hosts = app.db.call(|db| xray::inbound_hosts(db)).await??;
-	ok(&json!({"revision": revision, "templates": rated(&app.settings(), &document, &input.relays, account.as_ref().map(|user| (user.id, groups.as_slice())), &hosts).await}))
+	ok(&json!({"revision": revision, "templates": rated(&app.settings(), &document, &input.relays, account.as_ref().map(|user| (user.id, groups.as_slice())), &hosts, false).await}))
 }
 
 /// Takes a deleted account out of the audiences of the saved and the published relays, in the transaction that deletes it. SQLite gives a new account the id of the last one deleted, so no relay may keep it.
@@ -436,6 +460,7 @@ pub async fn put_override(State(app): State<Arc<App>>, Extension(ctx): Extension
 	if input.set.get(crate::borrowed::ADDRESSES).is_some_and(|list| !list.as_array().is_some_and(|list| list.len() < CANDIDATES_MAX && list.iter().all(|text| text.as_str().is_some_and(|text| text.parse::<SocketAddr>().map(|found| found.ip()).or_else(|_| text.parse::<IpAddr>()).is_ok_and(dialable))))) {return Err(Failure::bad(format!("{} is at most {} IP addresses that apps may dial, each with a port or without one.", crate::borrowed::ADDRESSES, CANDIDATES_MAX - 1)))}
 	if input.set.get(NODE_ADDRESSES).is_some_and(|list| !list.as_array().is_some_and(|list| (1..CANDIDATES_MAX).contains(&list.len()) && list.iter().all(|host| host.as_str().is_some_and(|host| (!host.contains(':') || host.parse::<IpAddr>().is_ok()) && reachable(host))))) {return Err(Failure::bad(format!("{NODE_ADDRESSES} is 1 to {} IP addresses or host names, without ports. Each transport adds its own port.", CANDIDATES_MAX - 1)))}
 	if input.set.get(WEB_PORT).is_some_and(|port| !port.as_u64().is_some_and(|port| (1..=65535).contains(&port))) {return Err(Failure::bad(format!("{WEB_PORT} is the port of the web server in front of the node, 1 to 65535.")))}
+	if input.set.get(RELAYS_ONLY).is_some_and(|value| !value.is_boolean()) {return Err(Failure::bad(format!("{RELAYS_ONLY} is true or false.")))}
 	if input.set.get(PLAIN_HOST).is_some_and(|host| !host.as_str().is_some_and(is_host)) {return Err(Failure::bad(format!("{PLAIN_HOST} is a lowercase host name such as plain.example.org, not an IP address.")))}
 	if input.set.get(PLAIN_PORT).is_some_and(|port| !port.as_u64().is_some_and(|port| (1..=65535).contains(&port))) {return Err(Failure::bad(format!("{PLAIN_PORT} is the port of the web server for plain HTTP, 1 to 65535.")))}
 	if plain_written(&input.set) {return Err(Failure::bad("An override of transports may not hold a ws-plain transport: the panel makes it from the node's config, with a key and a host name of its own."))}
@@ -450,7 +475,7 @@ pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Exten
 	let (_, _, document) = running(&app).await?;
 	let current = app.settings();
 	let hosts = app.db.call(|db| xray::inbound_hosts(db)).await??;
-	let templates = rated(&current, &document, &[], None, &hosts).await;
+	let templates = rated(&current, &document, &[], None, &hosts, true).await;
 	// A profile whose transports were all refused is not published, and what it said before is taken down. Its refusals are shown on the Profiles page and block nothing else.
 	let empty = |template: &Value| template["profile"]["transports"].as_array().is_none_or(Vec::is_empty) && (template["kind"] == "faketls" || template["refused"].as_array().is_some_and(|list| !list.is_empty()));
 	if let Some(bad) = templates.iter().filter(|template| !empty(template)).find(|template| !template["missing"].as_array().is_some_and(Vec::is_empty)) {return Err(Failure::bad(format!("The profile of inbound {} still needs: {}.", bad["inbound"].as_str().unwrap_or_default(), bad["missing"])))}
@@ -591,7 +616,7 @@ mod tests {
 	fn derived(relays: Vec<Relay>) -> Vec<Value> {
 		let mut settings = Settings {node_host: "192.0.2.10".into(), relays, ..Settings::default()};
 		settings.profile_overrides.insert("Main".into(), json!({"transport_public_key": "key"}));
-		derive(&settings, &document(), &settings.relays, None, &Exposure::default()).into_iter().map(|template| template["profile"]["transports"].clone()).collect()
+		derive(&settings, &document(), &settings.relays, None, &Exposure::default(), false).into_iter().map(|template| template["profile"]["transports"].clone()).collect()
 	}
 
 	fn for_account(relays: &[Relay], id: i64, groups: &[&str]) -> Vec<String> {
@@ -620,7 +645,7 @@ mod tests {
 		let many: Vec<Relay> = (0..RELAYS_MAX).map(|i| relay(json!({"name": format!("r{i}"), "address": format!("198.51.100.{}", i + 1), "prefer": i == 3}))).collect();
 		let mut settings = Settings {node_host: "192.0.2.10".into(), relays: many, ..Settings::default()};
 		settings.profile_overrides.insert("Main".into(), json!({"transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820", "192.0.2.11:51820"]}]}));
-		let endpoints = derive(&settings, &document(), &settings.relays, None, &Exposure::default())[0]["profile"]["transports"][0]["endpoints"].as_array().unwrap().clone();
+		let endpoints = derive(&settings, &document(), &settings.relays, None, &Exposure::default(), false)[0]["profile"]["transports"][0]["endpoints"].as_array().unwrap().clone();
 		assert_eq!((endpoints.len(), endpoints[0].clone(), endpoints[1].clone(), endpoints[2].clone()), (CANDIDATES_MAX, json!("198.51.100.4:51820"), json!("192.0.2.10:51820"), json!("192.0.2.11:51820")), "the node's own are kept and the preferred relay leads");
 	}
 
@@ -641,7 +666,7 @@ mod tests {
 		let mut settings = Settings {node_host: "192.0.2.10".into(), relays: relays.clone(), ..Settings::default()};
 		settings.profile_overrides.insert("Main".into(), json!({"transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820", "192.0.2.11:51820"]}]}));
 		let groups = vec!["office".to_string()];
-		let template = derive(&settings, &document(), &relays, Some((7, &groups)), &Exposure::default())[0].clone();
+		let template = derive(&settings, &document(), &relays, Some((7, &groups)), &Exposure::default(), false)[0].clone();
 		let endpoints = template["profile"]["transports"][0]["endpoints"].as_array().unwrap().clone();
 		assert_eq!((endpoints.len(), endpoints[2].clone(), endpoints[3].clone()), (CANDIDATES_MAX, json!("198.51.100.91:51820"), json!("198.51.100.90:51820")), "the account's relay leads the ones it gets, then its group's");
 		assert_eq!(template["trimmed"], json!([{"transport": "udp", "relay": "all12"}]), "the preview names what the cap cut");
@@ -652,13 +677,67 @@ mod tests {
 		let relays = vec![relay(json!({"name": "all", "address": "198.51.100.8"})), relay(json!({"name": "ann", "address": "198.51.100.9", "users": [7]})), relay(json!({"name": "other-inbound", "address": "198.51.100.10", "inbounds": ["Other"]}))];
 		let settings = Settings {node_host: "192.0.2.10".into(), relays: relays.clone(), ..Settings::default()};
 		let groups: Vec<String> = Vec::new();
-		let published = derive(&settings, &document(), &[], None, &Exposure::default())[0]["profile"].clone();
+		let published = derive(&settings, &document(), &[], None, &Exposure::default(), false)[0]["profile"].clone();
 		let mut carried = published.clone();
-		carry(&mut carried, "Main", &reaching(&relays, Some((7, &groups))));
-		assert_eq!(carried["transports"], derive(&settings, &document(), &relays, Some((7, &groups)), &Exposure::default())[0]["profile"]["transports"], "the stored base plus the account's relays is the preview for the account");
+		carry(&mut carried, "Main", &reaching(&relays, Some((7, &groups))), false);
+		assert_eq!(carried["transports"], derive(&settings, &document(), &relays, Some((7, &groups)), &Exposure::default(), false)[0]["profile"]["transports"], "the stored base plus the account's relays is the preview for the account");
 		let mut stranger = published.clone();
-		carry(&mut stranger, "Main", &reaching(&relays, Some((8, &groups))));
+		carry(&mut stranger, "Main", &reaching(&relays, Some((8, &groups))), false);
 		assert_eq!(stranger["transports"][0]["endpoints"], json!(["192.0.2.10:51820", "198.51.100.8:51820"]), "an account without its own relay gets only the relays for everyone");
+	}
+
+	#[test]
+	fn relays_only_gives_apps_no_address_of_the_node() {
+		let mut document = document();
+		document["inbounds"][0]["transports"].as_array_mut().unwrap().push(json!({"type": "ws-plain", "listen": "127.0.0.1:8080", "path": "/plain-path-long-enough"}));
+		let mut settings = Settings {node_host: "192.0.2.10".into(), relays: vec![relay(json!({"name": "late", "transports": ["udp", "tls"]})), relay(json!({"name": "udp-only", "address": "198.51.100.8", "transports": ["udp"], "users": [7]}))], ..Settings::default()};
+		settings.profile_overrides.insert("Main".into(), json!({"transport_public_key": "key", "relays_only": true, "node_addresses": ["192.0.2.11"]}));
+		let groups: Vec<String> = Vec::new();
+		let template = derive(&settings, &document, &settings.relays, Some((7, &groups)), &Exposure::default(), false).remove(0);
+		let text = template["profile"].to_string();
+		assert!(!text.contains("192.0.2.1") && !text.contains(NO_ADDRESS), "no address of the node, not even the stand-in: {text}");
+		assert_eq!(template["profile"]["transports"][0]["endpoints"], json!(["198.51.100.8:51820", "198.51.100.7:51820"]));
+		assert_eq!(template["profile"]["transports"][1]["candidates"], json!([{"address": "198.51.100.7:443", "sni": "node.example.org", "host": "node.example.org"}]), "the name the app checks stays");
+		assert_eq!((template["profile"]["transports"].as_array().unwrap().len(), template["refused"][0]["code"].clone(), template["overridden"].clone(), template["missing"].clone()), (2, json!("relays_only"), json!(["transport_public_key"]), json!(["inbound_public_key"])), "ws-plain is refused, the override is no member, and no node host is asked for");
+		let stranger = derive(&settings, &document, &settings.relays, Some((8, &groups)), &Exposure::default(), false).remove(0);
+		assert_eq!(stranger["profile"]["transports"][0]["endpoints"], json!(["198.51.100.7:51820"]));
+		let tls_only = Settings {relays: vec![relay(json!({"transports": ["udp"]}))], ..settings.clone()};
+		let none = derive(&tls_only, &document, &tls_only.relays, None, &Exposure::default(), false).remove(0);
+		assert_eq!((none["profile"]["transports"].clone(), none["refused"].as_array().unwrap().iter().map(|found| found["transport"].clone()).collect::<Vec<_>>()), (json!([{"type": "udp", "endpoints": ["198.51.100.7:51820"]}]), vec![json!("127.0.0.1:8080"), json!("tls")]), "a transport no relay carries is refused, not given with the node's address");
+		let nobody = Settings {relays: Vec::new(), ..settings.clone()};
+		let empty = derive(&nobody, &document, &nobody.relays, None, &Exposure::default(), false).remove(0);
+		assert_eq!((empty["profile"]["transports"].clone(), empty["refused"].as_array().unwrap().len()), (json!([]), 3), "an audience no relay reaches gets no transport");
+	}
+
+	#[test]
+	fn the_published_profile_of_a_relays_only_inbound_holds_no_node_address_and_documents_fill_it_from_relays() {
+		let mut settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
+		settings.profile_overrides.insert("Main".into(), json!({"transport_public_key": "key", "relays_only": true}));
+		let published = derive(&settings, &document(), &[], None, &Exposure::default(), true).remove(0)["profile"].clone();
+		assert!(!published.to_string().contains("192.0.2."), "{published}");
+		let relays = vec![relay(json!({"name": "edge", "ports": {"tls": 8443}}))];
+		let groups: Vec<String> = Vec::new();
+		let mut served = published.clone();
+		carry(&mut served, "Main", &reaching(&relays, Some((7, &groups))), true);
+		assert_eq!(served["transports"][0]["endpoints"], json!(["198.51.100.7:51820"]));
+		assert_eq!(served["transports"][1]["candidates"][0]["address"], json!("198.51.100.7:8443"));
+		let mut stranger = published.clone();
+		carry(&mut stranger, "Main", &[], true);
+		assert_eq!(stranger["transports"], json!([]), "no relay reaches the account, so nothing of the profile is left");
+		let mut older = json!({"transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820"]}, {"type": "faketls", "candidates": [{"address": "192.0.2.10:443", "sni": "www.example.org"}]}]});
+		carry(&mut older, "Main", &reaching(&relays, Some((7, &groups))), true);
+		assert_eq!(older["transports"], json!([{"type": "udp", "endpoints": ["198.51.100.7:51820"]}]), "a snapshot made before the switch loses the node's addresses and faketls");
+	}
+
+	#[test]
+	fn a_port_per_inbound_and_transport_wins_over_the_port_per_type() {
+		let mut settings = Settings {node_host: "192.0.2.10".into(), relays: vec![relay(json!({"ports": {"tls": 8443, "udp": 6000}, "inbound_ports": {"Main/tls": 9443, "Other/udp-obfs": 7000, "Gone/ws": 1}}))], ..Settings::default()};
+		settings.profile_overrides.insert("Main".into(), json!({"transport_public_key": "key"}));
+		let templates = derive(&settings, &document(), &settings.relays, None, &Exposure::default(), false);
+		assert_eq!((templates[0]["profile"]["transports"][0]["endpoints"][1].clone(), templates[0]["profile"]["transports"][1]["candidates"][1]["address"].clone(), templates[1]["profile"]["transports"][0]["endpoints"][1].clone()), (json!("198.51.100.7:6000"), json!("198.51.100.7:9443"), json!("198.51.100.7:7000")), "the inbound's key first, then the type's port, and the node's own port when neither is set");
+		let read = |ports: Value| serde_json::from_value::<Settings>(json!({"relays": [{"name": "a", "address": "198.51.100.7", "enabled": true, "inbound_ports": ports}]})).is_ok();
+		assert!(read(json!({"Main/ws": 8443})) && read(json!({"A/B/ws": 8443})));
+		assert!(!read(json!({"Main/ws": 0})) && !read(json!({"Main": 80})) && !read(json!({"Main/quic": 80})) && !read(json!({"/ws": 80})) && !read(json!({"Main/faketls": 80})));
 	}
 
 	#[test]
@@ -666,7 +745,7 @@ mod tests {
 		let shape = json!({"up": {"method": "POST", "in": "body"}, "down": {"mode": "sse"}});
 		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "fronted-shaped", "listen": "127.0.0.1:8443", "path": "/a-long-enough-path", "decoy": {"origin": "http://origin.example.org:8080"}, "trusted_proxies": ["127.0.0.1"], "shape": shape.clone()}]}]});
 		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
-		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
 		assert_eq!(template["profile"]["transports"], json!([{"type": "fronted-shaped", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:443", "sni": "origin.example.org", "host": "origin.example.org"}], "shape": shape}]), "the shape is the node's object, as the subscription format wants it");
 		assert_eq!(template["missing"], json!(["inbound_public_key", "transport_public_key"]), "a fronted-shaped transport needs the transport public key like tls and ws");
 	}
@@ -690,7 +769,7 @@ mod tests {
 		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "fronted-shaped", "listen": "127.0.0.1:8443", "path": "/a-long-enough-path", "decoy": {"origin": "http://origin.example.org:8080"}, "trusted_proxies": ["127.0.0.1"], "shape": shape.clone()}]}]});
 		let relays = vec![relay(json!({"transports": ["fronted-shaped"], "ports": {"fronted-shaped": 9443}}))];
 		let settings = Settings {node_host: "192.0.2.10".into(), relays: relays.clone(), ..Settings::default()};
-		let template = derive(&settings, &document, &relays, None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &relays, None, &Exposure::default(), false).remove(0);
 		assert_eq!(template["profile"]["transports"], json!([{"type": "fronted-shaped", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:443", "sni": "origin.example.org", "host": "origin.example.org"}, {"address": "198.51.100.7:9443", "sni": "origin.example.org", "host": "origin.example.org"}], "shape": shape}]), "the relay's candidate keeps the node's names and shape");
 	}
 
@@ -698,7 +777,7 @@ mod tests {
 	fn a_stream_transport_without_a_name_is_refused_and_the_others_stay() {
 		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "udp", "listen": "0.0.0.0:51820"}, {"type": "ws", "listen": "0.0.0.0:443", "decoy": {"origin": "http://127.0.0.1:8080"}, "path": "/a-long-enough-path"}]}]});
 		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
-		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
 		assert_eq!(template["profile"]["transports"], json!([{"type": "udp", "endpoints": ["192.0.2.10:51820"]}]), "an address is never a name, so the ws transport is left out");
 		assert_eq!((template["refused"][0]["transport"].clone(), template["refused"][0]["code"].clone(), template["refused"].as_array().unwrap().len()), (json!("0.0.0.0:443"), json!("no_name"), 1));
 	}
@@ -707,13 +786,13 @@ mod tests {
 	fn the_certificate_name_comes_before_the_decoy_host() {
 		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "tls", "listen": "0.0.0.0:443", "tls": {"self_signed": true, "name": "node.example.org"}, "decoy": {"origin": "http://decoy.example.net:8080"}, "path": "/a-long-enough-path"}]}]});
 		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
-		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
 		assert_eq!((template["profile"]["transports"][0]["candidates"].clone(), template["refused"].clone()), (json!([{"address": "192.0.2.10:443", "sni": "node.example.org", "host": "node.example.org"}]), json!([])));
 	}
 
 	#[test]
 	fn a_node_address_apps_cannot_reach_holds_the_profile_back() {
-		let missing = |host: &str| derive(&Settings {node_host: host.into(), ..Settings::default()}, &document(), &[], None, &Exposure::default())[1]["missing"].as_array().unwrap().iter().any(|name| name == "node_host");
+		let missing = |host: &str| derive(&Settings {node_host: host.into(), ..Settings::default()}, &document(), &[], None, &Exposure::default(), false)[1]["missing"].as_array().unwrap().iter().any(|name| name == "node_host");
 		for host in ["", "127.0.0.1", "0.0.0.0", "[fe80::1]", "not a name", "Node.Example.org"] {assert!(missing(host), "{host:?}")}
 		for host in ["192.0.2.10", "2001:db8::10", "[2001:db8::10]", "node.example.org"] {assert!(!missing(host), "{host:?}: a host name becomes its addresses in each document")}
 	}
@@ -721,13 +800,13 @@ mod tests {
 	#[test]
 	fn an_inbound_has_addresses_of_its_own_and_a_public_listener_speaks_for_itself() {
 		let mut settings = Settings {node_host: "node.example.org".into(), ..Settings::default()};
-		let endpoints = |settings: &Settings, document: &Value| derive(settings, document, &[], None, &Exposure::default())[0]["profile"]["transports"][0]["endpoints"].clone();
+		let endpoints = |settings: &Settings, document: &Value| derive(settings, document, &[], None, &Exposure::default(), false)[0]["profile"]["transports"][0]["endpoints"].clone();
 		let bound = |listen: &str| json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "udp-obfs", "listen": listen}]}]});
 		assert_eq!(endpoints(&settings, &bound("0.0.0.0:8443")), json!(["node.example.org:8443"]));
 		assert_eq!(endpoints(&settings, &bound("198.51.100.7:8443")), json!(["198.51.100.7:8443"]), "a listener on a public address is reached there");
 		assert_eq!(endpoints(&settings, &bound("10.0.0.5:8443")), json!(["node.example.org:8443"]), "a private one is behind NAT more often than not");
 		settings.profile_overrides.insert("Main".into(), json!({NODE_ADDRESSES: ["203.0.113.5", "edge.example.net", "2001:db8::5"]}));
-		let template = derive(&settings, &bound("198.51.100.7:8443"), &[], None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &bound("198.51.100.7:8443"), &[], None, &Exposure::default(), false).remove(0);
 		assert_eq!(template["profile"]["transports"][0]["endpoints"], json!(["203.0.113.5:8443", "edge.example.net:8443", "[2001:db8::5]:8443"]));
 		assert!(template["profile"].get(NODE_ADDRESSES).is_none() && template["overridden"] == json!([]), "the list is no member of the profile");
 	}
@@ -737,11 +816,11 @@ mod tests {
 		let mut settings = Settings {node_host: "node.example.org".into(), ..Settings::default()};
 		let decoy = json!({"origin": "http://127.0.0.1:8080"});
 		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "ws", "listen": "0.0.0.0:8081", "path": "/a-long-secret-path", "decoy": decoy, "trusted_proxies": ["127.0.0.1"]}, {"type": "tls", "listen": "0.0.0.0:8443", "path": "/another-secret-path", "decoy": decoy}]}]});
-		let addresses = |settings: &Settings| derive(settings, &document, &[], None, &Exposure::default())[0]["profile"]["transports"].as_array().unwrap().iter().map(|transport| transport["candidates"][0]["address"].clone()).collect::<Vec<_>>();
+		let addresses = |settings: &Settings| derive(settings, &document, &[], None, &Exposure::default(), false)[0]["profile"]["transports"].as_array().unwrap().iter().map(|transport| transport["candidates"][0]["address"].clone()).collect::<Vec<_>>();
 		assert_eq!(addresses(&settings), [json!("node.example.org:443"), json!("node.example.org:8443")], "the node's own listener of `ws` speaks plain HTTP to the web server alone");
 		settings.profile_overrides.insert("Main".into(), json!({WEB_PORT: 2083}));
 		assert_eq!(addresses(&settings), [json!("node.example.org:2083"), json!("node.example.org:8443")]);
-		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
 		assert!(template["profile"].get(WEB_PORT).is_none() && template["overridden"] == json!([]), "the port is no member of the profile");
 	}
 
@@ -750,7 +829,7 @@ mod tests {
 		let relay = relay(json!({"address": "cdn.example.net", "transports": ["fronted"]}));
 		assert_eq!(relay.address, "cdn.example.net");
 		let mut profile = json!({"transports": [{"type": "fronted", "candidates": [{"address": "192.0.2.10:443", "sni": "front.example.com"}]}]});
-		carry(&mut profile, "Main", &[(2, &relay)]);
+		carry(&mut profile, "Main", &[(2, &relay)], false);
 		assert_eq!(profile["transports"][0]["candidates"][1], json!({"address": "cdn.example.net:443", "sni": "front.example.com"}));
 	}
 
@@ -764,7 +843,7 @@ mod tests {
 		settings.profile_overrides.insert("Main".into(), json!({"transport_public_key": "an old one"}));
 		remember_keys(&mut settings, &document);
 		assert!(!settings.profile_overrides.contains_key("Main"), "an override of another key is dropped");
-		let derived = derive(&settings, &document, &[], None, &Exposure::default());
+		let derived = derive(&settings, &document, &[], None, &Exposure::default(), false);
 		assert_eq!((derived[0]["profile"]["transport_public_key"].clone(), derived[0]["missing"].as_array().unwrap().contains(&json!("transport_public_key"))), (json!(public), false));
 		assert!(derived[1]["profile"].get("transport_public_key").is_none(), "a profile with no stream transport carries none");
 		document["inbounds"][0]["transport_keys"] = json!(["<redacted>"]);
@@ -787,20 +866,20 @@ mod tests {
 		remember_keys(&mut settings, &document);
 		assert_eq!(settings.transport_keys["Main\n/a-plain-long-path"], public, "kept by tag and path");
 		assert!(!settings.transport_keys.contains_key("Main"), "the inbound's own key is not made from it");
-		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
 		assert_eq!(template["refused"][0]["code"], "plain_host", "no host name of its own, no transport");
 		assert_eq!(template["refused"].as_array().unwrap().len(), 1);
 		assert!(template["profile"]["transports"].as_array().unwrap().iter().all(|transport| transport["type"] != "ws-plain"));
 		settings.profile_overrides.insert("Main".into(), json!({PLAIN_HOST: "plain.example.org"}));
-		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
 		let plain = template["profile"]["transports"].as_array().unwrap().iter().find(|transport| transport["type"] == "ws-plain").unwrap().clone();
 		assert_eq!(plain, json!({"type": "ws-plain", "path": "/a-plain-long-path", "cookie": "session_id", "transport_public_key": public, "candidates": [{"address": "192.0.2.10:80", "host": "plain.example.org"}]}), "port 80 by default, address and host only");
 		assert!(template["profile"].get("transport_public_key").is_none() && template["profile"].get(PLAIN_HOST).is_none() && template["overridden"] == json!([]) && template["refused"] == json!([]));
 		settings.profile_overrides.insert("Main".into(), json!({PLAIN_HOST: "plain.example.org", PLAIN_PORT: 8080}));
-		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
 		assert_eq!(template["profile"]["transports"][2]["candidates"], json!([{"address": "192.0.2.10:8080", "host": "plain.example.org"}]));
 		let relays = vec![relay(json!({"address": "198.51.100.7"}))];
-		let template = derive(&settings, &document, &relays, None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &relays, None, &Exposure::default(), false).remove(0);
 		assert_eq!(template["profile"]["transports"][2]["candidates"].as_array().unwrap().len(), 1, "a relay never carries it");
 		assert!(serde_json::from_value::<Settings>(json!({"relays": [{"name": "a", "address": "198.51.100.7", "enabled": true, "transports": ["ws-plain"]}]})).is_err(), "and cannot be told to");
 	}
@@ -811,7 +890,7 @@ mod tests {
 		let mut settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
 		remember_keys(&mut settings, &document);
 		settings.profile_overrides.insert("Main".into(), json!({PLAIN_HOST: "node.example.org"}));
-		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
 		assert_eq!(template["refused"][0]["code"], "plain_shared");
 		assert!(template["profile"]["transports"].as_array().unwrap().iter().all(|transport| transport["type"] != "ws-plain"));
 		assert!(template["missing"].as_array().unwrap().is_empty() || template["missing"] == json!(["inbound_public_key", "transport_public_key"]), "the covered transports are not blocked by it");
@@ -824,16 +903,16 @@ mod tests {
 		let mut settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
 		remember_keys(&mut settings, &document);
 		settings.profile_overrides.insert("Main".into(), json!({PLAIN_HOST: "other.example.org"}));
-		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
 		assert_eq!(template["refused"][0]["code"], "plain_shared", "the host of another inbound's transport");
 		settings.profile_overrides.insert("Main".into(), json!({PLAIN_HOST: "plain.example.org"}));
-		assert_eq!(derive(&settings, &document, &[], None, &Exposure::default()).remove(0)["refused"], json!([]), "a host of its own is fine");
+		assert_eq!(derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0)["refused"], json!([]), "a host of its own is fine");
 		document["inbounds"][1]["transports"][1]["path"] = json!("/a-plain-long-path");
-		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
 		assert_eq!(template["refused"][0]["code"], "plain_shared", "the path of another inbound's transport");
 		document["inbounds"][1]["transports"][1]["path"] = json!("/other-long-path-here");
 		settings.profile_overrides.insert("Main".into(), json!({PLAIN_HOST: "plain.example.org", "transports": [{"type": "ws-plain", "path": "/by-hand", "transport_public_key": "key", "candidates": [{"address": "192.0.2.10:80", "host": "plain.example.org"}]}]}));
-		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
 		let plain: Vec<&Value> = template["profile"]["transports"].as_array().unwrap().iter().filter(|transport| transport["type"] == "ws-plain").collect();
 		assert_eq!((plain.len(), plain[0]["path"].clone()), (1, json!("/a-plain-long-path")), "a ws-plain written by hand never stays");
 	}
@@ -843,7 +922,7 @@ mod tests {
 		let document = plain_document([9u8; 32]);
 		let mut settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
 		settings.profile_overrides.insert("Main".into(), json!({PLAIN_HOST: "plain.example.org"}));
-		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
 		assert_eq!(template["refused"][0]["code"], "plain_key");
 	}
 }

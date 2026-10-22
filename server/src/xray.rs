@@ -208,7 +208,7 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	let sealed = server_key.as_ref().and_then(|key| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&input.tag), key.as_bytes())));
 	let mut hosts = app.db.call(|db| inbound_hosts(db)).await??;
 	hosts.push((input.tag.clone(), host.clone()));
-	let templates = nodecfg::rated(&app.settings(), &document, &[], None, &hosts).await;
+	let templates = nodecfg::rated(&app.settings(), &document, &[], None, &hosts, true).await;
 	let shared: Vec<Value> = templates.iter().filter(|template| template["profile"]["rating_cap"] == "detectable").map(|template| template["profile"]["id"].clone()).collect();
 	let derived: Vec<Value> = templates.iter().map(|template| template["profile"]["id"].clone()).collect();
 	let (tag, protocol, cache) = (input.tag.clone(), input.protocol.clone(), app.settings.clone());
