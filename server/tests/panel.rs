@@ -2461,7 +2461,7 @@ async fn a_fronted_shaped_relay_is_accepted_with_the_nodes_shape_and_faketls_is_
 	let answer = h.fetch(&link, &kids, 1, "fetch", None).await;
 	let Payload::Subscription(document) = opened(&answer, &[key]) else {panic!("a document {:?}", refusal_of(&answer, &[key]))};
 	let payload::Transport::FrontedShaped(stream, carried) = &document.profiles[0].transports[1] else {panic!("the transport is fronted-shaped")};
-	assert_eq!(stream.candidates.iter().map(|candidate| (candidate.address.address().to_string(), candidate.sni.clone(), candidate.host.clone())).collect::<Vec<_>>(), [("192.0.2.10:8443".to_string(), Some("origin.example.org".to_string()), "origin.example.org".to_string()), ("198.51.100.7:9443".to_string(), Some("origin.example.org".to_string()), "origin.example.org".to_string())], "the relay keeps the node's name and its own address");
+	assert_eq!(stream.candidates.iter().map(|candidate| (candidate.address.address().to_string(), candidate.sni.clone(), candidate.host.clone())).collect::<Vec<_>>(), [("192.0.2.10:443".to_string(), Some("origin.example.org".to_string()), "origin.example.org".to_string()), ("198.51.100.7:9443".to_string(), Some("origin.example.org".to_string()), "origin.example.org".to_string())], "the relay keeps the node's name and its own address");
 	assert_eq!(carried, &veilway_proto::shape::Shape::parse(shape.to_string().as_bytes()).unwrap(), "the shape is the node's, read by the core");
 }
 

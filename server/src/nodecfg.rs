@@ -228,6 +228,8 @@ pub async fn put_section(State(app): State<Arc<App>>, Extension(ctx): Extension<
 
 /// The override member with the addresses apps reach an inbound's profiles at, IP addresses or host names, in place of the node address.
 pub const NODE_ADDRESSES: &str = "node_addresses";
+/// The port of the web server in front of an inbound's `ws` and `fronted-shaped` transports, which is where apps connect: the node only reads plain HTTP from that web server on its own listener. 443 when not set.
+pub const WEB_PORT: &str = "web_port";
 
 /// Whether apps may be sent to `host`: an IP address they may dial, or a host name, which each document turns into the addresses it has then.
 pub fn reachable(host: &str) -> bool {host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>().map_or_else(|_| is_host(host), dialable)}
@@ -315,6 +317,8 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 			Some(match transport["type"].as_str()? {
 				kind @ ("udp" | "udp-obfs") => json!({"type": kind, "endpoints": endpoints}),
 				kind @ ("tls" | "ws" | "fronted-shaped") if transport.get("decoy").is_some() => {
+					// `tls` ends TLS on the node's own listener. `ws` and `fronted-shaped` sit behind the operator's web server, so apps get that server's port and not the listener's.
+					let endpoints: Vec<String> = if kind == "tls" {endpoints} else {let port = settings.profile_overrides.get(&tag).and_then(|edits| edits[WEB_PORT].as_u64()).unwrap_or(443); reached.iter().filter_map(|host| host_port(host, &format!("web:{port}"))).collect()};
 					let Some(name) = [transport["tls"]["name"].as_str(), transport["decoy"]["origin"].as_str().and_then(|origin| origin.split("://").last()?.split(['/', ':']).next()), Some(host)].into_iter().flatten().chain(reached.iter().map(String::as_str)).find(|name| is_host(name)) else {
 						refused.push(json!({"transport": transport["listen"], "code": "no_name", "reason": "apps need a host name to send and check: the certificate names none, the decoy's origin is not a host name, and the node's address is an IP address"}));
 						return None;
@@ -329,7 +333,7 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 		let mut profile = json!({"id": tag.to_lowercase(), "name": tag, "type": "veilway", "gateways": gateways, "mtu": inbound["mtu"].as_u64().unwrap_or(if obfs {1390} else {1420}), "transports": listed});
 		if let Some(public) = settings.inbound_keys.get(&tag) {profile["inbound_public_key"] = json!(public);}
 		if let Some(public) = settings.transport_keys.get(&tag).filter(|_| profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport.get("candidates").is_some()))) {profile["transport_public_key"] = json!(public);}
-		if let Some(edits) = settings.profile_overrides.get(&tag).and_then(Value::as_object) {for (key, value) in edits.iter().filter(|(key, _)| *key != crate::borrowed::ADDRESSES && *key != NODE_ADDRESSES) {profile[key] = value.clone();}}
+		if let Some(edits) = settings.profile_overrides.get(&tag).and_then(Value::as_object) {for (key, value) in edits.iter().filter(|(key, _)| *key != crate::borrowed::ADDRESSES && *key != NODE_ADDRESSES && *key != WEB_PORT) {profile[key] = value.clone();}}
 		// The Xray inbounds answer on the addresses a profile names, so one that shares an address may not claim more than Detectable. An override of `unsafe` is the operator's own choice and stays.
 		if exposure.shares(&addresses(&profile)) && profile["rating_cap"] != "unsafe" {profile["rating_cap"] = json!("detectable");}
 		// Relays come after the overrides, so a transport an override wrote gets them too.
@@ -339,7 +343,7 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 		let used: Vec<String> = transports.iter().filter_map(|transport| transport["listen"].as_str()).flat_map(|listen| hosts(settings, &tag, listen)).collect();
 		if used.is_empty() || !used.iter().all(|host| reachable(host)) {missing.push("node_host")}
 		if profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport["type"] == "tls" || transport["type"] == "ws" || transport["type"] == "fronted-shaped")) && profile.get("transport_public_key").is_none() {missing.push("transport_public_key")}
-		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES && *key != NODE_ADDRESSES).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed, "refused": refused});
+		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES && *key != NODE_ADDRESSES && *key != WEB_PORT).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed, "refused": refused});
 		std::iter::once(own).chain(crate::borrowed::template(settings, document, inbound, &gateways)).collect::<Vec<_>>()
 	}).collect()
 }
@@ -395,6 +399,7 @@ pub async fn put_override(State(app): State<Arc<App>>, Extension(ctx): Extension
 	if inbound.is_empty() || inbound.len() > 64 || input.set.contains_key("device") || input.set.contains_key("id") || input.set.len() > 32 {return Err(Failure::bad("An override has at most 32 members and none of them is `id` or `device`."))}
 	if input.set.get(crate::borrowed::ADDRESSES).is_some_and(|list| !list.as_array().is_some_and(|list| list.len() < CANDIDATES_MAX && list.iter().all(|text| text.as_str().is_some_and(|text| text.parse::<SocketAddr>().map(|found| found.ip()).or_else(|_| text.parse::<IpAddr>()).is_ok_and(dialable))))) {return Err(Failure::bad(format!("{} is at most {} IP addresses that apps may dial, each with a port or without one.", crate::borrowed::ADDRESSES, CANDIDATES_MAX - 1)))}
 	if input.set.get(NODE_ADDRESSES).is_some_and(|list| !list.as_array().is_some_and(|list| (1..CANDIDATES_MAX).contains(&list.len()) && list.iter().all(|host| host.as_str().is_some_and(|host| (!host.contains(':') || host.parse::<IpAddr>().is_ok()) && reachable(host))))) {return Err(Failure::bad(format!("{NODE_ADDRESSES} is 1 to {} IP addresses or host names, without ports. Each transport adds its own port.", CANDIDATES_MAX - 1)))}
+	if input.set.get(WEB_PORT).is_some_and(|port| !port.as_u64().is_some_and(|port| (1..=65535).contains(&port))) {return Err(Failure::bad(format!("{WEB_PORT} is the port of the web server in front of the node, 1 to 65535.")))}
 	let (tag, set) = (inbound.clone(), input.set);
 	app.update_settings(move |settings| if set.is_empty() {settings.profile_overrides.remove(&tag);} else {settings.profile_overrides.insert(tag, Value::Object(set));}).await.map_err(Failure::internal)?;
 	app.db.audit(&ctx.actor, &ctx.source, "profile.override", &inbound, "").await;
@@ -517,7 +522,7 @@ mod tests {
 		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "fronted-shaped", "listen": "127.0.0.1:8443", "path": "/a-long-enough-path", "decoy": {"origin": "http://origin.example.org:8080"}, "trusted_proxies": ["127.0.0.1"], "shape": shape.clone()}]}]});
 		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
 		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
-		assert_eq!(template["profile"]["transports"], json!([{"type": "fronted-shaped", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:8443", "sni": "origin.example.org", "host": "origin.example.org"}], "shape": shape}]), "the shape is the node's object, as the subscription format wants it");
+		assert_eq!(template["profile"]["transports"], json!([{"type": "fronted-shaped", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:443", "sni": "origin.example.org", "host": "origin.example.org"}], "shape": shape}]), "the shape is the node's object, as the subscription format wants it");
 		assert_eq!(template["missing"], json!(["inbound_public_key", "transport_public_key"]), "a fronted-shaped transport needs the transport public key like tls and ws");
 	}
 
@@ -541,7 +546,7 @@ mod tests {
 		let relays = vec![relay(json!({"transports": ["fronted-shaped"], "ports": {"fronted-shaped": 9443}}))];
 		let settings = Settings {node_host: "192.0.2.10".into(), relays: relays.clone(), ..Settings::default()};
 		let template = derive(&settings, &document, &relays, None, &Exposure::default()).remove(0);
-		assert_eq!(template["profile"]["transports"], json!([{"type": "fronted-shaped", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:8443", "sni": "origin.example.org", "host": "origin.example.org"}, {"address": "198.51.100.7:9443", "sni": "origin.example.org", "host": "origin.example.org"}], "shape": shape}]), "the relay's candidate keeps the node's names and shape");
+		assert_eq!(template["profile"]["transports"], json!([{"type": "fronted-shaped", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:443", "sni": "origin.example.org", "host": "origin.example.org"}, {"address": "198.51.100.7:9443", "sni": "origin.example.org", "host": "origin.example.org"}], "shape": shape}]), "the relay's candidate keeps the node's names and shape");
 	}
 
 	#[test]
@@ -580,6 +585,19 @@ mod tests {
 		let template = derive(&settings, &bound("198.51.100.7:8443"), &[], None, &Exposure::default()).remove(0);
 		assert_eq!(template["profile"]["transports"][0]["endpoints"], json!(["203.0.113.5:8443", "edge.example.net:8443", "[2001:db8::5]:8443"]));
 		assert!(template["profile"].get(NODE_ADDRESSES).is_none() && template["overridden"] == json!([]), "the list is no member of the profile");
+	}
+
+	#[test]
+	fn apps_reach_a_ws_transport_at_the_web_server_in_front_and_a_tls_one_at_its_listener() {
+		let mut settings = Settings {node_host: "node.example.org".into(), ..Settings::default()};
+		let decoy = json!({"origin": "http://127.0.0.1:8080"});
+		let document = json!({"inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"], "transports": [{"type": "ws", "listen": "0.0.0.0:8081", "path": "/a-long-secret-path", "decoy": decoy, "trusted_proxies": ["127.0.0.1"]}, {"type": "tls", "listen": "0.0.0.0:8443", "path": "/another-secret-path", "decoy": decoy}]}]});
+		let addresses = |settings: &Settings| derive(settings, &document, &[], None, &Exposure::default())[0]["profile"]["transports"].as_array().unwrap().iter().map(|transport| transport["candidates"][0]["address"].clone()).collect::<Vec<_>>();
+		assert_eq!(addresses(&settings), [json!("node.example.org:443"), json!("node.example.org:8443")], "the node's own listener of `ws` speaks plain HTTP to the web server alone");
+		settings.profile_overrides.insert("Main".into(), json!({WEB_PORT: 2083}));
+		assert_eq!(addresses(&settings), [json!("node.example.org:2083"), json!("node.example.org:8443")]);
+		let template = derive(&settings, &document, &[], None, &Exposure::default()).remove(0);
+		assert!(template["profile"].get(WEB_PORT).is_none() && template["overridden"] == json!([]), "the port is no member of the profile");
 	}
 
 	#[test]

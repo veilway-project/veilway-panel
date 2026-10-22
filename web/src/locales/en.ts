@@ -1149,6 +1149,8 @@ export const en = {
 	"profiles.inboundKey": "Inbound public key",
 	"profiles.inboundKeyHint": "The public half veilway genkey printed with this inbound's private key.",
 	"profiles.addresses": "Addresses",
+	"profiles.webPort": "Web server port",
+	"profiles.webPortHint": "The port of your web server in front of the WebSocket transport, where apps connect. Your web server ends TLS there and passes the path on to the node. Empty means 443.",
 	"profiles.addressesHint": "IP addresses or host names apps reach this inbound at, separated by commas. Empty uses the inbound's own address when it listens on a public one, else the node address. Each transport adds its own port.",
 	"profiles.show": "Show the profile",
 	"profiles.overrides": "{count, plural, =0 {Overrides} one {Overrides (# field)} other {Overrides (# fields)}}",
