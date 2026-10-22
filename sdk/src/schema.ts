@@ -2152,7 +2152,7 @@ export interface components {
              */
             terms_url: string;
             /**
-             * @description When the first transport key of each `veilway` inbound became first, and where its rotation stands. Owned by the server: read-only in the API.
+             * @description When the first transport key of each `veilway` inbound and of each `ws-plain` transport (named as in `transport_keys`) became first, and where its rotation stands. Owned by the server: read-only in the API.
              * @default {}
              */
             readonly transport_clocks: {
@@ -2165,7 +2165,7 @@ export interface components {
              */
             transport_key_days: number;
             /**
-             * @description The public half of the first transport key of each `veilway` inbound, by inbound tag, which its profile carries as `transport_public_key` for its `tls`, `ws` and `fronted` transports. Made the same way as `inbound_keys`.
+             * @description The public half of the first transport key of each `veilway` inbound, by inbound tag, which its profile carries as `transport_public_key` for its `tls`, `ws` and `fronted` transports, and of each of its `ws-plain` transports (own keys), by tag, a newline and the path. Made the same way as `inbound_keys`.
              * @default {}
              */
             readonly transport_keys: {

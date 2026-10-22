@@ -6,7 +6,7 @@ import type {PanelKey} from "../locales/en.ts";
 import {SettingsContext} from "../settings.ts";
 
 const MISSING = ["inbound_public_key", "transport_public_key", "node_host"];
-const REFUSALS = ["not_acknowledged", "behind_proxy", "key_shared", "no_public_key", "bad_site", "node_host", "profile_id", "no_name"];
+const REFUSALS = ["not_acknowledged", "behind_proxy", "key_shared", "no_public_key", "bad_site", "node_host", "profile_id", "no_name", "plain_host", "plain_shared", "plain_key", "plain_cookie"];
 
 // A profile with every transport left out is not published, so what it lacks blocks nothing.
 const emptyTemplate = (template: Template) => !(Array.isArray(template.profile.transports) && template.profile.transports.length) && (template.kind === "faketls" || (template.refused ?? []).length > 0);
@@ -52,7 +52,7 @@ function Refusals({refused}: {refused: NonNullable<Template["refused"]>}) {
 
 function Override({template, onSaved}: {template: Template, onSaved: () => void}) {
 	const {t} = useP(), toast = useToast(), shared = useContext(SettingsContext), current = (shared.settings?.profile_overrides?.[template.inbound] ?? {}) as Record<string, unknown>;
-	const [text, setText] = useState(JSON.stringify(current, null, 2)), [key, setKey] = useState(String(current.inbound_public_key ?? "")), [hosts, setHosts] = useState((Array.isArray(current.node_addresses) ? current.node_addresses as string[] : []).join(", ")), [port, setPort] = useState<number | "">(typeof current.web_port === "number" ? current.web_port : ""), fronted = ((template.profile.transports ?? []) as {type?: string}[]).some(transport => transport.type === "ws" || transport.type === "fronted-shaped"), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
+	const [text, setText] = useState(JSON.stringify(current, null, 2)), [key, setKey] = useState(String(current.inbound_public_key ?? "")), [hosts, setHosts] = useState((Array.isArray(current.node_addresses) ? current.node_addresses as string[] : []).join(", ")), [port, setPort] = useState<number | "">(typeof current.web_port === "number" ? current.web_port : ""), [plainHost, setPlainHost] = useState(String(current.plain_host ?? "")), [plainPort, setPlainPort] = useState<number | "">(typeof current.plain_port === "number" ? current.plain_port : ""), plain = ((template.profile.transports ?? []) as {type?: string}[]).some(transport => transport.type === "ws-plain") || (template.refused ?? []).some(item => item.code.startsWith("plain_")), fronted = ((template.profile.transports ?? []) as {type?: string}[]).some(transport => transport.type === "ws" || transport.type === "fronted-shaped"), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const save = async (set: Record<string, unknown>) => {
 		setBusy(true);
 		setError(null);
@@ -83,6 +83,11 @@ function Override({template, onSaved}: {template: Template, onSaved: () => void}
 		</form>
 		{fronted && <form className="p-inline-form" onSubmit={event => { event.preventDefault(); const {web_port: _old, ...rest} = current; void save(port === "" || port === 443 ? rest : {...rest, web_port: port}); }}>
 			<NumberField label={t("profiles.webPort")} hint={t("profiles.webPortHint")} unit="TCP" placeholder="443" min={1} max={65535} value={port} onChange={setPort}/>
+			<Button type="submit" disabled={busy}>{t("common.save")}</Button>
+		</form>}
+		{plain && <form className="p-inline-form" onSubmit={event => { event.preventDefault(); const {plain_host: _host, plain_port: _port, ...rest} = current; void save({...rest, ...(plainHost.trim() ? {plain_host: plainHost.trim().toLowerCase()} : {}), ...(plainPort === "" || plainPort === 80 ? {} : {plain_port: plainPort})}); }}>
+			<TextField label={t("profiles.plainHost")} hint={t("profiles.plainHostHint")} placeholder="plain.example.org" value={plainHost} onChange={setPlainHost} technical/>
+			<NumberField label={t("profiles.plainPort")} hint={t("profiles.plainPortHint")} unit="TCP" placeholder="80" min={1} max={65535} value={plainPort} onChange={setPlainPort}/>
 			<Button type="submit" disabled={busy}>{t("common.save")}</Button>
 		</form>}
 		<details className="p-details">

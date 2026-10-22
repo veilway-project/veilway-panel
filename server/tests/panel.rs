@@ -670,6 +670,13 @@ impl Fake {
 					for key in inbound["transport_keys"].as_array_mut().into_iter().flatten().filter(|key| key.as_str().is_some_and(|key| key.starts_with("<redacted"))) {
 						*key = was.iter().find(|kept| marked(kept) == *key).cloned().unwrap_or(Value::Null);
 					}
+					let tag = inbound["tag"].clone();
+					for stream in inbound["transports"].as_array_mut().into_iter().flatten().filter(|stream| stream["type"] == "ws-plain") {
+						let was: Vec<Value> = held["inbounds"].as_array().into_iter().flatten().filter(|was| was["tag"] == tag).flat_map(|was| was["transports"].as_array().into_iter().flatten()).find(|was| was["path"] == stream["path"]).and_then(|was| was["transport_keys"].as_array().cloned()).unwrap_or_default();
+						for key in stream["transport_keys"].as_array_mut().into_iter().flatten().filter(|key| key.as_str().is_some_and(|key| key.starts_with("<redacted"))) {
+							*key = was.iter().find(|kept| marked(kept) == *key).cloned().unwrap_or(Value::Null);
+						}
+					}
 				}
 				*generation += 1;
 				fake.applied.lock().unwrap().push(document.clone());
@@ -704,6 +711,9 @@ fn marked(key: &Value) -> Value {json!(format!("<redacted:{}>", STANDARD.decode(
 fn redacted(mut document: Value) -> Value {
 	for inbound in document["inbounds"].as_array_mut().into_iter().flatten() {
 		for key in inbound["transport_keys"].as_array_mut().into_iter().flatten() {*key = marked(key);}
+		for stream in inbound["transports"].as_array_mut().into_iter().flatten().filter(|stream| stream["type"] == "ws-plain") {
+			for key in stream["transport_keys"].as_array_mut().into_iter().flatten() {*key = marked(key);}
+		}
 		for transport in inbound["transports"].as_array_mut().into_iter().flatten().filter(|transport| transport["type"] == "faketls") {
 			if let Some(bytes) = transport["transport_key"].as_str().filter(|key| !key.starts_with("<redacted")).and_then(|key| STANDARD.decode(key).ok()) {transport["transport_key"] = json!(format!("<redacted:{}>", bytes.iter().take(4).map(|byte| format!("{byte:02x}")).collect::<String>()))}
 		}
@@ -2771,4 +2781,52 @@ async fn transport_key_days_is_seven_to_thirty() {
 		body["default_endpoint"] = json!("main");
 		assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(body), "10.0.0.1").await.status, status, "{days}");
 	}
+}
+
+fn plain_inbound(key: &str, plain: &str) -> Value {
+	let mut inbounds = rotating_inbound(key);
+	inbounds[0]["upgrade_cookie"] = json!("session_id");
+	inbounds[0]["transports"].as_array_mut().unwrap().push(json!({"type": "ws-plain", "listen": "127.0.0.1:8081", "path": "/a-plain-long-path", "decoy": {"origin": "http://origin.example.org:8080"}, "trusted_proxies": ["127.0.0.1"], "transport_keys": [plain]}));
+	inbounds
+}
+
+fn plain_keys(fake: &Fake) -> Vec<String> {fake.document.lock().unwrap()["inbounds"][0]["transports"][2]["transport_keys"].as_array().unwrap().iter().map(|key| key.as_str().unwrap().to_string()).collect()}
+
+async fn published_plain(h: &Harness) -> Value {h.app.settings().profiles.iter().find(|profile| profile["id"] == "main").unwrap()["transports"].as_array().unwrap().iter().find(|transport| transport["type"] == "ws-plain").unwrap().clone()}
+
+#[tokio::test]
+async fn a_ws_plain_transport_keeps_its_own_public_key_and_rotates_it_every_seven_days() {
+	let (fake, h, session) = borrowed_node().await;
+	let (old, inbound_key) = (STANDARD.encode([5u8; 32]), STANDARD.encode([6u8; 32]));
+	let public = |key: &str| STANDARD.encode(veilway_proto::proof::public_key(&<[u8; 32]>::try_from(STANDARD.decode(key).unwrap()).unwrap()));
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32]), "plain_host": "plain.example.org", "plain_port": 8080}})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"plain_host": "192.0.2.1"}})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "a host name, not an address");
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"plain_host": "plain.example.org", "plain_port": 0}})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32]), "plain_host": "plain.example.org"}})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(put_inbounds(&h, &session, 1, plain_inbound(&inbound_key, &old)).await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	let slot = "Main\n/a-plain-long-path";
+	assert_eq!(h.app.settings().transport_keys[slot], public(&old), "the public half is kept when the keys are applied");
+	let published = published_plain(&h).await;
+	assert_eq!((published["transport_public_key"].clone(), published["cookie"].clone(), published["candidates"].clone()), (json!(public(&old)), json!("session_id"), json!([{"address": "192.0.2.10:80", "host": "plain.example.org"}])));
+	assert_ne!(published["transport_public_key"], json!(public(&inbound_key)), "not the inbound's key");
+	assert!(!serde_json::to_string(&h.call(Method::GET, "/p/api/config", Some(&session), None, "10.0.0.1").await.json()).unwrap().contains(&old), "the API shows no key");
+	let pass = || async {upkeep_once(&h.app, &mut Upkeep::default()).await};
+	let age = |days: i64| {let days = days * 86_400; h.app.update_settings(move |settings| for clock in settings.transport_clocks.values_mut() {clock.since = crypto::now() - days})};
+	pass().await;
+	assert!(h.app.settings().transport_clocks.contains_key(slot), "the transport has a clock of its own");
+	age(6).await.unwrap();
+	pass().await;
+	assert_eq!(plain_keys(&fake), vec![old.clone()], "nothing before seven days");
+	age(8).await.unwrap();
+	pass().await;
+	let keys = plain_keys(&fake);
+	assert_eq!((keys.len(), keys[1].clone(), node_keys(&fake)), (2, old.clone(), vec![inbound_key.clone()]), "the plain key is rotated at seven days, the inbound's is not");
+	assert_eq!((published_plain(&h).await["transport_public_key"].clone(), h.app.settings().transport_keys[slot].clone()), (json!(public(&keys[0])), public(&keys[0])), "the profile carries the new half once the node holds the key");
+	assert_eq!(published_transport_key(&h).await, public(&inbound_key), "the profile's own key is untouched");
+	h.app.update_settings(move |settings| settings.transport_clocks.get_mut(slot).unwrap().retire_at = crypto::now() - 1).await.unwrap();
+	pass().await;
+	assert_eq!(plain_keys(&fake), vec![keys[0].clone()], "the old key is gone after the overlap");
+	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await.json().to_string();
+	assert!(audit.contains("transport_key.rotate") && !audit.contains(&keys[0]) && !audit.contains(&old));
 }

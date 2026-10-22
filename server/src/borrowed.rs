@@ -153,11 +153,11 @@ pub fn template(settings: &Settings, document: &Value, inbound: &Value, gateways
 	let mut profile = json!({"id": id, "name": format!("{tag} (borrowed site, alpha)"), "type": "veilway", "gateways": gateways, "mtu": inbound["mtu"].as_u64().unwrap_or(1420), "transports": emitted, "rating_cap": "detectable"});
 	if let Some(public) = settings.inbound_keys.get(tag) {profile["inbound_public_key"] = json!(public);}
 	let edits = settings.profile_overrides.get(tag).and_then(Value::as_object);
-	for (key, value) in edits.into_iter().flatten().filter(|(key, _)| !OWN.contains(&key.as_str()) && *key != ADDRESSES && *key != crate::nodecfg::NODE_ADDRESSES && *key != crate::nodecfg::WEB_PORT) {profile[key] = value.clone();}
+	for (key, value) in edits.into_iter().flatten().filter(|(key, _)| !OWN.contains(&key.as_str()) && *key != ADDRESSES && !crate::nodecfg::NOT_MEMBERS.contains(&key.as_str())) {profile[key] = value.clone();}
 	let mut missing = Vec::new();
 	if profile.get("inbound_public_key").is_none() {missing.push("inbound_public_key")}
 	if host.is_empty() && settings.profile_overrides.get(tag).and_then(|edits| edits[crate::nodecfg::NODE_ADDRESSES].as_array()).is_none_or(Vec::is_empty) {missing.push("node_host")}
-	Some(json!({"inbound": tag, "kind": "faketls", "profile": profile, "missing": missing, "refused": refused, "overridden": edits.into_iter().flatten().map(|(key, _)| key).filter(|key| !OWN.contains(&key.as_str()) && *key != crate::nodecfg::NODE_ADDRESSES && *key != crate::nodecfg::WEB_PORT).collect::<Vec<_>>(), "trimmed": []}))
+	Some(json!({"inbound": tag, "kind": "faketls", "profile": profile, "missing": missing, "refused": refused, "overridden": edits.into_iter().flatten().map(|(key, _)| key).filter(|key| !OWN.contains(&key.as_str()) && !crate::nodecfg::NOT_MEMBERS.contains(&key.as_str())).collect::<Vec<_>>(), "trimmed": []}))
 }
 
 #[cfg(test)]

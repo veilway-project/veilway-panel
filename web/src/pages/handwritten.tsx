@@ -6,7 +6,7 @@ import {drawPreset, presetOf, ShapeFields, shapeProblems} from "../shape.tsx";
 // The profiles of the settings, as the subscription format writes them ("A profile" and "Transports of a profile" of the format page). The text stays the one value: the form edits the parsed list and writes it back, so the JSON view always shows what is saved, and members the form does not know are kept.
 type Obj = Record<string, unknown>;
 type Check = (key: string) => string | undefined;
-const TYPES = ["udp", "udp-obfs", "tls", "ws", "fronted", "fronted-shaped", "faketls"];
+const TYPES = ["udp", "udp-obfs", "tls", "ws", "ws-plain", "fronted", "fronted-shaped", "faketls"];
 const STREAM = ["tls", "ws", "fronted", "fronted-shaped"];
 const UNPINNED = ["fronted", "fronted-shaped"];
 // The members a faketls transport or candidate does not take, as the subscription format lists them.
@@ -62,7 +62,7 @@ function problems(list: unknown[], t: ReturnType<typeof useP>["t"]) {
 				});
 				return;
 			}
-			if (!STREAM.includes(type)) {
+			if (!STREAM.includes(type) && type !== "ws-plain") {
 				const endpoints = arr(tr.endpoints).map(str);
 				if (endpoints.length < 1 || endpoints.length > 16) put(here + "endpoints", t("hand.problem.endpoints"));
 				endpoints.forEach((dial, k) => { if (!dialable(dial)) put(here + "endpoints." + k, t("hand.problem.dial")); });
@@ -72,6 +72,19 @@ function problems(list: unknown[], t: ReturnType<typeof useP>["t"]) {
 			if (path.length < 12 || path.length > 256 || !/^\/[A-Za-z0-9._~/-]*$/.test(path) || path.split("/").includes("..")) put(here + "path", t("hand.problem.path"));
 			if (candidates.length < 1 || candidates.length > 16) put(here + "candidates", t("hand.problem.candidates"));
 			if (type === "fronted-shaped") shapeProblems(obj(tr.shape), "").forEach(key => put(here + "shape." + key, t(key)));
+			if (type === "ws-plain") {
+				const key = str(tr.transport_public_key);
+				if (!isKey(key)) put(here + "transport_public_key", t("hand.problem.plainKey")); else if (key === str(p.transport_public_key)) put(here + "transport_public_key", t("hand.problem.plainKeyOfProfile"));
+				if (!/^[A-Za-z0-9_-]{1,32}$/.test(str(tr.cookie))) put(here + "cookie", t("hand.problem.plainCookie"));
+				if (Object.keys(tr).some(name => !["type", "path", "cookie", "transport_public_key", "candidates"].includes(name))) put(here + "member", t("hand.problem.plainMember"));
+				candidates.forEach((c, k) => {
+					const spot = here + "candidates." + k + ".";
+					if (!dialable(str(c.address))) put(spot + "address", t("hand.problem.dial"));
+					if (!HOST.test(str(c.host))) put(spot + "host", t("hand.problem.host"));
+					if (Object.keys(c).some(name => name !== "address" && name !== "host")) put(spot + "member", t("hand.problem.plainMember"));
+				});
+				return;
+			}
 			candidates.forEach((c, k) => {
 				const spot = here + "candidates." + k + ".", sni = str(c.sni), pins = arr(c.pins).map(str), self = c.self_signed === true;
 				if (!dialable(str(c.address))) put(spot + "address", t("hand.problem.dial"));
@@ -146,6 +159,7 @@ function TransportBlock({index, transport, check, onChange, onRemove, onMove}: {
 	const {t} = useP(), tr = obj(transport), type = str(tr.type), endpoints = arr(tr.endpoints).map(str), candidates = arr(tr.candidates).map(obj), known = TYPES.includes(type), shape = obj(tr.shape), [preset, setPreset] = useState(() => presetOf(shape));
 	const retype = (next: string) => {
 		if (next === "faketls") return onChange({type: next, candidates: (candidates.length ? candidates : [{address: "", sni: ""}]).map(c => ({address: str(c.address), sni: str(c.sni)}))});
+		if (next === "ws-plain") return onChange({type: next, path: str(tr.path), cookie: str(tr.cookie), transport_public_key: str(tr.transport_public_key), candidates: (candidates.length ? candidates : [{address: "", host: ""}]).map(c => ({address: str(c.address), host: str(c.host)}))});
 		if (!STREAM.includes(next)) return onChange({type: next, endpoints: endpoints.length ? endpoints : [""]});
 		const kept = (candidates.length ? candidates : [{address: "", sni: "", host: ""}]).map(c => Object.fromEntries(Object.entries(c).filter(([k]) => !(k === "self_signed" && next !== "tls") && !(k === "pins" && UNPINNED.includes(next)))));
 		if (next !== "fronted-shaped") return onChange({type: next, path: str(tr.path), candidates: kept});
@@ -170,6 +184,20 @@ function TransportBlock({index, transport, check, onChange, onRemove, onMove}: {
 					{at("member") && <p className="p-hand-error">{at("member")}</p>}
 				</div>; })}
 				{candidates.length < 16 && <div><Button size="sm" icon="plus" onClick={() => onChange({...tr, candidates: [...candidates, {address: "", sni: ""}]})}>{t("hand.addCandidate")}</Button></div>}
+			</div> : type === "ws-plain" ? <div className="p-stack">
+				<Banner tone="warning" title={t("stream.plainTitle")}>{t("stream.plainWarn")}</Banner>
+				{check("member") && <p className="p-hand-error">{check("member")}</p>}
+				<TextField label={t("hand.path")} hint={t("hand.pathHint")} placeholder="/api/v2/stream-sync" value={str(tr.path)} onChange={v => onChange({...tr, path: v.trim()})} error={check("path")} technical/>
+				<TextField label={t("hand.plainCookie")} hint={t("hand.plainCookieHint")} value={str(tr.cookie)} onChange={v => onChange({...tr, cookie: v.trim()})} error={check("cookie")} technical/>
+				<TextField label={t("hand.borrowedKey")} hint={t("hand.plainKeyHint")} value={str(tr.transport_public_key)} onChange={v => onChange({...tr, transport_public_key: v.trim()})} error={check("transport_public_key")} technical/>
+				{check("candidates") && <p className="p-hand-error">{check("candidates")}</p>}
+				{candidates.map((c, k) => { const at = (key: string) => check(`candidates.${k}.${key}`); return <div key={k} className="p-hand-candidate p-stack">
+					<div className="p-row"><span className="vw-label">{t("hand.candidate", {number: k + 1})}</span>{candidates.length > 1 && <IconButton icon="close" label={t("hand.removeCandidate", {number: k + 1})} onClick={() => onChange({...tr, candidates: candidates.filter((_, m) => m !== k)})}/>}</div>
+					<DialRow label={t("hand.address")} value={str(c.address)} error={at("address")} onChange={next => setCandidate(k, "address", next)}/>
+					<TextField label={t("hand.host")} hint={t("hand.plainHostHint")} placeholder="plain.example.org" value={str(c.host)} onChange={v => setCandidate(k, "host", v.trim().toLowerCase())} error={at("host")} technical/>
+					{at("member") && <p className="p-hand-error">{at("member")}</p>}
+				</div>; })}
+				{candidates.length < 16 && <div><Button size="sm" icon="plus" onClick={() => onChange({...tr, candidates: [...candidates, {address: "", host: ""}]})}>{t("hand.addCandidate")}</Button></div>}
 			</div> : !STREAM.includes(type) ? <div className="p-stack">
 				{check("endpoints") && <p className="p-hand-error">{check("endpoints")}</p>}
 				{endpoints.map((dial, k) => <DialRow key={k} label={t("hand.endpoint", {number: k + 1})} value={dial} error={check("endpoints." + k)} onChange={next => onChange({...tr, endpoints: endpoints.map((old, m) => m === k ? next : old)})} onRemove={endpoints.length > 1 ? () => onChange({...tr, endpoints: endpoints.filter((_, m) => m !== k)}) : undefined}/>)}

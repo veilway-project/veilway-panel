@@ -9,22 +9,22 @@ import {XrayForm, XraySheet} from "./xray.tsx";
 
 type Section = "inbounds" | "outbounds" | "exits" | "routing";
 type Item = Record<string, unknown>;
-type Row = {type: string, listen: string, path: string, at: number, cert: "self" | "files", name: string, certFile: string, keyFile: string, origin: string, proxyProtocol: boolean, http2: boolean, proxies: string[], header: string, preset: string, shape: Item, limits: Record<string, number | "">, siteHost: string, siteNames: string[], sitePort: number | "", siteAddress: string, acknowledged: boolean, siteKey: string};
+type Row = {type: string, listen: string, path: string, at: number, cert: "self" | "files", name: string, certFile: string, keyFile: string, origin: string, proxyProtocol: boolean, http2: boolean, proxies: string[], header: string, preset: string, shape: Item, limits: Record<string, number | "">, siteHost: string, siteNames: string[], sitePort: number | "", siteAddress: string, acknowledged: boolean, siteKey: string, keys: string[]};
 type BorrowedErrors = Partial<Record<"listen" | "host" | "names" | "port" | "address" | "ack" | "key", PanelKey>>;
 type StreamErrors = Partial<Record<"path" | "origin" | "certFile" | "keyFile" | "name" | "proxies" | "header", PanelKey>>;
 type Cond = {key: string, values: string};
 type Listed = {kind: "veilway" | "wireguard" | "xray", tag: string, index: number, item?: Item, xray?: XrayRow};
 type XrayRow = {tag: string, protocol: string, listen: string, port: number, security: string, clients: number, host: string, managed: boolean, certificate_missing: boolean};
 const TABS = ["exits", "routing", "outbounds"] as const;
-const TRANSPORTS = ["udp", "udp-obfs", "tls", "ws", "fronted", "fronted-shaped", "faketls"];
-const PATHED = ["tls", "ws", "fronted", "fronted-shaped"];
+const TRANSPORTS = ["udp", "udp-obfs", "tls", "ws", "ws-plain", "fronted", "fronted-shaped", "faketls"];
+const PATHED = ["tls", "ws", "ws-plain", "fronted", "fronted-shaped"];
 const CONDITIONS = ["user", "group", "inbound", "link", "ip", "domain", "protocol", "port", "icmp_type", "icmp_code"];
 const NUMERIC = ["protocol", "port", "icmp_type", "icmp_code"];
 const TAG = /^[a-z0-9][a-z0-9_-]{0,63}$/, RESERVED = ["all", "any", "block", "reject", "drop", "local", "direct", "user", "users"], KEY = /^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/;
 // Loopback, private and link-local hosts, the ones the node's validator does not warn about. A host may come with brackets or a prefix length.
 // Each pool of a listener with its bounds, default and unit from the schema, and the pools each transport has: udp-obfs only sessions, tls no pools of the proxy path.
 const LIMITS: Record<string, [number, number, number, "sessions" | "connections" | "requests"]> = {sessions: [1, 1048576, 16384, "sessions"], undecided: [1, 65536, 512, "connections"], undecided_per_source: [1, 65536, 64, "connections"], relayed: [1, 65536, 1024, "connections"], proxy_connections: [2, 65536, 2048, "connections"], decoy_requests_per_source: [1, 65536, 16, "requests"], fronted_sessions: [1, 65536, 1024, "sessions"], shaped_sessions: [1, 65536, 256, "sessions"], site_rate: [1, 1024, 16, "connections"]};
-const POOLS: Record<string, string[]> = {"udp-obfs": ["sessions"], tls: ["sessions", "undecided", "undecided_per_source", "relayed"], ws: ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source"], fronted: ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source", "fronted_sessions"], "fronted-shaped": ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source", "fronted_sessions", "shaped_sessions"], faketls: ["relayed", "site_rate"]};
+const POOLS: Record<string, string[]> = {"udp-obfs": ["sessions"], tls: ["sessions", "undecided", "undecided_per_source", "relayed"], ws: ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source"], fronted: ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source", "fronted_sessions"], "fronted-shaped": ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source", "fronted_sessions", "shaped_sessions"], "ws-plain": ["sessions", "undecided", "undecided_per_source", "relayed", "proxy_connections", "decoy_requests_per_source"], faketls: ["relayed", "site_rate"]};
 const REFUSED_HEADERS = ["upgrade", "connection", "sec-websocket-accept", "set-cookie", "content-length", "transfer-encoding", "content-type", "content-encoding", "trailer", "keep-alive"];
 // What an exit does with traffic its outbound cannot carry, and the default of each kind. Only ping may be answered by the node, and only UDP may leave from the node's own address.
 const POLICIES: Record<string, string[]> = {icmp_echo: ["local", "reject", "drop", "direct", "via"], udp: ["reject", "drop", "direct", "via"], other: ["reject", "drop", "via"]};
@@ -221,7 +221,7 @@ const outside = (row: Row, key: string) => typeof row.limits[key] === "number" &
 // A key from the browser's random source, as veilway genkey makes one: an inbound key is clamped for X25519, a transport key is 32 random bytes.
 const newKey = (clamped: boolean) => { const key = crypto.getRandomValues(new Uint8Array(32)); if (clamped) { key[0] = key[0]! & 248; key[31] = (key[31]! & 127) | 64; } return btoa(String.fromCharCode(...key)); };
 
-const toRow = (tr: Item, at: number): Row => { const tls = (tr.tls ?? {}) as Item, site = (tr.site ?? {}) as Item, shape = (tr.shape ?? {}) as Item; return {limits: {...((tr.limits ?? {}) as Record<string, number>)}, proxyProtocol: ((tr.decoy ?? {}) as Item).proxy_protocol === true, http2: tr.http2 === "on", type: str(tr.type), listen: str(tr.listen), path: str(tr.path), at, cert: tls.cert !== undefined ? "files" : "self", name: str(tls.name), certFile: str(tls.cert), keyFile: str(tls.key), origin: str(((tr.decoy ?? {}) as Item).origin), proxies: Array.isArray(tr.trusted_proxies) && tr.trusted_proxies.length ? tr.trusted_proxies as string[] : [""], header: str(tr.client_address_header), preset: presetOf(shape), shape, siteHost: str(site.host), siteNames: Array.isArray(site.names) ? site.names.map(str) : [], sitePort: typeof site.port === "number" ? site.port : "", siteAddress: str(site.address), acknowledged: site.acknowledged === true, siteKey: str(tr.transport_key)}; };
+const toRow = (tr: Item, at: number): Row => { const tls = (tr.tls ?? {}) as Item, site = (tr.site ?? {}) as Item, shape = (tr.shape ?? {}) as Item; return {limits: {...((tr.limits ?? {}) as Record<string, number>)}, proxyProtocol: ((tr.decoy ?? {}) as Item).proxy_protocol === true, http2: tr.http2 === "on", type: str(tr.type), listen: str(tr.listen), path: str(tr.path), at, cert: tls.cert !== undefined ? "files" : "self", name: str(tls.name), certFile: str(tls.cert), keyFile: str(tls.key), origin: str(((tr.decoy ?? {}) as Item).origin), proxies: Array.isArray(tr.trusted_proxies) && tr.trusted_proxies.length ? tr.trusted_proxies as string[] : [""], header: str(tr.client_address_header), preset: presetOf(shape), shape, siteHost: str(site.host), siteNames: Array.isArray(site.names) ? site.names.map(str) : [], sitePort: typeof site.port === "number" ? site.port : "", siteAddress: str(site.address), acknowledged: site.acknowledged === true, siteKey: str(tr.transport_key), keys: Array.isArray(tr.transport_keys) ? tr.transport_keys.map(str) : []}; };
 
 // The checks the node's validator runs on a tls, ws or fronted transport of a veilway inbound, so a mistake shows at its field before the review. Errors stop the review; warnings repeat the node's own.
 function streamProblems(row: Row, rows: Row[]) {
@@ -229,6 +229,7 @@ function streamProblems(row: Row, rows: Row[]) {
 	const file = (path: string) => path.trim() !== "" && !/^[/\\]/.test(path.trim()) && path.trim()[1] !== ":" && !path.trim().split(/[/\\]/).includes("..");
 	if (!/^\/[A-Za-z0-9._~/-]{11,255}$/.test(row.path.trim()) || row.path.split("/").includes("..")) errors.path = "stream.err.path";
 	else if (row.type === "fronted-shaped" && rows.some(other => other !== row && other.listen.trim() === row.listen.trim() && other.path.trim().startsWith(row.path.trim()))) errors.path = "stream.err.prefix";
+	else if (row.type === "ws-plain" && rows.some(other => other !== row && other.type !== "ws-plain" && PATHED.includes(other.type) && other.path.trim() === row.path.trim())) errors.path = "stream.err.plainPath";
 	if (!/^http:\/\/([a-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]+\])(:[1-9][0-9]{0,4})?\/?$/.test(row.origin.trim())) errors.origin = "stream.err.origin";
 	else if (!local(origin)) warnings.push("stream.warn.origin");
 	if (row.type === "tls") {
@@ -288,7 +289,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 	const setBackend = (key: string, next: unknown) => { const copy = {...(draft.backend as Item)}; if (next === undefined || next === "") delete copy[key]; else copy[key] = next; set("backend", copy); };
 	const reorder = useReorder(rows.length, index => t("config.transport", {number: index + 1}), (from, to) => { const next = rows.filter((_, i) => i !== from); next.splice(to, 0, rows[from]!); setRows(next); });
 	const kind = str(draft.type), back = (draft.backend ?? {}) as Item, tag = str(draft.tag), clash = taken.includes(tag), veilway = section === "inbounds" && kind === "veilway";
-	const problems = rows.map(row => veilway && PATHED.includes(row.type) ? streamProblems(row, rows) : null), proved = problems.some(Boolean), upgraded = veilway && rows.some(row => row.type === "tls" || row.type === "ws");
+	const problems = rows.map(row => veilway && PATHED.includes(row.type) ? streamProblems(row, rows) : null), proved = problems.some((problem, i) => problem && rows[i]!.type !== "ws-plain"), upgraded = veilway && rows.some(row => row.type === "tls" || row.type === "ws"), cookied = upgraded || (veilway && rows.some(row => row.type === "ws-plain")), plainWrong = veilway && rows.some(row => row.type === "ws-plain" && !(KEY.test(row.keys[0] ?? "") || (row.keys[0] ?? "").startsWith("<redacted")));
 	const padding = (draft.padding ?? {}) as Item, headers = lines(form.headers), headersWrong = headers.length > 16 ? "stream.err.headersMany" : headers.some(name => !/^[A-Za-z0-9-]{1,64}$/.test(name)) ? "stream.err.header" : headers.some(name => REFUSED_HEADERS.includes(name.toLowerCase())) ? "stream.err.headerRefused" : null;
 	const paddingWrong = (key: "normal" | "wide") => typeof padding[key] === "number" && !(key === "normal" ? (padding[key] as number) >= 64 && (padding[key] as number) <= 255 : (padding[key] as number) >= 512 && (padding[key] as number) <= 1023);
 	const un = (back.unsupported ?? {}) as Item, policy = (key: string) => typeof un[key] === "object" && un[key] ? "via" : str(un[key]) || (key === "icmp_echo" ? "local" : "reject"), viaOf = (key: string) => str(((un[key] ?? {}) as Item).via), proxied = socks.includes(str(back.outbound)), direct = back.type === "netstack" && !proxied;
@@ -296,7 +297,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 	const around = back.type === "netstack" && ["icmp_echo", "udp", "other"].some(key => (policy(key) === "direct" || policy(key) === "via") && !(key === "udp" && direct)) && proxied && back.proxy_only !== false;
 	const idleWrong = (key: "tcp_idle_secs" | "udp_idle_secs") => typeof back[key] === "number" && !(key === "tcp_idle_secs" ? (back[key] as number) >= 10 && (back[key] as number) <= 86400 : (back[key] as number) >= 5 && (back[key] as number) <= 3600);
 	const setPolicy = (key: string, value: string, via = "") => { const next = {...un}; if (value === "via") next[key] = {via: via || targets(key)[0] || ""}; else if (value === (key === "icmp_echo" ? "local" : "reject")) delete next[key]; else next[key] = value; setBackend("unsupported", Object.keys(next).length ? next : undefined); };
-	const keys = Array.isArray(draft.transport_keys) ? draft.transport_keys as string[] : [], keyWrong = proved && !(KEY.test(keys[0] ?? "") || (keys[0] ?? "").startsWith("<redacted")), cookieWrong = upgraded && !/^[A-Za-z0-9_-]{1,32}$/.test(str(draft.upgrade_cookie));
+	const keys = Array.isArray(draft.transport_keys) ? draft.transport_keys as string[] : [], keyWrong = proved && !(KEY.test(keys[0] ?? "") || (keys[0] ?? "").startsWith("<redacted")), cookieWrong = cookied && !/^[A-Za-z0-9_-]{1,32}$/.test(str(draft.upgrade_cookie));
 	const borrowed = rows.map((row, i) => veilway && row.type === "faketls" ? borrowedProblems(row, rows, [...keys, ...rows.filter((other, j) => j !== i && other.type === "faketls").map(other => other.siteKey.trim())].filter(Boolean)) : null), borrowedWrong = borrowed.some(problem => problem && Object.keys(problem).length > 0);
 	const others = chain.filter(other => str(other.tag) !== str(item?.tag)), through = others.filter(other => other.type === "socks5" && str(other.tag) !== tag).map(other => str(other.tag)), viaWrong = section === "outbounds" && kind === "socks5" && str(draft.via) ? viaProblem(tag, str(draft.via), [...others, draft]) : undefined;
 	const udpChained = section === "exits" && back.type === "netstack" && chained.includes(str(back.outbound));
@@ -316,12 +317,12 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 		if (row.type === "tls") {if (row.http2) made.http2 = "on"; else delete made.http2}
 		if (row.type === "tls") return {...made, tls: row.cert === "files" ? {cert: row.certFile.trim(), key: row.keyFile.trim()} : {self_signed: true, ...(row.name ? {name: row.name} : {})}};
 		if (row.header) made.client_address_header = row.header; else delete made.client_address_header;
-		return {...made, trusted_proxies: proxies, ...(row.type === "fronted-shaped" ? {shape: row.shape} : {})};
+		return {...made, trusted_proxies: proxies, ...(row.type === "fronted-shaped" ? {shape: row.shape} : {}), ...(row.type === "ws-plain" ? {transport_keys: row.keys.filter(Boolean)} : {})};
 	})};
 	const save = () => {
 		setTried(true);
 		if (json !== null && issues.length && issues[0]!.path === "json") return;
-		if (problems.some(problem => problem && (Object.keys(problem.errors).length || problem.shape.length)) || borrowedWrong || keyWrong || cookieWrong || headersWrong || paddingWrong("normal") || paddingWrong("wide") || rows.some(row => (POOLS[row.type] ?? []).some(key => outside(row, key))) || around || viaWrong || (udpChained && policy("udp") === "direct") || idleWrong("tcp_idle_secs") || idleWrong("udp_idle_secs") || (back.type === "netstack" && ["icmp_echo", "udp", "other"].some(key => policy(key) === "via" && !targets(key).includes(viaOf(key))))) return;
+		if (problems.some(problem => problem && (Object.keys(problem.errors).length || problem.shape.length)) || borrowedWrong || keyWrong || plainWrong || cookieWrong || headersWrong || paddingWrong("normal") || paddingWrong("wide") || rows.some(row => (POOLS[row.type] ?? []).some(key => outside(row, key))) || around || viaWrong || (udpChained && policy("udp") === "direct") || idleWrong("tcp_idle_secs") || idleWrong("udp_idle_secs") || (back.type === "netstack" && ["icmp_echo", "udp", "other"].some(key => policy(key) === "via" && !targets(key).includes(viaOf(key))))) return;
 		const made = build(), found = schema && typeof schema === "object" ? say(check(((schema.properties as Record<string, Item>)[section]?.items ?? true) as Schema, made, schema, section)) : [];
 		setIssues(clash ? [{path: "tag", text: t("config.tagTaken")}, ...found] : found);
 		if (!clash && !found.length) onSave(made, section === "inbounds" ? moved(rows.map(row => row.at)).map(move => t("review.moveTransport", {name: rows[move.to]!.type + " " + (rows[move.to]!.path || rows[move.to]!.listen), inbound: tag, from: number(move.from + 1), to: number(move.to + 1)})) : []);
@@ -348,7 +349,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 						const problem = problems[i], bproblem = borrowed[i], shownBorrowed = (field: keyof BorrowedErrors, value: string) => bproblem?.[field] && (tried || value.trim()) ? t(bproblem[field]!) : undefined, up = (change: Partial<Row>) => setRows(rows.map((r, j) => j === i ? {...r, ...change} : r)), shown = (field: keyof StreamErrors, value: string) => problem?.errors[field] && (tried || value.trim()) ? t(problem.errors[field]!) : undefined;
 						return <div key={i} className="p-transport-row" data-order-row>
 							{rows.length > 1 && <div className="p-row-tools">{reorder.handle(i)}<div className="p-cluster">{reorder.steps(i)}<IconButton icon="close" label={t("config.removeTransport", {number: i + 1})} onClick={() => setRows(rows.filter((_, j) => j !== i))}/></div></div>}
-							<SelectField label={t("config.transport", {number: i + 1})} value={row.type} onChange={type => up(type === "fronted-shaped" && type !== row.type ? {type, ...drawPreset("post-stream")} : {type})} options={(kind === "wireguard" ? ["udp", "ws"] : TRANSPORTS).map(type => ({value: type, label: type === "faketls" ? t("borrowed.name") : type, detail: t(`config.transport.${type}` as PanelKey)}))}/>
+							<SelectField label={t("config.transport", {number: i + 1})} value={row.type} onChange={type => up(type === "fronted-shaped" && type !== row.type ? {type, ...drawPreset("post-stream")} : type === "ws-plain" && !row.keys.length ? {type, keys: [newKey(false)]} : {type})} options={(kind === "wireguard" ? ["udp", "ws"] : TRANSPORTS).map(type => ({value: type, label: type === "faketls" ? t("borrowed.name") : type, detail: t(`config.transport.${type}` as PanelKey)}))}/>
 							<TextField label={t("config.listen")} placeholder={problem && row.type !== "tls" ? "127.0.0.1:8081" : "0.0.0.0:443"} value={row.listen} onChange={listen => up({listen})} technical/>
 							{row.type === "faketls" && veilway && <div className="p-stream">
 								<Banner tone="warning" title={t("borrowed.title")}>{t("borrowed.warning")}</Banner>
@@ -396,6 +397,15 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 									</fieldset>
 									<TextField label={t("stream.header")} hint={t("stream.headerHint")} placeholder="X-Forwarded-For" value={row.header} onChange={header => up({header: header.trim()})} error={shown("header", row.header)} technical optional/>
 								</>}
+								{row.type === "ws-plain" && <>
+									<Mark tone="warning">{t("stream.plainWarn")}</Mark>
+									<div className="p-proxy">
+										<SecretField label={t("stream.plainKey")} hint={t((row.keys[0] ?? "").startsWith("<redacted") ? "stream.keyKeep" : "stream.plainKeyHint")} value={row.keys[0] ?? ""} onChange={value => up({keys: [value.trim(), ...row.keys.slice(1)]})} error={plainWrong && !(KEY.test(row.keys[0] ?? "") || (row.keys[0] ?? "").startsWith("<redacted")) && (tried || row.keys[0]) ? t("stream.err.key") : undefined} autoComplete="off"/>
+										{!(row.keys[0] ?? "").startsWith("<redacted") && <Button onClick={() => up({keys: [newKey(false), ...row.keys.slice(1)]})}>{t("config.keyMake")}</Button>}
+									</div>
+									{row.keys.length > 1 && <p className="vw-muted vw-small">{t("stream.keyRotating")}</p>}
+									<p className="vw-muted vw-small">{t("stream.plainCookie")}</p>
+								</>}
 								{problem.warnings.map(key => <Mark key={key} tone="warning">{t(key)}</Mark>)}
 							</div>}
 							{veilway && POOLS[row.type] && <details className="p-details p-wide" open={(POOLS[row.type] ?? []).some(key => outside(row, key)) || undefined}>
@@ -409,14 +419,14 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 					{rows.length < 8 && <div><Button size="sm" icon="plus" onClick={() => setRows([...rows, toRow({type: "udp-obfs"}, -1)])}>{t("config.addTransport")}</Button></div>}
 					<p className="vw-muted vw-small">{t("inbounds.rating")}</p>
 				</fieldset>
-				{proved && <fieldset className="p-mirror">
+				{(proved || cookied) && <fieldset className="p-mirror">
 					<legend className="vw-label">{t("stream.keys")}</legend>
-					<div className="p-proxy">
+					{proved && <div className="p-proxy">
 						<SecretField label={t("stream.key")} hint={t((keys[0] ?? "").startsWith("<redacted") ? "stream.keyKeep" : "stream.keyNew")} value={keys[0] ?? ""} onChange={value => set("transport_keys", [value.trim(), ...keys.slice(1)])} error={keyWrong && (tried || keys[0]) ? t("stream.err.key") : undefined} autoComplete="off"/>
 						{!(keys[0] ?? "").startsWith("<redacted") && <Button onClick={() => set("transport_keys", [newKey(false), ...keys.slice(1)])}>{t("config.keyMake")}</Button>}
-					</div>
-					{keys.length > 1 && <p className="vw-muted vw-small">{t("stream.keyRotating")}</p>}
-					{upgraded && <div className="p-proxy">
+					</div>}
+					{proved && keys.length > 1 && <p className="vw-muted vw-small">{t("stream.keyRotating")}</p>}
+					{cookied && <div className="p-proxy">
 						<TextField label={t("stream.cookie")} hint={t("stream.cookieHint")} value={str(draft.upgrade_cookie)} onChange={value => set("upgrade_cookie", value.trim())} error={cookieWrong && (tried || draft.upgrade_cookie) ? t("stream.err.cookie") : undefined} technical/>
 						<Button onClick={() => { const bytes = crypto.getRandomValues(new Uint8Array(17)); set("upgrade_cookie", Array.from(bytes.slice(1, 9 + bytes[0]! % 9), b => "abcdefghijklmnopqrstuvwxyz0123456789_-"[b % 38]).join("")); }}>{t("stream.cookiePick")}</Button>
 					</div>}

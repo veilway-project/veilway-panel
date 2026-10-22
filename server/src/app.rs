@@ -165,10 +165,10 @@ pub struct Settings {
 	/// The public half of the key of each `veilway` inbound, by inbound tag, which its profile is made with. Made the same way as `faketls_keys`, and read-only in the API too.
 	#[schemars(extend("readOnly" = true))]
 	pub inbound_keys: BTreeMap<String, String>,
-	/// The public half of the first transport key of each `veilway` inbound, by inbound tag, which its profile carries as `transport_public_key` for its `tls`, `ws` and `fronted` transports. Made the same way as `inbound_keys`.
+	/// The public half of the first transport key of each `veilway` inbound, by inbound tag, which its profile carries as `transport_public_key` for its `tls`, `ws` and `fronted` transports, and of each of its `ws-plain` transports (own keys), by tag, a newline and the path. Made the same way as `inbound_keys`.
 	#[schemars(extend("readOnly" = true))]
 	pub transport_keys: BTreeMap<String, String>,
-	/// When the first transport key of each `veilway` inbound became first, and where its rotation stands. Owned by the server: read-only in the API.
+	/// When the first transport key of each `veilway` inbound and of each `ws-plain` transport (named as in `transport_keys`) became first, and where its rotation stands. Owned by the server: read-only in the API.
 	#[schemars(extend("readOnly" = true))]
 	pub transport_clocks: BTreeMap<String, TransportClock>,
 }
