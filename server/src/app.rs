@@ -45,6 +45,17 @@ impl Limiter {
 	}
 	/// When the key was last hit, if it was.
 	pub fn last(&self, key: &str) -> Option<i64> {self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(key).and_then(|hits| hits.back().copied())}
+	/// `hit` for a limit that only spaces requests out: a refused request is not counted, so asking again early does not push the next allowed time further away.
+	pub fn admit(&self, key: &str, max: usize, window: i64) -> bool {
+		let (mut all, at) = (self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), now());
+		if all.len() >= KEYS_MAX {all.retain(|_, hits| hits.back().is_some_and(|last| at - last < 3600))}
+		if all.len() >= KEYS_MAX && !all.contains_key(key) {return false}
+		let hits = all.entry(key.to_string()).or_default();
+		while hits.front().is_some_and(|first| at - first >= window) {hits.pop_front();}
+		if hits.len() >= max {return false}
+		hits.push_back(at);
+		true
+	}
 	pub fn clear(&self, key: &str) {self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(key);}
 }
 

@@ -2643,6 +2643,14 @@ async fn the_wait_between_new_devices_is_a_setting_and_0_lets_them_come_one_afte
 	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
 	assert!(matches!(opened(&h.fetch(&link, &kids, 1, "confirm", None).await, &[key.clone()]), Payload::Subscription(_)));
 	assert_eq!(refusal_of(&h.fetch(&link, &kids, 2, "confirm", None).await, &[key.clone()]), Reason::RateLimited);
+	// An import that was given up releases its pending device, and the next one does not wait.
+	let (_, other) = h.user(&session, "bob", json!({"device_limit": 4})).await;
+	let kids = [key_of(&other).kid()];
+	assert!(matches!(opened(&h.fetch(&other, &kids, 11, "fetch", None).await, &[key.clone()]), Payload::Subscription(_)));
+	assert_eq!(refusal_of(&h.fetch(&other, &kids, 12, "fetch", None).await, &[key.clone()]), Reason::RateLimited);
+	assert_eq!(refusal_of(&h.fetch(&other, &kids, 11, "release", None).await, &[key.clone()]), Reason::Released);
+	assert!(matches!(opened(&h.fetch(&other, &kids, 12, "fetch", None).await, &[key.clone()]), Payload::Subscription(_)));
+	let kids = [key_of(&link).kid()];
 	h.configure(&session, json!({"new_device_minutes": 0})).await;
 	for device in [2, 3] {assert!(matches!(opened(&h.fetch(&link, &kids, device, "confirm", None).await, &[key.clone()]), Payload::Subscription(_)))}
 }

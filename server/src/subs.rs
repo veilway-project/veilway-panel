@@ -237,7 +237,8 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 			let outcome = match device {
 				Some(device) if !crypto::equal(&device.secret_hash, &hash) => Err("device_mismatch"),
 				Some(device) => match op {
-					"release" if device.state == "pending" => {changed |= tx.execute("delete from devices where id = ?", [device.id])? > 0; Ok(None)}
+					// An import that was cancelled or failed gives back the wait for a new device as well, so that trying again does not meet `rate_limited`.
+					"release" if device.state == "pending" => {changed |= tx.execute("delete from devices where id = ?", [device.id])? > 0; held.sub_limits.clear(&format!("new:{}:{}", user.id, user.token_gen)); Ok(None)}
 					// The user removed the subscription from the app, which proved the device's secret to ask: the device goes, confirmed or not, and its place is free.
 					"leave" => {
 						changed |= tx.execute("delete from devices where id = ?", [device.id])? > 0;
@@ -249,7 +250,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 						changed |= device.state == "pending";
 						Ok(Some(tx.query_row(&format!("select {DEVICE_COLUMNS} from devices where id = ?"), [device.id], DeviceRow::read)?))
 					}
-					"fetch" if device.state == "enrolled" && !held.sub_limits.hit(&format!("dev:{}:{}", user.id, public_key), 1, 60) => Err("rate_limited"),
+					"fetch" if device.state == "enrolled" && !held.sub_limits.admit(&format!("dev:{}:{}", user.id, public_key), 1, 60) => Err("rate_limited"),
 					_ => {tx.execute("update devices set last_seen = ? where id = ?", params![at, device.id])?; Ok(Some(device))}
 				},
 				None if op == "release" || op == "leave" => Ok(None),
@@ -259,7 +260,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 					let limit = if user.device_limit == 0 {NODE_DEVICES_MAX} else {user.device_limit.min(NODE_DEVICES_MAX)};
 					let (address, enroll) = (allocate(&tx, &pool), op == "confirm");
 					if total >= limit || (!enroll && pending >= PENDING_PLACES) || address.is_none() {Err("device_limit")}
-					else if wait > 0 && !held.sub_limits.hit(&format!("new:{}:{}", user.id, user.token_gen), 1, wait) {Err("rate_limited")}
+					else if wait > 0 && !held.sub_limits.admit(&format!("new:{}:{}", user.id, user.token_gen), 1, wait) {Err("rate_limited")}
 					else {
 						let secret = keys.seal_secret(&user.record_id, &format!("transport_secret:{}", public_key), &crypto::random::<32>());
 						tx.execute("insert into devices (user_id, name, public_key, secret_hash, address, transport_secret, state, token_gen, created, confirmed_at, last_seen) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![user.id, name.clone().unwrap_or_default(), public_key, hash.as_slice(), address, secret, if enroll {"enrolled"} else {"pending"}, user.token_gen, at, enroll.then_some(at), at])?;
