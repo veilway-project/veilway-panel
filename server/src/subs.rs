@@ -313,9 +313,11 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 			Err(_) => return unknown(&app, mirrored),
 		}
 	};
+	// An app answered before the node has its new device is refused on its first connection and then waits out its retry, so the answer waits for the push, for a few seconds at most. The push goes on by itself if it takes longer.
 	if changed {
 		let app = app.clone();
-		tokio::spawn(async move {let _ = crate::node::sync(&app).await;});
+		let push = tokio::spawn(async move {let _ = crate::node::sync(&app).await;});
+		let _ = tokio::time::timeout(std::time::Duration::from_secs(5), push).await;
 	}
 	let device = match outcome {
 		Err(reason) => return refuse(reason),

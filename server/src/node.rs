@@ -62,7 +62,9 @@ pub(crate) async fn fill(app: &Arc<App>, document: &mut Value) -> Result<(), Str
 	let (handle, app, mut copy, dirty) = (app.db.clone(), app.clone(), document.clone(), app.dirty.clone());
 	*document = handle.call(move |db| -> Result<Value, String> {
 		let (document, keys) = (&mut copy, app.keys.as_ref().ok_or("the key file is missing, so no secret can be opened")?);
-		let (pool, inbounds) = (app.settings().pool_v4, document["inbounds"].as_array().cloned().unwrap_or_default());
+		// An inbound a node link uses carries no users' devices (the node refuses a config that gives it one), so no device gets an address there.
+		let linked: Vec<Value> = document["links"].as_array().into_iter().flatten().filter_map(|link| link.get("inbound").cloned()).collect();
+		let (pool, inbounds) = (app.settings().pool_v4, document["inbounds"].as_array().into_iter().flatten().filter(|inbound| !linked.contains(&inbound["tag"])).cloned().collect::<Vec<_>>());
 		let mut taken: HashSet<String> = db.prepare("select address from devices").and_then(|mut statement| statement.query_map([], |row| row.get(0))?.collect()).map_err(|error| error.to_string())?;
 		taken.extend(document["links"].as_array().into_iter().flatten().flat_map(|link| ["dialler", "listener"].map(|side| link["addresses"][side].clone())).flat_map(|list| list.as_array().cloned().unwrap_or_default()).filter_map(|address| Some(address.as_str()?.split('/').next()?.to_string())));
 		subs::expire_pending(db, now()).map_err(|error| error.to_string())?;
