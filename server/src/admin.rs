@@ -186,8 +186,9 @@ pub struct LoggedIn {pub username: String, pub session_id: String, pub csrf: Str
 	pub password_change_required: bool}
 
 pub async fn login(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Extension(agent): Extension<Agent>, Body(input): Body<Login>) -> Result<Response, Failure> {
-	let per_source = if app.cfg.two_step_on() {LOGIN_PER_SOURCE} else {LOGIN_PER_SOURCE_OFF};
-	if !app.limits.hit(&format!("login:{}", bucket(&ctx.source, 64)), per_source.0, per_source.1) {
+	// Only a wrong login counts toward the limit: a right one and a try the limit already turned away are not recorded, so a source that stops guessing is free again once its failures leave the window.
+	let (per_source, key) = (if app.cfg.two_step_on() {LOGIN_PER_SOURCE} else {LOGIN_PER_SOURCE_OFF}, format!("login:{}", bucket(&ctx.source, 64)));
+	if app.limits.count(&key, per_source.1) >= per_source.0 {
 		let actor = actor_of(&app, &input.username).await;
 		app.db.audit(&actor, &ctx.source, "login.limited", "admin", "").await;
 		return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries. Wait a while."));
@@ -196,6 +197,7 @@ pub async fn login(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	let admin = match verify(&app, admin, &input.username, &input.password, &input.totp).await {
 		Ok(admin) => admin,
 		Err(error) => {
+			app.limits.hit(&key, per_source.0, per_source.1);
 			let actor = actor_of(&app, &input.username).await;
 			app.db.audit(&actor, &ctx.source, "login.failed", "admin", "").await;
 			return Err(error);

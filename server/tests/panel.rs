@@ -2025,6 +2025,16 @@ async fn no_admin_is_left_without_a_secret_after_setup_add_reset_or_change_in_ei
 }
 
 #[tokio::test]
+async fn only_wrong_logins_count_toward_the_limit_of_a_source() {
+	let h = Harness::with_config(None, |cfg| cfg.two_step = "off".into()).await;
+	let login = |password: &'static str| h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": password})), "10.2.0.1");
+	for n in 0..8 {assert_eq!(login(PASSWORD).await.status, StatusCode::OK, "right login {n} was held back");}
+	for _ in 0..5 {assert_eq!(login("not the password at all").await.status, StatusCode::UNAUTHORIZED);}
+	assert_eq!(login(PASSWORD).await.status, StatusCode::TOO_MANY_REQUESTS, "five wrong logins did not stop the source");
+	assert_eq!(h.app.limits.count("login:10.2.0.1", 900), 5, "a try the limit turned away was counted");
+}
+
+#[tokio::test]
 async fn with_the_code_off_a_wait_holds_for_the_right_password_and_a_source_gets_fewer_tries() {
 	async fn wrong(h: &Harness, name: &str, source: &str) -> Answer {h.call(Method::POST, "/p/api/login", None, Some(json!({"username": name, "password": "not the password at all", "totp": "000000"})), source).await}
 	for (two_step, held) in [("off", true), ("on", false)] {
