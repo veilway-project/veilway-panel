@@ -1877,6 +1877,7 @@ export const en = {
 	"endpoints.name": "Name",
 	"endpoints.nameHint": "Letters, digits, dash and underscore. Groups and users pick it by this name.",
 	"endpoints.url": "Address",
+	"endpoints.pathName": "This address does not end with /{name}. The panel answers this endpoint at its subscription path followed by /{name}, and the installer's web server only forwards paths below /sub/. Unless your web server rewrites the path, end the address with /sub/{name}.",
 	"endpoints.urlHint": "The public https address with the path your web server forwards to the panel. Use http only for a plain endpoint.",
 	"endpoints.pinsHint": "Required when the address is an IP address, or a certificate without an authority behind it. One SHA-256 pin in base64 per line, at most two.",
 	"endpoints.users": "{count, plural, one {# account uses this endpoint.} other {# accounts use this endpoint.}}",
