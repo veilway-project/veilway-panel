@@ -10,7 +10,7 @@ create table sessions (id text primary key, admin_id integer not null references
 create table api_tokens (id integer primary key, admin_id integer not null references admins(id) on delete cascade, name text not null, scope text not null, token_hash blob not null unique, prefix text not null, expires_at integer, sources text not null, created integer not null, last_used integer, revoked_at integer);
 create table audit (id integer primary key, at integer not null, actor text not null, source text not null, action text not null, target text not null, detail text not null);
 create table settings (key text primary key, value text not null);
-create table users (id integer primary key, name text not null unique, enabled integer not null default 1, groups text not null default '[]', exits text not null default '\"all\"', default_exit text, quota_bytes integer, quota_period text, expires_at integer, device_limit integer not null, note text not null default '', created integer not null, record_id blob not null, sub_id text not null unique, token_lookup blob not null unique, token_copy blob, token_gen integer not null default 1, token_created integer not null, endpoint text);
+create table users (id integer primary key, name text not null unique, enabled integer not null default 1, groups text not null default '[]', exits text not null default '\"all\"', default_exit text, quota_bytes integer, quota_period text, expires_at integer, device_limit integer not null, note text not null default '', created integer not null, record_id blob not null, sub_id text not null unique, token_lookup blob not null unique, token_copy blob, token_gen integer not null default 1, token_created integer not null, endpoint text, proxy_password blob);
 create table usage_buckets (res integer not null, at integer not null, kind text not null, name text not null, up integer not null default 0, down integer not null default 0, peak_up integer not null default 0, peak_down integer not null default 0, primary key (res, at, kind, name)) without rowid;
 create table counters (kind text not null, name text not null, up integer not null, down integer not null, primary key (kind, name)) without rowid;
 create table devices (id integer primary key, user_id integer not null references users(id) on delete cascade, name text not null, public_key text not null, secret_hash blob not null, address text not null unique, transport_secret blob not null, private_key blob, state text not null, token_gen integer not null, created integer not null, confirmed_at integer, last_seen integer, mirror_name blob, mirror_key blob, mirror_gen integer, last_serial integer not null default 0);
@@ -22,7 +22,7 @@ create table endpoint_use (endpoint text not null, user_id integer not null refe
 ";
 
 /// Steps from one version to the next, applied in order to a file older than the code. Entry `n` takes a file from version `n + 1` to `n + 2`. To add one, append its SQL here, update `SCHEMA` to the new layout (a fresh file gets `SCHEMA` directly) and never edit a step that has shipped. Each step runs in its own transaction together with its version bump.
-pub const MIGRATIONS: &[&str] = &[];
+pub const MIGRATIONS: &[&str] = &["alter table users add column proxy_password blob"];
 /// The version this code writes, kept in the file's `user_version`. A file with a higher number was made by a newer panel and is refused, at start-up and in a restore.
 pub const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;
 /// Calls waiting for the database thread. A call past this is refused at once, so a burst cannot grow the queue without bound.
@@ -135,8 +135,8 @@ mod tests {
 	fn a_fresh_database_gets_the_schema_and_version_1() {
 		let mut connection = memory();
 		migrate(&mut connection, MIGRATIONS).unwrap();
-		assert_eq!(SCHEMA_VERSION, 1);
-		assert_eq!(version(&connection), 1);
+		assert_eq!(SCHEMA_VERSION, 2);
+		assert_eq!(version(&connection), 2);
 		assert_eq!(connection.query_row("select count(*) from sqlite_master where type = 'table'", [], |row| row.get::<_, i64>(0)).unwrap(), 13);
 	}
 
@@ -144,7 +144,8 @@ mod tests {
 	fn a_migrated_file_has_the_schema_of_a_fresh_one() {
 		let (mut fresh, mut migrated) = (memory(), memory());
 		migrate(&mut fresh, MIGRATIONS).unwrap();
-		migrate(&mut migrated, &[]).unwrap();
+		migrated.execute_batch(&SCHEMA.replace(", proxy_password blob", "")).unwrap();
+		migrated.pragma_update(None, "user_version", 1).unwrap();
 		migrate(&mut migrated, MIGRATIONS).unwrap();
 		let dump = |connection: &Connection| connection.prepare("select sql from sqlite_master where sql is not null order by name").unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
 		assert_eq!(dump(&migrated), dump(&fresh));

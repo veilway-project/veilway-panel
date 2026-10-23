@@ -41,12 +41,14 @@ pub struct UserOut {
 	/// 0 is no limit beyond the node's own 16.
 	pub device_limit: i64, pub note: String, pub created: i64, pub subscription_id: String,
 	pub devices: i64, pub pending_devices: i64,
+	/// Whether the user has a proxy password. The password itself is only at `/users/{id}/proxy/show`.
+	pub proxy_login: bool,
 	/// The node's own record of the user: usage, denial and traffic. Null when the node cannot be reached.
 	pub node: Option<Value>,
 }
 
 fn out(user: &UserRow, devices: i64, pending: i64, node: Option<Value>) -> UserOut {
-	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), endpoint: user.endpoint.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, node}
+	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), endpoint: user.endpoint.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, proxy_login: user.proxy, node}
 }
 
 async fn counts(app: &App, id: i64) -> Result<(i64, i64), Failure> {
@@ -460,6 +462,63 @@ pub async fn sub_sealed(State(app): State<Arc<App>>, Extension(ctx): Extension<C
 	let file = tokio::task::spawn_blocking(move || sealed_file::seal(&input.password, &link, salt, nonce)).await.map_err(Failure::internal)?.map_err(Failure::internal)?;
 	app.db.audit(&ctx.actor, &ctx.source, "link.sealed", &format!("user:{id}"), "").await;
 	ok(&Sealed {filename: format!("veilway-{}.vwsealed", user.name), file: STANDARD.encode(file)})
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProxyLogin {
+	/// The name of the account, which is the proxy user name.
+	pub username: String,
+	/// A secret: it is sent in the clear on the way in to a proxy inbound, and is stored sealed.
+	pub password: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProxyChanged {pub user: UserOut, pub node: NodeState}
+
+const PROXY_LABEL: &str = "proxy_password";
+
+/// Makes or replaces the user's proxy password: 32 characters of letters and digits, drawn without bias, so no ':' and nothing a proxy URL needs escaped. The caller pushes to the node.
+pub async fn proxy_set(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
+	if app.keys.is_none() {return Err(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))}
+	let (held, dirty) = (app.clone(), app.dirty.clone());
+	app.db.call(move |db| -> Result<(), Failure> {
+		let user = UserRow::load(db, id)?;
+		let mut password = String::new();
+		while password.len() < 32 {password.extend(crypto::random::<64>().iter().filter(|byte| **byte < 248).map(|byte| b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"[(*byte % 62) as usize] as char).take(32 - password.len()));}
+		let sealed = held.keys.as_ref().expect("checked before the call").seal_secret(&user.record_id, PROXY_LABEL, password.as_bytes());
+		db.execute("update users set proxy_password = ? where id = ?", params![sealed, id])?;
+		audit(db, &ctx.actor, &ctx.source, if user.proxy {"proxy.regenerate"} else {"proxy.create"}, &format!("user:{id}"), &user.name);
+		dirty.store(true, Ordering::Relaxed);
+		Ok(())
+	}).await??;
+	let node = push(&app).await;
+	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
+	let (devices, pending) = counts(&app, id).await?;
+	ok(&ProxyChanged {user: out(&user, devices, pending, None), node})
+}
+
+pub async fn proxy_remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
+	let dirty = app.dirty.clone();
+	app.db.call(move |db| -> Result<(), Failure> {
+		let user = UserRow::load(db, id)?;
+		db.execute("update users set proxy_password = null where id = ?", [id])?;
+		audit(db, &ctx.actor, &ctx.source, "proxy.remove", &format!("user:{id}"), &user.name);
+		dirty.store(true, Ordering::Relaxed);
+		Ok(())
+	}).await??;
+	let node = push(&app).await;
+	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
+	let (devices, pending) = counts(&app, id).await?;
+	ok(&ProxyChanged {user: out(&user, devices, pending, None), node})
+}
+
+/// Opening the password is an export of a secret, so the route needs a recent re-authentication and the audit log says that it was shown, not what it was.
+pub async fn proxy_show(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
+	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
+	let (user, sealed) = app.db.call(move |db| -> rusqlite::Result<(UserRow, Option<Vec<u8>>)> {Ok((UserRow::load(db, id)?, db.query_row("select proxy_password from users where id = ?", [id], |row| row.get(0))?))}).await??;
+	let password = sealed.and_then(|sealed| keys.open_secret(&user.record_id, PROXY_LABEL, &sealed)).and_then(|plain| String::from_utf8(plain).ok()).ok_or_else(|| Failure::new(StatusCode::NOT_FOUND, "no_proxy_login", "This user has no proxy password."))?;
+	app.db.audit(&ctx.actor, &ctx.source, "proxy.show", &format!("user:{id}"), "").await;
+	ok(&ProxyLogin {username: user.name, password})
 }
 
 #[derive(Deserialize, JsonSchema)]

@@ -6,6 +6,7 @@ inbounds[].transport_keys
 links[].transport_secret
 users[].devices[].preshared_key
 users[].devices[].transport_secrets
+users[].proxy_password
 xray.inbounds[].clients[].secret
 xray.inbounds[].server_key
 upstreams[].device_secret

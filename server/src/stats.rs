@@ -25,6 +25,8 @@ pub struct Live {
 	pub exits: Value,
 	/// What each tunnel of the node counted since the node started: connections or sessions opened and open now, those refused by reason, and the bytes carried. As the node reports them.
 	pub tunnels: Value,
+	/// What each proxy inbound (`socks5`, `http`, `mixed`) counted since the node started: connections opened and open now, logins and connections refused, and the bytes carried, under `name`, the inbound's tag. As the node reports them.
+	pub proxies: Value,
 	pub sessions: usize,
 	pub online_users: Vec<String>,
 }
@@ -47,7 +49,7 @@ pub async fn poll(app: &Arc<App>) {
 	online.sort();
 	online.dedup();
 	let status = status.unwrap_or(Value::Null);
-	let live = Live {at, reachable: true, health: json!({"version": status["version"], "uptime_secs": status["uptime_secs"], "generation": status["generation"], "flows": stats["flows"], "state_write_failures": stats["state_write_failures"], "send_failed": stats["send_failed"], "drops": stats["drops"], "dns": stats["dns"], "replay_ready": stats["replay"]["ready"]}), rates: json!({"users": stats["users"], "inbounds": stats["inbounds"], "exits": stats["exits"], "outbounds": stats["outbounds"]}), exits: exits.and_then(|value| value.get("exits").cloned()).unwrap_or(Value::Null), tunnels: stats["tunnels"].clone(), sessions: sessions.len(), online_users: online};
+	let live = Live {at, reachable: true, health: json!({"version": status["version"], "uptime_secs": status["uptime_secs"], "generation": status["generation"], "flows": stats["flows"], "state_write_failures": stats["state_write_failures"], "send_failed": stats["send_failed"], "drops": stats["drops"], "dns": stats["dns"], "replay_ready": stats["replay"]["ready"]}), rates: json!({"users": stats["users"], "inbounds": stats["inbounds"], "exits": stats["exits"], "outbounds": stats["outbounds"]}), exits: exits.and_then(|value| value.get("exits").cloned()).unwrap_or(Value::Null), tunnels: stats["tunnels"].clone(), proxies: stats["proxies"].clone(), sessions: sessions.len(), online_users: online};
 	if let Err(error) = app.db.call(move |db| record(db, at, &stats).map_err(|error| error.to_string())).await.map_err(|error| error.to_string()).and_then(|result| result) {tracing::warn!("the stats could not be recorded: {error}")}
 	*app.live.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(live);
 }

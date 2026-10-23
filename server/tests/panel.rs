@@ -478,6 +478,78 @@ async fn users_are_pushed_to_the_node() {
 }
 
 #[tokio::test]
+async fn a_proxy_password_is_sealed_pushed_only_when_set_and_shown_only_on_its_route() {
+	let mut document = node_document("10.66.0.1/24");
+	let proxy = json!({"tag": "local-socks", "type": "mixed", "listen": "127.0.0.1:1080", "groups": ["office"], "udp": false, "limits": {"connections": 512}});
+	document["inbounds"].as_array_mut().unwrap().push(proxy.clone());
+	let (fake, socket) = Fake::start(document).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let full = h.token(&session, "full", json!({})).await;
+	let (id, _) = h.user(&session, "ann", json!({})).await;
+	let made = h.call(Method::POST, &format!("/p/api/users/{id}/devices"), Some(&session), Some(json!({"name": "panel phone"})), "10.0.0.1").await;
+	assert_eq!(made.status, StatusCode::OK, "{}", String::from_utf8_lossy(&made.body));
+	let pushed = |fake: &Fake| fake.applied.lock().unwrap().last().cloned().unwrap();
+	assert!(pushed(&fake)["users"][0].get("proxy_password").is_none(), "no password, no key");
+	let path = format!("/p/api/users/{id}/proxy");
+	let set = h.call(Method::POST, &path, Some(&session), None, "10.0.0.1").await;
+	assert_eq!(set.status, StatusCode::OK, "{}", String::from_utf8_lossy(&set.body));
+	assert_eq!((set.json()["user"]["proxy_login"].clone(), set.json()["node"]["synced"].clone()), (json!(true), json!(true)));
+	let first = pushed(&fake)["users"][0]["proxy_password"].as_str().unwrap().to_string();
+	assert!(first.len() == 32 && first.bytes().all(|byte| byte.is_ascii_alphanumeric()), "{first}");
+	for read in [h.call(Method::GET, &format!("/p/api/users/{id}"), Some(&session), None, "10.0.0.1").await, h.call(Method::GET, "/p/api/users", Some(&session), None, "10.0.0.1").await, set, h.call(Method::GET, "/p/api/config", Some(&session), None, "10.0.0.1").await] {assert!(!String::from_utf8_lossy(&read.body).contains(&first), "a read shows the password");}
+	let listed = h.call(Method::GET, "/p/api/users", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(listed["users"][0]["proxy_login"], true);
+	let stored: Vec<u8> = h.app.db.call(move |db| db.query_row("select proxy_password from users where id = ?", [id], |row| row.get(0)).unwrap()).await.unwrap();
+	assert!(!stored.windows(first.len()).any(|window| window == first.as_bytes()), "the column holds the password in the clear");
+	let shown = h.call(Method::POST, &format!("{path}/show"), Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((shown["username"].clone(), shown["password"].clone()), (json!("ann"), json!(first)));
+	assert_eq!(h.bearer(Method::POST, &format!("{path}/show"), &full, None, "10.1.1.1").await.status, StatusCode::FORBIDDEN);
+	assert_eq!(h.bearer(Method::POST, &path, &full, None, "10.1.1.1").await.status, StatusCode::FORBIDDEN);
+	let again = h.call(Method::POST, &path, Some(&session), None, "10.0.0.1").await;
+	assert_eq!(again.status, StatusCode::OK);
+	let second = pushed(&fake)["users"][0]["proxy_password"].as_str().unwrap().to_string();
+	assert_ne!(first, second, "regenerating makes a new password");
+	assert_eq!(h.call(Method::POST, &format!("{path}/show"), Some(&session), None, "10.0.0.1").await.json()["password"], json!(second));
+	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await;
+	let text = String::from_utf8_lossy(&audit.body).to_string();
+	assert!(!text.contains(&first) && !text.contains(&second) && text.contains("proxy.regenerate") && text.contains("proxy.show"));
+	let removed = h.bearer(Method::DELETE, &path, &full, None, "10.1.1.1").await;
+	assert_eq!(removed.status, StatusCode::OK, "{}", String::from_utf8_lossy(&removed.body));
+	assert_eq!(removed.json()["user"]["proxy_login"], false);
+	assert!(pushed(&fake)["users"][0].get("proxy_password").is_none(), "a removed password leaves the node's document");
+	assert_eq!(h.call(Method::POST, &format!("{path}/show"), Some(&session), None, "10.0.0.1").await.status, StatusCode::NOT_FOUND);
+	// The fake node's own redaction leaves null keys on every inbound it shows, which no proxy inbound carries.
+	let bare = |inbound: &Value| Value::Object(inbound.as_object().unwrap().iter().filter(|(_, value)| !value.is_null()).map(|(key, value)| (key.clone(), value.clone())).collect());
+	let whole = h.call(Method::GET, "/p/api/config", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(bare(&whole["document"]["inbounds"][1]), proxy, "a proxy inbound reads back as it was written");
+	let inbounds = whole["document"]["inbounds"].clone();
+	let revision = whole["revision"].as_str().unwrap();
+	let applied = h.call(Method::PUT, "/p/api/config/inbounds", Some(&session), Some(json!({"revision": revision, "value": inbounds})), "10.0.0.1").await;
+	assert_eq!(applied.status, StatusCode::OK, "{}", String::from_utf8_lossy(&applied.body));
+	assert_eq!(bare(&pushed(&fake)["inbounds"][1]), proxy, "a section round trip keeps the proxy inbound");
+}
+
+#[tokio::test]
+async fn an_account_with_only_a_proxy_password_is_pushed_with_no_devices() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (bare, _) = h.user(&session, "bare", json!({})).await;
+	let (only, _) = h.user(&session, "only", json!({})).await;
+	assert_eq!(h.call(Method::POST, "/p/api/node/sync", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(fake.applied.lock().unwrap().last().unwrap()["users"], json!([]), "an account with neither a device nor a password stays out");
+	let set = h.call(Method::POST, &format!("/p/api/users/{only}/proxy"), Some(&session), None, "10.0.0.1").await;
+	assert_eq!(set.status, StatusCode::OK, "{}", String::from_utf8_lossy(&set.body));
+	let users = fake.applied.lock().unwrap().last().unwrap()["users"].clone();
+	assert_eq!((users.as_array().unwrap().len(), users[0]["name"].clone(), users[0]["devices"].clone()), (1, json!("only"), json!([])));
+	assert_eq!(users[0]["proxy_password"].as_str().unwrap().len(), 32);
+	assert_ne!(bare, only);
+}
+
+#[tokio::test]
 async fn openapi_is_committed() {
 	let committed = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/openapi.json")).expect("openapi.json is committed next to the manifest");
 	assert!(committed == openapi::openapi(), "openapi.json is out of date: run `veilway-panel openapi > openapi.json`");
@@ -1153,10 +1225,11 @@ async fn stats_are_recorded_per_bucket_and_survive_a_node_restart() {
 	}
 	let now = h.call(Method::GET, "/p/api/stats/now", Some(&session), None, "10.0.0.1").await.json();
 	assert_eq!((now["reachable"].clone(), now["online_users"].clone(), now["sessions"].clone(), now["exits"][0]["tag"].clone()), (json!(true), json!(["ann"]), json!(2), json!("main")));
-	*fake.stats.lock().unwrap() = json!({"users": [], "inbounds": [], "exits": [], "outbounds": [], "tunnels": [{"name": "web", "opened": 3, "open": 1}]});
+	*fake.stats.lock().unwrap() = json!({"users": [], "inbounds": [], "exits": [], "outbounds": [], "tunnels": [{"name": "web", "opened": 3, "open": 1}], "proxies": [{"name": "local-socks", "opened": 5, "open": 2, "refused_logins": 1}]});
 	state.polled_at = 0;
 	upkeep_once(&h.app, &mut state).await;
 	assert_eq!(h.call(Method::GET, "/p/api/stats/now", Some(&session), None, "10.0.0.1").await.json()["tunnels"][0]["open"], 1);
+	assert_eq!(h.call(Method::GET, "/p/api/stats/now", Some(&session), None, "10.0.0.1").await.json()["proxies"][0]["open"], 2);
 	assert_eq!(h.call(Method::GET, "/p/api/stats/usage?kind=nothing", Some(&session), None, "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
 	h.app.db.call(|db| db.execute("update usage_buckets set at = at - 2 * 86400 where res = 60", []).unwrap()).await.unwrap();
 	h.app.db.call(|db| veilway_panel::stats::prune(db, crypto::now())).await.unwrap();

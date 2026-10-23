@@ -4,6 +4,7 @@ import {api, type Device, type LinkView, type NodeState, type NodeUser, type Use
 import {Copyable, ErrorNote, Mark, NodeNote, Qr, useCopy, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {useSettings} from "../settings.ts";
 import {EndpointPick, PlainNote} from "./endpoints.tsx";
+import {ProxyLogin} from "./proxy.tsx";
 import {ExitPicker, type Exits, handoff, keptExits, keptFallback, useExits, useExpiry, UserForm} from "./users.tsx";
 import {XrayLinksDialog} from "./xray.tsx";
 
@@ -150,6 +151,7 @@ export function UserPage({id}: {id: number}) {
 						</div>
 					</div>
 				</Glass>
+				<ProxyLogin user={user} onChanged={page.reload}/>
 			</div>
 			<div className="p-stack">
 				{shown ? <Glass className="p-panel p-sheet-new" aria-labelledby="link-title">

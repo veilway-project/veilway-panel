@@ -1288,6 +1288,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users/{id}/proxy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Makes the user's proxy password, or a new one when there is one. The old one stops working on every socks5, http and mixed inbound at the next push. Needs a recent re-authentication and is audited without the password. No API token can do this. */
+        post: operations["setProxyLogin"];
+        /** Removes the user's proxy password, so they can no longer log in to a proxy inbound. */
+        delete: operations["removeProxyLogin"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}/proxy/show": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Opens the user's proxy user name and password. Needs a recent re-authentication and is audited without the password. No API token can do this. */
+        post: operations["showProxyLogin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users/{id}/subscription": {
         parameters: {
             query?: never;
@@ -1887,6 +1922,8 @@ export interface components {
             /** @description Version, uptime, generation, flows and the counters that say the node is unwell. */
             health: unknown;
             online_users: string[];
+            /** @description What each proxy inbound (`socks5`, `http`, `mixed`) counted since the node started: connections opened and open now, logins and connections refused, and the bytes carried, under `name`, the inbound's tag. As the node reports them. */
+            proxies: unknown;
             /** @description Rates in bytes per second over the node's window, by user, inbound, exit and outbound. */
             rates: unknown;
             reachable: boolean;
@@ -2112,6 +2149,16 @@ export interface components {
         ProfileExit: {
             name: string;
             tag: string;
+        };
+        ProxyChanged: {
+            node: components["schemas"]["NodeState"];
+            user: components["schemas"]["UserOut"];
+        };
+        ProxyLogin: {
+            /** @description A secret: it is sent in the clear on the way in to a proxy inbound, and is stored sealed. */
+            password: string;
+            /** @description The name of the account, which is the proxy user name. */
+            username: string;
         };
         Quota: {
             /** Format: uint64 */
@@ -2771,6 +2818,8 @@ export interface components {
             note: string;
             /** Format: int64 */
             pending_devices: number;
+            /** @description Whether the user has a proxy password. The password itself is only at `/users/{id}/proxy/show`. */
+            proxy_login: boolean;
             /** Format: int64 */
             quota_bytes?: number | null;
             quota_period?: string | null;
@@ -7726,6 +7775,180 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UserEndpoint"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    setProxyLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxyChanged"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    removeProxyLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxyChanged"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    showProxyLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProxyLogin"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */

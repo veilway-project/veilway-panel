@@ -14,13 +14,13 @@ pub const PENDING_LAPSE: i64 = 600;
 const NODE_DEVICES_MAX: i64 = 16;
 
 #[derive(Clone, Debug)]
-pub struct UserRow {pub id: i64, pub name: String, pub enabled: bool, pub groups: String, pub exits: String, pub quota_bytes: Option<i64>, pub quota_period: Option<String>, pub expires_at: Option<i64>, pub device_limit: i64, pub note: String, pub created: i64, pub record_id: [u8; 16], pub sub_id: String, pub token_copy: Option<Vec<u8>>, pub token_gen: i64, pub token_created: i64, pub default_exit: Option<String>, pub endpoint: Option<String>}
+pub struct UserRow {pub id: i64, pub name: String, pub enabled: bool, pub groups: String, pub exits: String, pub quota_bytes: Option<i64>, pub quota_period: Option<String>, pub expires_at: Option<i64>, pub device_limit: i64, pub note: String, pub created: i64, pub record_id: [u8; 16], pub sub_id: String, pub token_copy: Option<Vec<u8>>, pub token_gen: i64, pub token_created: i64, pub default_exit: Option<String>, pub endpoint: Option<String>, pub proxy: bool}
 
-pub const USER_COLUMNS: &str = "id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_copy, token_gen, token_created, default_exit, endpoint";
+pub const USER_COLUMNS: &str = "id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_copy, token_gen, token_created, default_exit, endpoint, proxy_password is not null";
 
 impl UserRow {
 	pub fn read(row: &Row) -> rusqlite::Result<Self> {
-		Ok(Self {id: row.get(0)?, name: row.get(1)?, enabled: row.get(2)?, groups: row.get(3)?, exits: row.get(4)?, quota_bytes: row.get(5)?, quota_period: row.get(6)?, expires_at: row.get(7)?, device_limit: row.get(8)?, note: row.get(9)?, created: row.get(10)?, record_id: row.get::<_, Vec<u8>>(11)?.try_into().unwrap_or([0; 16]), sub_id: row.get(12)?, token_copy: row.get(13)?, token_gen: row.get(14)?, token_created: row.get(15)?, default_exit: row.get(16)?, endpoint: row.get(17)?})
+		Ok(Self {id: row.get(0)?, name: row.get(1)?, enabled: row.get(2)?, groups: row.get(3)?, exits: row.get(4)?, quota_bytes: row.get(5)?, quota_period: row.get(6)?, expires_at: row.get(7)?, device_limit: row.get(8)?, note: row.get(9)?, created: row.get(10)?, record_id: row.get::<_, Vec<u8>>(11)?.try_into().unwrap_or([0; 16]), sub_id: row.get(12)?, token_copy: row.get(13)?, token_gen: row.get(14)?, token_created: row.get(15)?, default_exit: row.get(16)?, endpoint: row.get(17)?, proxy: row.get(18)?})
 	}
 	pub fn load(db: &Connection, id: i64) -> rusqlite::Result<Self> {db.query_row(&format!("select {USER_COLUMNS} from users where id = ?"), [id], Self::read)}
 }

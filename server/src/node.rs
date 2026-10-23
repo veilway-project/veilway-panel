@@ -57,7 +57,7 @@ pub(crate) async fn clear_defaults(app: &App, document: &Value) {
 	if let Err(error) = result.map_err(|error| error.to_string()).and_then(|done| done.map_err(|error| error.to_string())) {tracing::error!("the default exits could not be checked: {error}")}
 }
 
-/// Puts the panel's users into the document's `users`, and the panel's credentials into the `clients` of the Xray inbounds it made, making one for a user who has none yet. A user with no device is left out, since the node needs one. An Xray inbound the panel did not make keeps its clients, less those whose user is gone.
+/// Puts the panel's users into the document's `users`, and the panel's credentials into the `clients` of the Xray inbounds it made, making one for a user who has none yet. A user with no device and no proxy password is left out, since the node needs one of them. An Xray inbound the panel did not make keeps its clients, less those whose user is gone.
 pub(crate) async fn fill(app: &Arc<App>, document: &mut Value) -> Result<(), String> {
 	let (handle, app, mut copy, dirty) = (app.db.clone(), app.clone(), document.clone(), app.dirty.clone());
 	*document = handle.call(move |db| -> Result<Value, String> {
@@ -73,7 +73,8 @@ pub(crate) async fn fill(app: &Arc<App>, document: &mut Value) -> Result<(), Str
 			let record: [u8; 16] = record.try_into().map_err(|_| "a user record id is not 16 bytes")?;
 			let mut devices = db.prepare("select id, public_key, address, transport_secret from devices where user_id = ? and state = 'enrolled' order by id").map_err(|error| error.to_string())?;
 			let devices = devices.query_map([id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
-			if devices.is_empty() {continue}
+			let proxy: Option<Vec<u8>> = db.query_row("select proxy_password from users where id = ?", [id], |row| row.get(0)).map_err(|error| error.to_string())?;
+			if devices.is_empty() && proxy.is_none() {continue}
 			let devices: Vec<Value> = devices.into_iter().map(|(device, public_key, address, sealed)| {
 				let secret = keys.open_secret(&record, &format!("transport_secret:{public_key}"), &sealed).ok_or("a transport secret does not open")?;
 				Ok::<_, String>(json!({"name": format!("d{device}"), "public_key": public_key, "transport_secrets": [App::standard(&secret)], "addresses": subs::node_addresses(&pool, &inbounds, &address, &taken)}))
@@ -84,6 +85,7 @@ pub(crate) async fn fill(app: &Arc<App>, document: &mut Value) -> Result<(), Str
 			if let Some(quota) = quota {user["quota_bytes"] = json!(quota);}
 			if let (Some(_), Some(period)) = (quota, period) {user["quota_period"] = json!(period);}
 			if let Some(expires) = expires {user["expires_at"] = json!(OffsetDateTime::from_unix_timestamp(expires).map_err(|error| error.to_string())?.format(&Rfc3339).map_err(|error| error.to_string())?);}
+			if let Some(sealed) = proxy {user["proxy_password"] = json!(String::from_utf8(keys.open_secret(&record, "proxy_password", &sealed).ok_or("a proxy password does not open")?).map_err(|error| error.to_string())?);}
 			out.push(user);
 			present.push((id, name, record));
 		}

@@ -30,7 +30,7 @@ export function check(schema: Schema, value: unknown, root: Schema, path = ""): 
 		const tried = options.map(option => check(option as Schema, value, root, path));
 		if (tried.some(found => found.length === 0)) continue;
 		// Objects told apart by their type say what is wrong inside the one their type names.
-		const named = options.findIndex(option => { const o = resolve(root, option as Schema); return typeof o === "object" && same((o.properties as Record<string, {const?: unknown}> | undefined)?.type?.const, (value as {type?: unknown} | null)?.type); });
+		const named = options.findIndex(option => { const o = resolve(root, option as Schema), kinds = typeof o === "object" ? resolve(root, (o.properties as Record<string, Schema> | undefined)?.type ?? true) : true; return typeof kinds === "object" && [kinds.const, ...((kinds.oneOf as {const?: unknown}[] | undefined) ?? []).map(one => one.const)].some(known => known !== undefined && same(known, (value as {type?: unknown} | null)?.type)); });
 		issues.push(...(named >= 0 && type === "object" ? tried[named]! : [{path, key: "check.shape" as PanelKey, values: {hint}}]));
 	}
 	if (type === "string") {
