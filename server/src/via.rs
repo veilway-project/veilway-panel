@@ -38,6 +38,7 @@ pub fn problems(document: &Value, running: &Value) -> Vec<String> {
 	let chained = |tag: &str| outbounds.iter().any(|item| item["tag"] == tag && !item["via"].is_null());
 	for (i, exit) in document["exits"].as_array().into_iter().flatten().enumerate() {
 		let (backend, Some(tag)) = (&exit["backend"], exit["backend"]["outbound"].as_str()) else {continue};
+		if backend["type"] == "netstack" && !backend["unsupported"]["udp"].is_null() && !matches!(backend["unsupported"]["udp"].as_str(), Some("reject" | "drop")) && outbounds.iter().any(|item| item["tag"] == tag && item["type"] == "xray") {found.push(format!("exits[{i}].backend.unsupported.udp: an Xray outbound carries UDP itself, and while it is down the flow ends rather than leave this exit around it: choose reject or drop"))}
 		if backend["type"] == "netstack" && backend["unsupported"]["udp"] == "direct" && chained(tag) {found.push(format!("exits[{i}].backend.unsupported.udp: direct UDP would leave from the node's own address around the chain of outbound {tag}: choose reject, drop or via"))}
 	}
 	for tag in gone {
@@ -83,6 +84,16 @@ mod tests {
 		let found = problems(&document, &json!({}));
 		assert_eq!(found.len(), 1, "{found:?}");
 		assert!(found[0].starts_with("exits[0].backend.unsupported.udp: direct UDP"));
+	}
+
+	#[test]
+	fn direct_and_via_udp_are_refused_for_an_exit_whose_outbound_is_xray() {
+		let outbounds = json!([{"tag": "x", "type": "xray", "protocol": "trojan", "server": "x:1"}]);
+		let exit = |udp: Value| json!({"tag": "e", "backend": {"type": "netstack", "outbound": "x", "unsupported": {"udp": udp}}});
+		let found = problems(&json!({"outbounds": outbounds, "exits": [exit(json!("direct")), exit(json!({"via": "other"})), exit(json!("drop")), exit(json!("reject"))]}), &json!({}));
+		assert_eq!(found.len(), 2);
+		assert!(found[0].starts_with("exits[0].backend.unsupported.udp: an Xray outbound"));
+		assert!(found[1].starts_with("exits[1].backend.unsupported.udp: an Xray outbound"));
 	}
 
 	#[test]

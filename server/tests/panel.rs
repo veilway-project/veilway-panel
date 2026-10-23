@@ -793,6 +793,18 @@ impl Fake {
 						}
 					}
 				}
+				for outbound in document["outbounds"].as_array_mut().into_iter().flatten().filter(|outbound| outbound["type"] == "xray") {
+					if let Some(link) = outbound["link"].as_str().map(str::to_string) {
+						fake.calls.lock().unwrap().push(("xray_link".into(), json!(link)));
+						let rest = link.strip_prefix("trojan://").unwrap();
+						let (password, server) = rest.split_once('@').unwrap();
+						*outbound = json!({"tag": outbound["tag"], "type": "xray", "protocol": "trojan", "server": server.split('?').next().unwrap(), "password": password, "security": {"type": "tls"}});
+					}
+					let was = held["outbounds"].as_array().into_iter().flatten().find(|was| was["tag"] == outbound["tag"]).cloned().unwrap_or(Value::Null);
+					for key in ["id", "password"] {
+						if outbound[key].as_str().is_some_and(|text| text.starts_with("<redacted")) {outbound[key] = was[key].clone();}
+					}
+				}
 				*generation += 1;
 				fake.applied.lock().unwrap().push(document.clone());
 				*fake.document.lock().unwrap() = document;
@@ -853,6 +865,11 @@ fn marked(key: &Value) -> Value {json!(format!("<redacted:{}>", STANDARD.decode(
 
 /// What the node shows of a document: the key of a borrowed-site transport only as a marker made of its first bytes, as the real node shows every secret once it holds it.
 fn redacted(mut document: Value) -> Value {
+	for outbound in document["outbounds"].as_array_mut().into_iter().flatten().filter(|outbound| outbound["type"] == "xray") {
+		for key in ["id", "password"] {
+			if let Some(text) = outbound[key].as_str().map(str::to_string) {outbound[key] = json!(format!("<redacted:{}>", text.bytes().take(4).map(|byte| format!("{byte:02x}")).collect::<String>()));}
+		}
+	}
 	for inbound in document["inbounds"].as_array_mut().into_iter().flatten() {
 		for key in inbound["transport_keys"].as_array_mut().into_iter().flatten() {*key = marked(key);}
 		for stream in inbound["transports"].as_array_mut().into_iter().flatten().filter(|stream| stream["type"] == "ws-plain") {
@@ -981,6 +998,38 @@ async fn through_is_written_when_set_and_refused_when_it_loops_breaks_a_user_or_
 	assert!(String::from_utf8_lossy(&refused.body).contains("around the chain of outbound p2"));
 	let target_only = json!([{"tag": "a", "backend": {"type": "netstack", "outbound": "p1", "unsupported": {"udp": "direct"}}}]);
 	assert_eq!(h.call(Method::PUT, "/p/api/config/exits", Some(&session), Some(json!({"revision": "rev3", "value": target_only})), "10.0.0.1").await.status, StatusCode::OK, "an outbound that is only the target of a through dials directly, so direct UDP is allowed");
+}
+
+#[tokio::test]
+async fn an_xray_outbound_goes_to_the_node_from_a_link_or_typed_fields_and_its_secrets_are_never_read_back() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	let from_link = json!([{"tag": "plain", "type": "direct"}, {"tag": "far", "type": "xray", "link": "trojan://hunter2hunter2@vpn.example.com:443?security=tls"}]);
+	let applied = h.call(Method::PUT, "/p/api/config/outbounds", Some(&session), Some(json!({"revision": "rev1", "value": from_link})), "10.0.0.1").await;
+	assert_eq!(applied.status, StatusCode::OK, "{}", String::from_utf8_lossy(&applied.body));
+	assert_eq!(fake.calls.lock().unwrap().iter().find(|(name, _)| name == "xray_link").unwrap().1, "trojan://hunter2hunter2@vpn.example.com:443?security=tls", "the node got the link as pasted");
+	let read = h.call(Method::GET, "/p/api/config/outbounds", Some(&session), None, "10.0.0.1").await;
+	let text = String::from_utf8_lossy(&read.body).to_string();
+	assert!(!text.contains("hunter2") && !text.contains("trojan://"), "{text}");
+	let value = read.json()["value"].clone();
+	assert_eq!((value[1]["protocol"].clone(), value[1]["server"].clone(), value[1].get("link").is_none()), (json!("trojan"), json!("vpn.example.com:443"), true), "the node keeps the typed form");
+	assert!(value[1]["password"].as_str().unwrap().starts_with("<redacted"));
+	let mut typed = value.clone();
+	typed[1]["server"] = json!("vpn2.example.com:8443");
+	typed[1]["transport"] = json!({"type": "ws", "path": "/ws", "host": "vpn2.example.com"});
+	let applied = h.call(Method::PUT, "/p/api/config/outbounds", Some(&session), Some(json!({"revision": "rev2", "value": typed})), "10.0.0.1").await;
+	assert_eq!(applied.status, StatusCode::OK, "{}", String::from_utf8_lossy(&applied.body));
+	let held = fake.applied.lock().unwrap().last().unwrap()["outbounds"][1].clone();
+	assert_eq!((held["server"].clone(), held["password"].clone(), held["transport"]["type"].clone()), (json!("vpn2.example.com:8443"), json!("hunter2hunter2"), json!("ws")), "the marker sent back keeps the saved secret");
+	let read = h.call(Method::GET, "/p/api/config/outbounds", Some(&session), None, "10.0.0.1").await;
+	assert!(!String::from_utf8_lossy(&read.body).contains("hunter2"));
+	let exit = json!([{"tag": "a", "backend": {"type": "netstack", "outbound": "far", "unsupported": {"udp": "direct"}}}]);
+	let refused = h.call(Method::PUT, "/p/api/config/exits", Some(&session), Some(json!({"revision": "rev3", "value": exit})), "10.0.0.1").await;
+	assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+	assert!(String::from_utf8_lossy(&refused.body).contains("an Xray outbound carries UDP itself"));
+	let exit = json!([{"tag": "a", "backend": {"type": "netstack", "outbound": "far", "unsupported": {"udp": "drop"}}}]);
+	assert_eq!(h.call(Method::PUT, "/p/api/config/exits", Some(&session), Some(json!({"revision": "rev3", "value": exit})), "10.0.0.1").await.status, StatusCode::OK);
 }
 
 #[tokio::test]
