@@ -488,14 +488,15 @@ pub async fn revoke_token(State(app): State<Arc<App>>, Extension(ctx): Extension
 
 pub async fn get_settings(State(app): State<Arc<App>>) -> Result<Response, Failure> {ok(&app.settings())}
 
-pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Settings>) -> Result<Response, Failure> {
+pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(mut input): Body<Settings>) -> Result<Response, Failure> {
+	input.migrate();
 	if [&input.terms_url, &input.privacy_url].iter().any(|url| !url.is_empty() && Url::parse(url, URL_MAX, true, true).is_none()) {return Err(Failure::bad("terms_url and privacy_url are https URLs of at most 512 characters, or empty."))}
 	if input.pool_v4.parse::<Ipv4Net>().map_or(true, |pool| pool.prefix_len() < 16 || pool.prefix_len() > 30) {return Err(Failure::bad("pool_v4 is an IPv4 network from /16 to /30."))}
 	crate::endpoints::validate(&input).map_err(Failure::bad)?;
 	if !(900..=604_800).contains(&input.update_interval) || !(1..=90).contains(&input.document_days) || input.provider_name.is_empty() || input.provider_name.chars().count() > 64 {return Err(Failure::bad("update_interval is 900 to 604800, document_days is 1 to 90 and provider_name is 1 to 64 characters."))}
 	// An app refreshes once every `update_interval` at best, so a limit shorter than three of them would take devices that are in use.
 	if input.idle_device_days > 365 || (input.idle_device_days > 0 && i64::from(input.idle_device_days) * 86_400 < 3 * i64::from(input.update_interval)) {return Err(Failure::bad("idle_device_days is 0, or 1 to 365 and at least three refresh intervals."))}
-	if input.new_device_minutes > 1440 {return Err(Failure::bad("new_device_minutes is 0 to 1440."))}
+	if !(1..=64).contains(&input.new_devices) || !(1..=1440).contains(&input.new_devices_window_minutes) {return Err(Failure::bad("new_devices is 1 to 64 and new_devices_window_minutes is 1 to 1440."))}
 	if !(7..=30).contains(&input.transport_key_days) {return Err(Failure::bad("transport_key_days is 7 to 30."))}
 	if input.profiles.len() > 64 || input.profiles.iter().any(|profile| !profile.is_object() || profile.get("device").is_some()) || input.refresh_mirrors.len() > 4 {return Err(Failure::bad("profiles are at most 64 objects without a device, and refresh_mirrors at most 4."))}
 	if input.profile_overrides.values().any(|edits| edits.as_object().is_some_and(crate::nodecfg::plain_written)) {return Err(Failure::bad("An override of transports may not hold a ws-plain transport."))}

@@ -2691,9 +2691,16 @@
             "description": "The IPv4 range of each `veilway` inbound, by inbound tag, as it was when the profiles were published. A document gives a device the address it has inside the range of the profile's inbound. Written by publish.",
             "type": "object"
           },
-          "new_device_minutes": {
-            "default": 1,
-            "description": "Minutes an account waits after adding a device before it may add another, which slows down a leaked link. 0 lets devices be added one after another; the device limit still holds.",
+          "new_devices": {
+            "default": 3,
+            "description": "How many new devices one subscription link may enroll in any window of `new_devices_window_minutes` minutes, 1 to 64, which slows down a leaked link. The device limit still holds. A large count with a short window comes close to no limit.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "new_devices_window_minutes": {
+            "default": 60,
+            "description": "The length of the window of `new_devices`, 1 to 1440 minutes. It slides: a device that enrolled leaves the count that many minutes later.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"

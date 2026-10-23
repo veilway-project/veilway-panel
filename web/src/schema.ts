@@ -2446,10 +2446,16 @@ export interface components {
             };
             /**
              * Format: uint32
-             * @description Minutes an account waits after adding a device before it may add another, which slows down a leaked link. 0 lets devices be added one after another; the device limit still holds.
-             * @default 1
+             * @description How many new devices one subscription link may enroll in any window of `new_devices_window_minutes` minutes, 1 to 64, which slows down a leaked link. The device limit still holds. A large count with a short window comes close to no limit.
+             * @default 3
              */
-            new_device_minutes: number;
+            new_devices: number;
+            /**
+             * Format: uint32
+             * @description The length of the window of `new_devices`, 1 to 1440 minutes. It slides: a device that enrolled leaves the count that many minutes later.
+             * @default 60
+             */
+            new_devices_window_minutes: number;
             /**
              * @description The public host or address of this node, which the profiles' endpoints are made with.
              * @default

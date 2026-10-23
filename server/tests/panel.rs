@@ -2835,26 +2835,74 @@ async fn the_console_lists_admins_and_resets_a_password() {
 }
 
 #[tokio::test]
-async fn the_wait_between_new_devices_is_a_setting_and_0_lets_them_come_one_after_another() {
+async fn new_devices_per_link_are_a_sliding_window_setting_and_a_cancelled_import_gives_its_place_back() {
 	let h = Harness::new().await;
 	let session = h.login("10.0.0.1").await;
-	let refused = h.call(Method::PUT, "/p/api/settings", Some(&session), Some({let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json(); settings["new_device_minutes"] = json!(1441); settings}), "10.0.0.1").await;
-	assert_eq!(refused.status, StatusCode::BAD_REQUEST);
-	h.configure(&session, json!({"new_device_minutes": 10})).await;
-	let (_, link) = h.user(&session, "ann", json!({"device_limit": 4})).await;
+	h.configure(&session, json!({})).await;
+	for bad in [json!({"new_devices": 0}), json!({"new_devices": 65}), json!({"new_devices_window_minutes": 0}), json!({"new_devices_window_minutes": 1441})] {
+		let refused = h.call(Method::PUT, "/p/api/settings", Some(&session), Some({let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json(); settings.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone()); settings}), "10.0.0.1").await;
+		assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+	}
+	let defaults = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((defaults["new_devices"].clone(), defaults["new_devices_window_minutes"].clone()), (json!(3), json!(60)));
+	assert!(defaults.get("new_device_minutes").is_none());
+	let (_, link) = h.user(&session, "ann", json!({"device_limit": 8})).await;
 	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
-	assert!(matches!(opened(&h.fetch(&link, &kids, 1, "confirm", None).await, &[key.clone()]), Payload::Subscription(_)));
-	assert_eq!(refusal_of(&h.fetch(&link, &kids, 2, "confirm", None).await, &[key.clone()]), Reason::RateLimited);
-	// An import that was given up releases its pending device, and the next one does not wait.
-	let (_, other) = h.user(&session, "bob", json!({"device_limit": 4})).await;
+	for device in [1, 2, 3] {assert!(matches!(opened(&h.fetch(&link, &kids, device, "confirm", None).await, &[key.clone()]), Payload::Subscription(_)))}
+	assert_eq!(refusal_of(&h.fetch(&link, &kids, 4, "confirm", None).await, &[key.clone()]), Reason::RateLimited);
+	assert_eq!(refusal_of(&h.fetch(&link, &kids, 4, "confirm", None).await, &[key.clone()]), Reason::RateLimited, "a refused try is not counted");
+	// An import that was given up releases its pending device and gives back exactly its place.
+	let (_, other) = h.user(&session, "bob", json!({"device_limit": 8})).await;
 	let kids = [key_of(&other).kid()];
-	assert!(matches!(opened(&h.fetch(&other, &kids, 11, "fetch", None).await, &[key.clone()]), Payload::Subscription(_)));
-	assert_eq!(refusal_of(&h.fetch(&other, &kids, 12, "fetch", None).await, &[key.clone()]), Reason::RateLimited);
-	assert_eq!(refusal_of(&h.fetch(&other, &kids, 11, "release", None).await, &[key.clone()]), Reason::Released);
-	assert!(matches!(opened(&h.fetch(&other, &kids, 12, "fetch", None).await, &[key.clone()]), Payload::Subscription(_)));
+	for (device, op) in [(11, "confirm"), (12, "confirm"), (13, "fetch")] {assert!(matches!(opened(&h.fetch(&other, &kids, device, op, None).await, &[key.clone()]), Payload::Subscription(_)))}
+	assert_eq!(refusal_of(&h.fetch(&other, &kids, 14, "fetch", None).await, &[key.clone()]), Reason::RateLimited);
+	assert_eq!(refusal_of(&h.fetch(&other, &kids, 13, "release", None).await, &[key.clone()]), Reason::Released);
+	assert!(matches!(opened(&h.fetch(&other, &kids, 14, "fetch", None).await, &[key.clone()]), Payload::Subscription(_)));
+	assert_eq!(refusal_of(&h.fetch(&other, &kids, 15, "fetch", None).await, &[key.clone()]), Reason::RateLimited, "only one place came back");
 	let kids = [key_of(&link).kid()];
-	h.configure(&session, json!({"new_device_minutes": 0})).await;
-	for device in [2, 3] {assert!(matches!(opened(&h.fetch(&link, &kids, device, "confirm", None).await, &[key.clone()]), Payload::Subscription(_)))}
+	h.configure(&session, json!({"new_devices": 5, "new_devices_window_minutes": 10})).await;
+	for device in [4, 5] {assert!(matches!(opened(&h.fetch(&link, &kids, device, "confirm", None).await, &[key.clone()]), Payload::Subscription(_)))}
+	assert_eq!(refusal_of(&h.fetch(&link, &kids, 6, "confirm", None).await, &[key.clone()]), Reason::RateLimited);
+}
+
+#[test]
+fn the_limiter_admits_at_most_max_in_any_rolling_window_and_forgets_the_oldest_first() {
+	let limiter = Limiter::default();
+	let window = 3600;
+	for at in [0, 10, 20] {assert!(limiter.admit_at("k", 3, window, 1000 + at));}
+	assert!(!limiter.admit_at("k", 3, window, 1000 + 30));
+	assert!(!limiter.admit_at("k", 3, window, 1000 + 3599), "the first one is still inside the window");
+	assert!(limiter.admit_at("k", 3, window, 1000 + 3600), "the first one left, so one place is free");
+	assert!(!limiter.admit_at("k", 3, window, 1000 + 3601), "the second has not left yet");
+	assert!(limiter.admit_at("k", 3, window, 1000 + 3610));
+	assert!(limiter.admit_at("other", 3, window, 1000 + 3610), "keys are separate");
+	limiter.give_back("k", 1000 + 3610);
+	assert!(limiter.admit_at("k", 3, window, 1000 + 3611), "a given back place is free again");
+	assert!(!limiter.admit_at("k", 3, window, 1000 + 3612));
+	for index in 0..100_001 {limiter.admit_at(&format!("flood{index}"), 3, window, 5000);}
+	assert!(limiter.admit_at("late", 3, window, 5001), "a full table drops its stalest key and takes a new one");
+}
+
+#[tokio::test]
+async fn an_older_new_device_wait_becomes_the_sliding_window() {
+	let mut old = serde_json::to_value(veilway_panel::app::Settings::default()).unwrap();
+	let object = old.as_object_mut().unwrap();
+	object.remove("new_devices");
+	object.remove("new_devices_window_minutes");
+	for (minutes, expected) in [(json!(1), (3, 60)), (json!(10), (1, 10)), (json!(1440), (1, 1440)), (json!(0), (64, 1))] {
+		old["new_device_minutes"] = minutes;
+		let mut settings: veilway_panel::app::Settings = serde_json::from_value(old.clone()).unwrap();
+		settings.migrate();
+		assert_eq!((settings.new_devices, settings.new_devices_window_minutes, settings.new_device_minutes), (expected.0, expected.1, None));
+		assert!(serde_json::to_value(&settings).unwrap().get("new_device_minutes").is_none());
+	}
+	let none: veilway_panel::app::Settings = serde_json::from_value(json!({})).unwrap();
+	assert_eq!((none.new_devices, none.new_devices_window_minutes), (3, 60));
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"new_device_minutes": 10})).await;
+	let saved = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((saved["new_devices"].clone(), saved["new_devices_window_minutes"].clone()), (json!(1), json!(10)), "an older client's value is carried over");
 }
 
 #[tokio::test]
