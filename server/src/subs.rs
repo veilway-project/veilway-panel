@@ -153,6 +153,13 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 	// The apps ask the user to accept these before the first connection, and again when either changes.
 	let agreement: serde_json::Map<String, Value> = [("terms", &settings.terms_url), ("privacy", &settings.privacy_url)].into_iter().filter(|(_, url)| !url.is_empty()).map(|(name, url)| (name.into(), json!(url))).collect();
 	if !agreement.is_empty() {payload["agreement"] = Value::Object(agreement);}
+	if !settings.subscription_notices.is_empty() {
+		payload["notices"] = settings.subscription_notices.iter().map(|notice| {
+			let mut text: serde_json::Map<String, Value> = notice.translations.iter().map(|(tag, translated)| (tag.clone(), json!(translated))).collect();
+			text.insert("default".into(), json!(notice.text));
+			json!({"severity": notice.severity, "text": if notice.translations.is_empty() {json!(notice.text)} else {Value::Object(text)}})
+		}).collect();
+	}
 	if form != Form::Whole && !settings.static_mirrors.is_empty() {payload["static_mirrors"] = json!(settings.static_mirrors);}
 	Ok(sign(signer, &payload))
 }

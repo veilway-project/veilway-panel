@@ -120,6 +120,22 @@ pub struct Endpoint {
 	pub pins: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum NoticeKind {Info, Warning}
+
+/// A notice of the signed document: one line of plain text of at most 280 bytes, and the same line in other languages.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SubNotice {
+	pub severity: NoticeKind,
+	/// The default text, shown when no translation fits the app's language.
+	pub text: String,
+	/// At most 8 translations by language tag (`fa`, `de`, `pt-BR`, `zh-Hans`), each as long as `text` may be.
+	#[serde(default)]
+	pub translations: BTreeMap<String, String>,
+}
+
 /// What an operator sets once for the whole panel.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 #[serde(deny_unknown_fields, default)]
@@ -128,6 +144,8 @@ pub struct Settings {
 	/// The provider's own terms and privacy policy, put in every document as its `agreement`, which the apps ask users to accept. An `https` URL, or empty for none.
 	pub terms_url: String,
 	pub privacy_url: String,
+	/// Notices put in every document as `notices`, at most 4. Apps keep them from their last refresh and show them with no connection, which the notices a node sends over the tunnel cannot do. A notice with the same text as one the node sends is shown once.
+	pub subscription_notices: Vec<SubNotice>,
 	/// The named subscription endpoints, at most 16, each on its own host and port and each reached by its own path, the panel's `sub_path` and the endpoint's name. An account's links and documents use the endpoint resolved for it: its own, else the first of its groups that has one in `group_endpoints`, else the default.
 	pub endpoints: Vec<Endpoint>,
 	/// The name of the default endpoint. Empty only while there are no endpoints.
@@ -235,7 +253,7 @@ impl Settings {
 
 impl Default for Settings {
 	fn default() -> Self {
-		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, idle_device_days: 0, new_devices: 3, new_devices_window_minutes: 60, new_device_minutes: None, transport_key_days: 30, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), inbound_ranges: BTreeMap::new(), published_relays: Vec::new(), faketls_keys: BTreeMap::new(), inbound_keys: BTreeMap::new(), transport_keys: BTreeMap::new(), transport_clocks: BTreeMap::new()}
+		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), subscription_notices: Vec::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, idle_device_days: 0, new_devices: 3, new_devices_window_minutes: 60, new_device_minutes: None, transport_key_days: 30, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), inbound_ranges: BTreeMap::new(), published_relays: Vec::new(), faketls_keys: BTreeMap::new(), inbound_keys: BTreeMap::new(), transport_keys: BTreeMap::new(), transport_clocks: BTreeMap::new()}
 	}
 }
 

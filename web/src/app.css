@@ -160,6 +160,8 @@
 .p-exit-problem { color: var(--c-danger); }
 .p-notices { display: grid; gap: var(--s-3); margin: 0; padding: 0; list-style: none; }
 .p-notices > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--s-3); }
+.p-lang { display: grid; grid-template-columns: 6rem minmax(0, 1fr) auto; align-items: start; gap: var(--s-3); }
+.p-lang > .vw-icon-button, .p-lang > button { margin-block-start: var(--s-6); }
 .p-count-line { margin-block-start: calc(var(--s-2) * -1); color: var(--c-text-muted); font-variant-numeric: tabular-nums; }
 .p-count-line[data-over] { color: var(--c-danger); }
 .p-usage-cell { min-inline-size: 180px; }

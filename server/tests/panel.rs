@@ -620,6 +620,49 @@ async fn signed_document_carries_the_provider_terms_and_privacy_links() {
 }
 
 #[tokio::test]
+async fn subscription_notices_reach_every_document_and_the_client_reads_them_all() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"subscription_notices": [{"severity": "warning", "text": "Maintenance on Friday", "translations": {"fa": "تعمیرات روز جمعه", "pt-BR": "Manutenção na sexta"}}, {"severity": "info", "text": "New server in Frankfurt"}]})).await;
+	let kept = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(kept["subscription_notices"].as_array().map(Vec::len), Some(2));
+	let (id, link) = h.user(&session, "ann", json!({})).await;
+	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
+	let Payload::Subscription(document) = opened(&h.fetch(&link, &kids, 1, "fetch", None).await, &[key]) else {panic!("a document")};
+	assert_eq!(document.notices.len(), 2, "the client kept both notices");
+	assert_eq!(document.left_out, 0, "the client left nothing out");
+	assert!(matches!(document.notices[0].severity, veilway_proto::control::Severity::Warning) && matches!(document.notices[1].severity, veilway_proto::control::Severity::Information));
+	assert_eq!((document.notices[0].text.as_str(), document.notices[1].text.as_str()), ("Maintenance on Friday", "New server in Frankfurt"));
+	let tags: Vec<(String, String)> = document.notices[0].text.translations().map(|translation| (translation.tag.as_str().to_owned(), translation.text.to_owned())).collect();
+	assert_eq!(tags, [("fa".to_owned(), "تعمیرات روز جمعه".to_owned()), ("pt-BR".to_owned(), "Manutenção na sexta".to_owned())]);
+	assert_eq!(document.notices[1].text.translations().count(), 0);
+	h.configure(&session, json!({})).await;
+	h.app.sub_limits.clear(&format!("new:{id}:1"));
+	let Payload::Subscription(document) = opened(&h.fetch(&link, &kids, 2, "fetch", None).await, &[key]) else {panic!("a document")};
+	assert!(document.notices.is_empty(), "no setting, no notices");
+}
+
+#[tokio::test]
+async fn subscription_notice_limits_are_the_clients_and_checked_when_saved() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	let one = |text: &str| json!({"severity": "info", "text": text});
+	let many: Vec<Value> = (0..5).map(|i| one(&format!("Notice {i}"))).collect();
+	let translations: serde_json::Map<String, Value> = ["aa", "bb", "cc", "dd", "ee", "ff", "gg", "hh", "ii"].iter().map(|tag| (tag.to_string(), json!("x"))).collect();
+	let cases = [json!(many), json!([one("")]), json!([one(" padded ")]), json!([one(&"a".repeat(281))]), json!([one("hidden\u{200b}mark")]), json!([one("line\nbreak")]), json!([{"severity": "info", "text": "Ok", "translations": {"FA": "x"}}]), json!([{"severity": "info", "text": "Ok", "translations": {"fa": ""}}]), json!([{"severity": "info", "text": "Ok", "translations": translations}]), json!([{"severity": "danger", "text": "Ok"}])];
+	for bad in cases {
+		let answer = h.call(Method::PUT, "/p/api/settings", Some(&session), Some(json!({"subscription_notices": bad})), "10.0.0.1").await;
+		assert_ne!(answer.status, StatusCode::OK, "{bad}");
+	}
+	let edge = "ا".repeat(140);
+	h.configure(&session, json!({"subscription_notices": [one(&"a".repeat(280)), one(&edge), one("Four"), one("Notices")]})).await;
+	let (_, link) = h.user(&session, "ann", json!({})).await;
+	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
+	let Payload::Subscription(document) = opened(&h.fetch(&link, &kids, 1, "fetch", None).await, &[key]) else {panic!("a document")};
+	assert_eq!((document.notices.len(), document.left_out, document.notices[0].text.as_str().len(), document.notices[1].text.as_str()), (4, 0, 280, edge.as_str()));
+}
+
+#[tokio::test]
 async fn web_pages_load_without_a_session() {
 	let h = Harness::new().await;
 	let page = h.call(Method::GET, "/p/", None, None, "10.0.0.1").await;

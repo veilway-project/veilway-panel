@@ -2070,6 +2070,8 @@ export interface components {
             /** Format: uint16 */
             status: number;
         };
+        /** @enum {string} */
+        NoticeKind: "info" | "warning";
         OfferIn: {
             dialler: string[];
             /** @description "forward" or "reverse". In a forward link this node is the exit. */
@@ -2543,6 +2545,11 @@ export interface components {
              */
             static_mirrors: string[];
             /**
+             * @description Notices put in every document as `notices`, at most 4. Apps keep them from their last refresh and show them with no connection, which the notices a node sends over the tunnel cannot do. A notice with the same text as one the node sends is shown once.
+             * @default []
+             */
+            subscription_notices: components["schemas"]["SubNotice"][];
+            /**
              * @description The provider's own terms and privacy policy, put in every document as its `agreement`, which the apps ask users to accept. An `https` URL, or empty for none.
              * @default
              */
@@ -2597,6 +2604,19 @@ export interface components {
             start_id: string;
             /** @description False when the panel's config file turns the authenticator code off. Read-only: no route changes it. */
             two_step: boolean;
+        };
+        /** @description A notice of the signed document: one line of plain text of at most 280 bytes, and the same line in other languages. */
+        SubNotice: {
+            severity: components["schemas"]["NoticeKind"];
+            /** @description The default text, shown when no translation fits the app's language. */
+            text: string;
+            /**
+             * @description At most 8 translations by language tag (`fa`, `de`, `pt-BR`, `zh-Hans`), each as long as `text` may be.
+             * @default {}
+             */
+            translations: {
+                [key: string]: string;
+            };
         };
         SubscriptionInfo: {
             /** @description Whether the panel holds a sealed copy, so the link can be shown again. False with "show links once". */
