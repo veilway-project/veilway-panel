@@ -443,3 +443,11 @@
 .p-static .p-mirror .p-flag { white-space: normal; }
 .p-flag.p-wrap { white-space: normal; align-items: start; }
 .p-flag.p-wrap .vw-icon { margin-block-start: 0.15em; }
+
+/* Link offer: transport picker */
+.p-offer-pick { display: grid; gap: var(--s-2); }
+.p-offer-row { display: grid; gap: var(--s-1); padding: var(--s-2) var(--s-3); border: 1px solid var(--c-line); border-radius: var(--r-2); }
+.p-offer-row[data-refused] { opacity: 0.6; }
+.p-offer-row p { margin: 0; }
+.p-offer-facts { display: flex; flex-wrap: wrap; gap: var(--s-1) var(--s-3); }
+.p-offer-none { color: var(--c-danger); }

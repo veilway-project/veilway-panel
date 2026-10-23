@@ -147,14 +147,24 @@ function LinkDialog({link, exits, outbounds, onClose, onSave}: {link: LinkConfig
 	</Dialog>;
 }
 
+const LINK_TYPES = ["udp", "udp-obfs", "tls", "ws"];
+const TYPE_LABEL = {udp: "config.transport.udp", "udp-obfs": "config.transport.udp-obfs", tls: "config.transport.tls", ws: "config.transport.ws", fronted: "config.transport.fronted", "fronted-shaped": "config.transport.fronted-shaped", faketls: "config.transport.faketls", "ws-plain": "config.transport.ws-plain"} as const;
+const TYPE_NOTE = {udp: "links.pick.note.udp", "udp-obfs": "links.pick.note.udp-obfs", tls: "links.pick.note.tls", ws: "links.pick.note.ws"} as const;
+type Picked = {type?: string, path?: string, endpoints?: string[], candidates?: {address?: string, sni?: string, verify_name?: string, ech?: string, self_signed?: boolean}[]};
+// Why a link cannot carry a transport, or null. The node refuses the same ones when it reads the offer.
+const linkRefusal = (transport: Picked): "links.pick.refusedType" | "links.pick.refusedEch" | "links.pick.refusedSelfSigned" | null => !LINK_TYPES.includes(transport.type ?? "") ? "links.pick.refusedType" : (transport.candidates ?? []).some(candidate => candidate.ech) ? "links.pick.refusedEch" : (transport.candidates ?? []).some(candidate => candidate.self_signed) ? "links.pick.refusedSelfSigned" : null;
+
 // Step 1 on the node that offers: the terms the other node will see, made into a code that holds no secret.
 function OfferFlow({onCompare, onClose, fixed}: {onCompare: (pairing: Compare) => void, onClose: () => void, fixed?: string}) {
 	const {t, time} = useP(), guard = useGuard(), running = useLoad(loadRunning, []), derived = useLoad(() => api("get", "/profiles/derived") as Promise<{templates: Template[]}>, []), nodeInbounds = useLoad(() => api("get", "/links/inbounds") as Promise<{inbounds: {tag: string, public_key: string, transport_public_key: string | null}[]}>, []);
 	const inbounds = ((running.data?.document.inbounds ?? []) as {tag: string, type: string}[]).filter(inbound => inbound.type === "veilway").map(inbound => inbound.tag);
 	const [inbound, setInbound] = useState(""), [tag, setTag] = useState(""), [name, setName] = useState(""), [direction, setDirection] = useState(fixed ?? "forward"), [key, setKey] = useState(""), [transportKey, setTransportKey] = useState(""), [dialler, setDialler] = useState(""), [listener, setListener] = useState(""), [transports, setTransports] = useState(""), [minutes, setMinutes] = useState<number | "">(10);
+	const [offered, setOffered] = useState<Picked[]>([]), [off, setOff] = useState<number[]>([]), [manual, setManual] = useState(false), [showJson, setShowJson] = useState(false);
 	const [made, setMade] = useState<{id: string, code: string, expires_at: number} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const reportedOf = (tagOf: string) => nodeInbounds.data?.inbounds.find(found => found.tag === tagOf);
-	const pick = (tagOf: string) => { const profile = derived.data?.templates.find(template => template.inbound === tagOf)?.profile, reported = reportedOf(tagOf); setInbound(tagOf); setKey(reported?.public_key ?? ""); setTransportKey(reported?.transport_public_key ?? ""); if (profile) { setTransports(JSON.stringify(profile.transports ?? [], null, 2)); } };
+	const pick = (tagOf: string) => { const profile = derived.data?.templates.find(template => template.inbound === tagOf)?.profile, reported = reportedOf(tagOf); setInbound(tagOf); setKey(reported?.public_key ?? ""); setTransportKey(reported?.transport_public_key ?? ""); if (profile) { const list = (profile.transports ?? []) as Picked[], refused = list.flatMap((transport, k) => linkRefusal(transport) ? [k] : []); setOffered(list); setOff(refused); setManual(false); setTransports(JSON.stringify(list.filter((_, k) => !refused.includes(k)), null, 2)); } };
+	const choose = (next: number[]) => { setOff(next); setTransports(JSON.stringify(offered.filter((_, k) => !next.includes(k)), null, 2)); };
+	const kept = offered.filter((_, k) => !off.includes(k)).length;
 	const offer = async () => {
 		setError(null);
 		let parsed: unknown;
@@ -187,10 +197,22 @@ function OfferFlow({onCompare, onClose, fixed}: {onCompare: (pairing: Compare) =
 			<TextField label={t("links.transportKey")} hint={t("links.transportKeyHint")} value={transportKey} onChange={setTransportKey} readOnly={Boolean(reportedOf(inbound)?.transport_public_key)} technical optional/>
 			<LinesField label={t("links.dialler")} hint={t("links.diallerHint")} value={dialler} onChange={setDialler} rows={2}/>
 			{direction === "reverse" && <LinesField label={t("links.listener")} hint={t("links.listenerHint")} value={listener} onChange={setListener} rows={2}/>}
-			<Field label={t("links.transports")} hint={t("links.transportsHint")}>{ids => <textarea {...ids} className="vw-input vw-code p-textarea" dir="ltr" spellCheck={false} rows={6} value={transports} onChange={event => setTransports(event.target.value)}/>}</Field>
+			{offered.length > 0 && <Field label={t("links.transports")} hint={t("links.pick.hint")}>{ids => <div {...ids} role="group" className="p-offer-pick">
+				{offered.map((transport, k) => { const refusal = linkRefusal(transport), type = transport.type ?? "", list: (string | NonNullable<Picked["candidates"]>[number])[] = transport.endpoints ?? transport.candidates ?? [], first = list[0], address = typeof first === "string" ? first : first?.address ?? "", note = refusal ? t(refusal) : type in TYPE_NOTE ? t(TYPE_NOTE[type as keyof typeof TYPE_NOTE]) : "";
+					return <div key={k} className="p-offer-row" data-refused={refusal ? "" : undefined}>
+						<Checkbox label={type in TYPE_LABEL ? t(TYPE_LABEL[type as keyof typeof TYPE_LABEL]) : type} checked={!refusal && !off.includes(k) && !manual} disabled={Boolean(refusal) || manual} onChange={on => choose(on ? off.filter(other => other !== k) : [...off, k])}/>
+						<p className="vw-small vw-muted p-offer-note">{note}</p>
+						<p className="vw-small p-offer-facts"><span className="vw-code" dir="ltr">{type}</span><span>{t("links.pick.port", {port: address.slice(address.lastIndexOf(":") + 1)})}</span>{transport.path && <span>{t("links.pick.path")} <span className="vw-code" dir="ltr">{transport.path}</span></span>}</p>
+						<ul className="p-transports" dir="ltr">{list.map((entry, j) => { const text = typeof entry === "string" ? entry : entry.address ?? "", name = typeof entry === "string" ? "" : entry.verify_name || entry.sni || ""; return <li key={j}><span className="vw-code">{text}</span>{name && <span className="vw-small vw-muted">{t("links.pick.tlsName")} {name}</span>}</li>; })}</ul>
+					</div>; })}
+				{!manual && kept === 0 && <p className="vw-small p-offer-none" role="alert">{t("links.pick.none")}</p>}
+				{manual && <div className="p-cluster"><span className="vw-small vw-muted">{t("links.pick.manual")}</span><Button size="sm" variant="quiet" onClick={() => { setManual(false); choose(off); }}>{t("links.pick.reset")}</Button></div>}
+			</div>}</Field>}
+			{offered.length > 0 && <Switch label={t("links.pick.json")} checked={showJson} onChange={setShowJson}/>}
+			{(offered.length === 0 || showJson) && <Field label={offered.length ? t("links.pick.jsonLabel") : t("links.transports")} hint={t("links.transportsHint")}>{ids => <textarea {...ids} className="vw-input vw-code p-textarea" dir="ltr" spellCheck={false} rows={6} value={transports} onChange={event => { setTransports(event.target.value); setManual(true); }}/>}</Field>}
 			<NumberField label={t("links.lifetime")} unit={t("subs.minutesUnit")} min={1} max={60} value={minutes} onChange={setMinutes}/>
 			<ErrorNote error={error}/>
-			<div className="p-cluster"><Button type="submit" variant="primary" disabled={busy || !inbound}>{t("links.makeOffer")}</Button><Button variant="quiet" onClick={onClose}>{t("action.cancel")}</Button></div>
+			<div className="p-cluster"><Button type="submit" variant="primary" disabled={busy || !inbound || (!manual && offered.length > 0 && kept === 0)}>{t("links.makeOffer")}</Button><Button variant="quiet" onClick={onClose}>{t("action.cancel")}</Button></div>
 		</form>
 	</Glass>;
 }
