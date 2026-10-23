@@ -2391,6 +2391,13 @@ export interface components {
                 [key: string]: string;
             };
             /**
+             * @description The IPv4 range of each `veilway` inbound, by inbound tag, as it was when the profiles were published. A document gives a device the address it has inside the range of the profile's inbound. Written by publish.
+             * @default {}
+             */
+            inbound_ranges: {
+                [key: string]: string;
+            };
+            /**
              * Format: uint32
              * @description Minutes an account waits after adding a device before it may add another, which slows down a leaked link. 0 lets devices be added one after another; the device limit still holds.
              * @default 1
