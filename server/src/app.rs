@@ -156,6 +156,8 @@ pub struct Settings {
 	pub relays: Vec<crate::nodecfg::Relay>,
 	/// The profiles derived from an inbound that carry the published relays reaching each account, by profile id and inbound tag. Written by publish.
 	pub relay_profiles: BTreeMap<String, String>,
+	/// The IPv4 range of each `veilway` inbound, by inbound tag, as it was when the profiles were published. A document gives a device the address it has inside the range of the profile's inbound. Written by publish.
+	pub inbound_ranges: BTreeMap<String, String>,
 	/// The relays as they were when the profiles were published. A document carries the ones that reach its account.
 	#[serde(deserialize_with = "crate::nodecfg::checked_relays")]
 	pub published_relays: Vec<crate::nodecfg::Relay>,
@@ -204,7 +206,7 @@ impl TransportClock {
 
 impl Default for Settings {
 	fn default() -> Self {
-		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, idle_device_days: 0, new_device_minutes: 1, transport_key_days: 30, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), published_relays: Vec::new(), faketls_keys: BTreeMap::new(), inbound_keys: BTreeMap::new(), transport_keys: BTreeMap::new(), transport_clocks: BTreeMap::new()}
+		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, idle_device_days: 0, new_device_minutes: 1, transport_key_days: 30, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), inbound_ranges: BTreeMap::new(), published_relays: Vec::new(), faketls_keys: BTreeMap::new(), inbound_keys: BTreeMap::new(), transport_keys: BTreeMap::new(), transport_clocks: BTreeMap::new()}
 	}
 }
 

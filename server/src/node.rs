@@ -7,7 +7,7 @@ use hyper::{body::Bytes, Request};
 use hyper_util::rt::TokioIo;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
-use std::{collections::HashMap, path::Path, sync::{atomic::Ordering, Arc}, time::Duration};
+use std::{collections::{HashMap, HashSet}, path::Path, sync::{atomic::Ordering, Arc}, time::Duration};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::net::UnixStream;
 
@@ -62,6 +62,9 @@ pub(crate) async fn fill(app: &Arc<App>, document: &mut Value) -> Result<(), Str
 	let (handle, app, mut copy, dirty) = (app.db.clone(), app.clone(), document.clone(), app.dirty.clone());
 	*document = handle.call(move |db| -> Result<Value, String> {
 		let (document, keys) = (&mut copy, app.keys.as_ref().ok_or("the key file is missing, so no secret can be opened")?);
+		let (pool, inbounds) = (app.settings().pool_v4, document["inbounds"].as_array().cloned().unwrap_or_default());
+		let mut taken: HashSet<String> = db.prepare("select address from devices").and_then(|mut statement| statement.query_map([], |row| row.get(0))?.collect()).map_err(|error| error.to_string())?;
+		taken.extend(document["links"].as_array().into_iter().flatten().flat_map(|link| ["dialler", "listener"].map(|side| link["addresses"][side].clone())).flat_map(|list| list.as_array().cloned().unwrap_or_default()).filter_map(|address| Some(address.as_str()?.split('/').next()?.to_string())));
 		subs::expire_pending(db, now()).map_err(|error| error.to_string())?;
 		let mut statement = db.prepare("select id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, record_id, default_exit from users order by id").map_err(|error| error.to_string())?;
 		let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<i64>>(7)?, row.get::<_, Vec<u8>>(8)?, row.get::<_, Option<String>>(9)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
@@ -73,7 +76,7 @@ pub(crate) async fn fill(app: &Arc<App>, document: &mut Value) -> Result<(), Str
 			if devices.is_empty() {continue}
 			let devices: Vec<Value> = devices.into_iter().map(|(device, public_key, address, sealed)| {
 				let secret = keys.open_secret(&record, &format!("transport_secret:{public_key}"), &sealed).ok_or("a transport secret does not open")?;
-				Ok::<_, String>(json!({"name": format!("d{device}"), "public_key": public_key, "transport_secrets": [App::standard(&secret)], "addresses": [address]}))
+				Ok::<_, String>(json!({"name": format!("d{device}"), "public_key": public_key, "transport_secrets": [App::standard(&secret)], "addresses": subs::node_addresses(&pool, &inbounds, &address, &taken)}))
 			}).collect::<Result<_, _>>()?;
 			let mut user = json!({"name": name, "enabled": enabled, "groups": serde_json::from_str::<Value>(&groups).unwrap_or(json!([])), "devices": devices, "exits": serde_json::from_str::<Value>(&exits).unwrap_or(json!("all"))});
 			// A default the document no longer allows is left out here, and cleared once the node takes the document.

@@ -2647,6 +2647,14 @@
             "readOnly": true,
             "type": "object"
           },
+          "inbound_ranges": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "The IPv4 range of each `veilway` inbound, by inbound tag, as it was when the profiles were published. A document gives a device the address it has inside the range of the profile's inbound. Written by publish.",
+            "type": "object"
+          },
           "new_device_minutes": {
             "default": 1,
             "description": "Minutes an account waits after adding a device before it may add another, which slows down a leaked link. 0 lets devices be added one after another; the device limit still holds.",

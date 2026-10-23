@@ -1025,6 +1025,40 @@ fn dialed(profile: &payload::Profile) -> Vec<String> {
 }
 
 #[tokio::test]
+async fn a_device_has_one_address_in_each_veilway_inbound_in_the_node_config_and_in_each_profile() {
+	let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+	let dir = std::env::temp_dir().join(format!("vwnode-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
+	std::fs::create_dir_all(&dir).unwrap();
+	let socket = dir.join("control.sock");
+	let put = seen.clone();
+	let running = json!({"version": 1, "users": [], "inbounds": [{"tag": "Main", "type": "veilway", "address": ["10.66.0.1/24"]}, {"tag": "Nn", "type": "veilway", "address": ["10.9.0.1/24"]}]});
+	let node = Router::new().route("/v1/config", get(move || {let running = running.clone(); async move {Json(json!({"revision": "rev1", "generation": 1, "document": running}))}}).put(move |Json(document): Json<Value>| async move {put.lock().unwrap().push(document); Json(json!({}))}));
+	let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+	tokio::spawn(async move {axum::serve(listener, node).await.unwrap();});
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	let second = json!({"id": "nn", "name": "Nn", "type": "veilway", "inbound_public_key": STANDARD.encode([8u8; 32]), "gateways": ["10.9.0.1"], "mtu": 1420, "transports": [{"type": "udp", "endpoints": ["192.0.2.10:51830"]}]});
+	let first = json!({"id": "main", "name": "Main", "type": "veilway", "inbound_public_key": STANDARD.encode([7u8; 32]), "gateways": ["10.66.0.1"], "mtu": 1420, "transports": [{"type": "udp", "endpoints": ["192.0.2.10:51820"]}]});
+	h.configure(&session, json!({"profiles": [first, second], "relay_profiles": {"main": "Main", "nn": "Nn"}, "inbound_ranges": {"Main": "10.66.0.1/24", "Nn": "10.9.0.1/24"}})).await;
+	let (id, ann) = h.user(&session, "ann", json!({})).await;
+	let (key, kids) = (key_of(&ann), [key_of(&ann).kid()]);
+	let answer = h.fetch(&ann, &kids, 1, "confirm", None).await;
+	let Payload::Subscription(document) = opened(&answer, &[key]) else {panic!("a document {:?}", refusal_of(&answer, &[key]))};
+	let found: Vec<(String, Vec<String>, Vec<String>)> = document.profiles.iter().map(|profile| (profile.id.clone(), profile.device.addresses.iter().map(|address| address.to_string()).collect(), profile.gateways.iter().map(|gateway| gateway.to_string()).collect())).collect();
+	assert_eq!(found, [("main".to_string(), vec!["10.66.0.2".to_string()], vec!["10.66.0.1".to_string()]), ("nn".to_string(), vec!["10.9.0.2".to_string()], vec!["10.9.0.1".to_string()])], "each profile carries the one address inside its own inbound, next to its own gateway");
+	let sent = seen.lock().unwrap().iter().find(|document| document["users"].as_array().is_some_and(|users| !users.is_empty())).cloned().unwrap();
+	assert_eq!(sent["users"][0]["devices"][0]["addresses"], json!(["10.66.0.2", "10.9.0.2"]), "the node is given both, user {id}");
+	let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	settings["inbound_ranges"] = json!({"Main": "10.66.0.1/24", "Nn": "10.9.0.2/30"});
+	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(settings), "10.0.0.1").await.status, StatusCode::OK);
+	let (key, kids) = (key_of(&ann), [key_of(&ann).kid()]);
+	let answer = h.fetch(&ann, &kids, 1, "fetch", None).await;
+	let Payload::Subscription(narrow) = opened(&answer, &[key]) else {panic!("a document {:?}", refusal_of(&answer, &[key]))};
+	assert_eq!(narrow.profiles.iter().map(|profile| profile.id.as_str()).collect::<Vec<_>>(), ["main"], "a profile whose inbound has no address for the device is left out");
+	let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn relays_reach_the_accounts_they_are_for_in_their_documents() {
 	let (_fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
 	let h = Harness::with_socket(Some(socket)).await;

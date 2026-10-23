@@ -6,7 +6,7 @@ use http_body_util::BodyExt;
 use ipnet::Ipv4Net;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::{json, Value};
-use std::{collections::HashSet, sync::{atomic::Ordering, Arc}};
+use std::{collections::HashSet, net::Ipv4Addr, sync::{atomic::Ordering, Arc}};
 use veilway_proto::subscription::{envelope, exchange::{self, GatewayKey}, fetch::{Op, RequestError}, link::Link};
 
 pub const PENDING_PLACES: i64 = 2;
@@ -57,6 +57,25 @@ pub fn allocate(db: &Connection, pool: &str) -> Option<String> {
 	pool.hosts().skip(1).map(|address| address.to_string()).find(|address| !taken.contains(address))
 }
 
+/// The IPv4 range of a `veilway` inbound, from its `address` list (`10.9.0.1/24`: the gateway and the prefix). IPv6 entries are not read.
+pub fn range_of(inbound: &Value) -> Option<Ipv4Net> {inbound["address"].as_array()?.iter().find_map(|text| text.as_str()?.parse().ok())}
+
+/// The address a device of the pool has inside an inbound's range. A range that holds the stored address uses it. Any other range that does not overlap the pool gives the address at the same offset from its network, unless that falls outside it or on its network, broadcast or gateway address. A stored address outside the pool, or a range that overlaps the pool without holding the address, gets none. Nothing is stored: the node and the documents compute it alike, and stored addresses are unique, so each range's addresses are too.
+pub fn address_in(pool: Ipv4Net, range: Ipv4Net, stored: Ipv4Addr) -> Option<Ipv4Addr> {
+	if range.contains(&stored) {return Some(stored)}
+	if !pool.contains(&stored) || range.contains(&pool.network()) || pool.contains(&range.network()) {return None}
+	let found = Ipv4Addr::from(u32::from(range.network()).checked_add(u32::from(stored) - u32::from(pool.network()))?);
+	(range.contains(&found) && found != range.network() && found != range.broadcast() && found != range.addr()).then_some(found)
+}
+
+/// The stored address of a device and its address in each other `veilway` inbound of the node's config, at most one per inbound. An address in `taken` (another device's stored address, from a pool used before, or a link's) is skipped, since the node refuses a config where two peers share one.
+pub fn node_addresses(pool: &str, inbounds: &[Value], stored: &str, taken: &HashSet<String>) -> Vec<String> {
+	let (Ok(pool), Ok(stored_ip)) = (pool.parse::<Ipv4Net>(), stored.parse::<Ipv4Addr>()) else {return vec![stored.to_string()]};
+	let mut out = vec![stored.to_string()];
+	for found in inbounds.iter().filter(|inbound| inbound["type"] == "veilway").filter_map(range_of).filter_map(|range| address_in(pool, range, stored_ip)).map(|found| found.to_string()) {if !out.contains(&found) && !taken.contains(&found) {out.push(found)}}
+	out
+}
+
 pub struct LinkOut {pub veilway: String, pub https: String}
 
 /// The link of a token, built from the text of the format and read back through the format's own parser, so a link the client would refuse is never handed out. A plain endpoint gives the `sub-plain` form and never a pin.
@@ -91,12 +110,18 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 	if let Some(sealed) = &this.private_key {device["private_key"] = json!(STANDARD.encode(keys.open_secret(&user.record_id, &format!("private_key:{}", this.public_key), sealed).ok_or("a private key does not open")?));}
 	let groups: Vec<String> = serde_json::from_str(&user.groups).unwrap_or_default();
 	let reaching = crate::nodecfg::reaching(&settings.published_relays, Some((user.id, groups.as_slice())));
+	let (pool, stored) = (settings.pool_v4.parse::<Ipv4Net>().ok(), this.address.parse::<Ipv4Addr>().ok());
+	let taken: HashSet<String> = app.db.call(|db| db.prepare("select address from devices")?.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 	let profiles: Vec<Value> = settings.profiles.iter().cloned().filter_map(|mut profile| {
 		// A relays-only inbound is switched on at once, before the next publish: the node's own addresses of an older snapshot are dropped here, and a profile no relay reaches this account with is not given.
 		let only = profile["id"].as_str().and_then(|id| settings.relay_profiles.get(id)).is_some_and(|tag| crate::nodecfg::relays_only(&settings, tag)) || crate::xray::addresses(&profile).iter().any(|host| host == crate::nodecfg::NO_ADDRESS);
 		if let Some(tag) = profile["id"].as_str().and_then(|id| settings.relay_profiles.get(id)) {crate::nodecfg::carry(&mut profile, tag, &reaching, only);}
 		if only && profile["transports"].as_array().is_none_or(Vec::is_empty) {return None}
-		profile["device"] = device.clone();
+		let found = profile["id"].as_str().and_then(|id| settings.relay_profiles.get(id)).and_then(|tag| settings.inbound_ranges.get(tag)).and_then(|range| range.parse().ok());
+		// A profile of an inbound whose range is known carries the device's one address inside it, and is left out when it has none. Any other profile carries the stored address.
+		let mut own = device.clone();
+		if let (Some(range), Some(pool), Some(stored)) = (found, pool, stored) {own["addresses"] = json!([address_in(pool, range, stored).filter(|found| *found == stored || !taken.contains(&found.to_string()))?.to_string()]);}
+		profile["device"] = own;
 		Some(profile)
 	}).collect();
 	let profiles = app.names.resolve(profiles).await;
@@ -299,5 +324,45 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 			tracing::error!("a subscription document could not be built: {error}");
 			unknown(&app, mirrored)
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	fn at(pool: &str, range: &str, stored: &str) -> Option<String> {address_in(pool.parse().unwrap(), range.parse().unwrap(), stored.parse().unwrap()).map(|found| found.to_string())}
+
+	#[test]
+	fn a_device_has_its_stored_address_in_the_pool_range_and_the_same_offset_in_a_range_beside_it() {
+		assert_eq!(at("10.66.0.0/16", "10.66.0.1/16", "10.66.0.2"), Some("10.66.0.2".into()), "the range that holds the stored address keeps it");
+		assert_eq!(at("10.66.0.0/16", "10.9.0.1/24", "10.66.0.2"), Some("10.9.0.2".into()), "the offset from the pool's network is the offset from the range's");
+		assert_eq!(at("10.66.0.0/16", "10.9.0.1/24", "10.66.0.77"), Some("10.9.0.77".into()));
+	}
+
+	#[test]
+	fn an_offset_past_the_end_or_on_the_gateway_network_or_broadcast_gives_no_address() {
+		assert_eq!(at("10.66.0.0/16", "10.9.0.1/24", "10.66.1.5"), None, "past the end of the range");
+		assert_eq!(at("10.66.0.0/16", "10.9.0.1/24", "10.66.0.255"), None, "the broadcast address");
+		assert_eq!(at("10.66.0.0/16", "10.9.0.1/24", "10.66.0.0"), None, "the network address");
+		assert_eq!(at("10.66.0.0/16", "10.9.0.2/24", "10.66.0.2"), None, "the gateway, which is the address part of the range");
+		assert_eq!(at("10.66.0.0/16", "10.9.0.1/24", "10.66.0.1"), None, "the gateway of a range written with the first host");
+	}
+
+	#[test]
+	fn a_range_that_overlaps_the_pool_without_holding_the_address_and_an_address_outside_the_pool_give_none() {
+		assert_eq!(at("10.66.0.0/16", "10.66.5.1/24", "10.66.0.2"), None, "a range inside the pool that does not hold the address");
+		assert_eq!(at("10.66.0.0/24", "10.66.0.1/16", "10.66.0.2"), Some("10.66.0.2".into()), "a range that holds the whole pool holds the address");
+		assert_eq!(at("10.66.0.0/16", "10.9.0.1/24", "10.77.0.2"), None, "the pool changed after the device was made");
+		assert_eq!(at("10.66.0.0/16", "10.66.0.1/16", "10.77.0.2"), None);
+	}
+
+	#[test]
+	fn the_node_gets_the_stored_address_and_one_more_for_each_other_veilway_inbound() {
+		let inbounds = vec![json!({"type": "veilway", "tag": "n1", "address": ["10.66.0.1/16"]}), json!({"type": "veilway", "tag": "nn", "address": ["fd00::1/64", "10.9.0.1/24"]}), json!({"type": "veilway", "tag": "v6", "address": ["fd00::1/64"]}), json!({"type": "veilway", "tag": "nine", "address": ["10.8.0.1/24"]}), json!({"type": "xray", "tag": "x", "address": ["10.7.0.1/24"]})];
+		let none = HashSet::new();
+		assert_eq!(node_addresses("10.66.0.0/16", &inbounds, "10.66.0.9", &none), ["10.66.0.9", "10.9.0.9", "10.8.0.9"], "two inbounds beside the pool, and neither the IPv6 only one nor the other kind");
+		assert_eq!(node_addresses("10.66.0.0/16", &inbounds, "10.77.0.9", &none), ["10.77.0.9"], "an address outside the pool gets no more");
+		assert_eq!(node_addresses("not a pool", &inbounds, "10.66.0.9", &none), ["10.66.0.9"]);
+		assert_eq!(node_addresses("10.66.0.0/16", &inbounds, "10.66.0.9", &HashSet::from(["10.9.0.9".to_string()])), ["10.66.0.9", "10.8.0.9"], "an address another device or a link holds is skipped");
 	}
 }

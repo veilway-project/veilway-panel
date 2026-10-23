@@ -394,6 +394,11 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 			let lost: Vec<Value> = kinds.iter().enumerate().filter(|(at, kind)| !kept.contains(kind) && !kinds[..*at].contains(kind)).map(|(_, kind)| json!({"transport": kind, "code": "relays_only", "reason": "no relay that reaches this account carries this transport, and the node's own address is not given to apps"})).collect();
 			refused.extend(lost);
 		}
+		// A range that sits inside the account pool still holds the devices whose address falls in it, so only an inbound with no IPv4 range is known to carry none.
+		if crate::subs::range_of(inbound).is_none() {
+			refused.push(json!({"transport": "address", "code": "no_address", "reason": "no account device can get an address in this inbound: it has no IPv4 range. Give it an IPv4 range that does not overlap the account pool, or use the account pool's inbound"}));
+			profile["transports"] = json!([]);
+		}
 		let mut missing = Vec::new();
 		if profile.get("inbound_public_key").is_none() {missing.push("inbound_public_key")}
 		let used: Vec<String> = transports.iter().filter_map(|transport| transport["listen"].as_str()).flat_map(|listen| hosts(settings, &tag, listen)).collect();
@@ -485,12 +490,14 @@ pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Exten
 	// Profiles are published without relays: each document adds the published relays that reach its account.
 	let carrying: BTreeMap<String, String> = templates.iter().filter(|template| !empty(template)).map(|template| (template["profile"]["id"].as_str().unwrap_or_default().to_string(), template["inbound"].as_str().unwrap_or_default().to_string())).collect();
 	let relays = current.relays.clone();
+	let ranges: BTreeMap<String, String> = document["inbounds"].as_array().into_iter().flatten().filter(|inbound| inbound["type"] == "veilway").filter_map(|inbound| Some((inbound["tag"].as_str()?.to_string(), crate::subs::range_of(inbound)?.to_string()))).collect();
 	app.update_settings(move |settings| {
 		settings.profiles.retain(|profile| !ids.contains(&profile["id"]));
 		settings.profiles.extend(fresh);
 		let stale = stale_keys(settings);
 		retarget(&mut settings.profiles, &stale);
 		settings.relay_profiles = carrying;
+		settings.inbound_ranges = ranges;
 		settings.published_relays = relays;
 	}).await.map_err(Failure::internal)?;
 	app.db.audit(&ctx.actor, &ctx.source, "settings.update", "settings", &format!("profiles changed at {}", now())).await;

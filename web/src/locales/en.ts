@@ -1178,6 +1178,7 @@ export const en = {
 	"profiles.relaysOnly": "Relays only: do not give apps this node's address",
 	"profiles.relaysOnlyHint": "Apps get only the relays under Settings > Relays that carry this inbound. Users no relay reaches get no profile for it.",
 	"profiles.relaysOnlyNone": "Relays only is on, but no enabled relay carries this inbound, so no app gets a profile for it. Add a relay under Settings > Relays.",
+	"profiles.refused.no_address": "No account device can get an address in this inbound, since it has no IPv4 range. Give it an IPv4 range that does not overlap the account pool, or use the account pool's inbound.",
 	"profiles.refused.relays_only": "Relays only is on and no relay can carry this transport to these users. The node's own address is never given to apps.",
 	"profiles.webPort": "Web server port",
 	"profiles.webPortHint": "The port of your web server in front of the WebSocket transport, where apps connect. Your web server ends TLS there and passes the path on to the node. Empty means 443.",
