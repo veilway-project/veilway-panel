@@ -8,6 +8,9 @@ users[].devices[].preshared_key
 users[].devices[].transport_secrets
 xray.inbounds[].clients[].secret
 xray.inbounds[].server_key
+upstreams[].device_secret
+# Set from the fingerprint the operator confirmed on Other providers, never typed.
+upstreams[].signing_key
 
 # Tuning of exits that few operators touch: idle timers, proxy-only, masquerading and the fallbacks for what a backend cannot carry.
 exits[].backend.proxy_only
