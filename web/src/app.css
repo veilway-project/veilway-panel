@@ -116,6 +116,9 @@
 .p-flag[data-tone="info"] .vw-icon { color: var(--c-info); }
 .p-tag { display: inline-flex; align-items: center; padding: 0 var(--s-2); border: 1px solid var(--c-line-strong); border-radius: var(--r-1); font-size: var(--text-1); line-height: 20px; color: var(--c-text); white-space: nowrap; }
 .p-tag.vw-code { direction: ltr; unicode-bidi: isolate; }
+.p-tag[data-off] { border-style: dashed; color: var(--c-text-muted); text-decoration: line-through; }
+.p-tags .p-tag[data-off] { text-decoration-thickness: 1px; }
+.vw-switch:disabled { opacity: 0.5; cursor: not-allowed; }
 .p-tags { display: flex; flex-wrap: wrap; gap: var(--s-1); }
 
 /* Page parts */

@@ -1126,6 +1126,50 @@ async fn profiles_are_derived_from_inbounds_with_overrides_kept() {
 	assert_eq!(published["profile_overrides"]["Main"]["name"], "Edited", "the override stays after a publish");
 }
 
+async fn published(h: &Harness, session: &Session) -> Value {h.call(Method::GET, "/p/api/settings", Some(session), None, "10.0.0.1").await.json()["profiles"].clone()}
+
+async fn apply(h: &Harness, session: &Session, edit: fn(&mut Value)) {
+	let whole = h.call(Method::GET, "/p/api/config", Some(session), None, "10.0.0.1").await.json();
+	let mut inbounds = whole["document"]["inbounds"].clone();
+	edit(&mut inbounds);
+	let applied = h.call(Method::PUT, "/p/api/config/inbounds", Some(session), Some(json!({"revision": whole["revision"], "value": inbounds})), "10.0.0.1").await;
+	assert_eq!(applied.status, StatusCode::OK, "{}", String::from_utf8_lossy(&applied.body));
+}
+
+#[tokio::test]
+async fn a_switched_off_transport_or_inbound_goes_to_the_node_and_out_of_the_profiles_at_the_next_publish() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	settings["node_host"] = json!("192.0.2.10");
+	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(settings), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32])}})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(published(&h, &session).await[0]["transports"].as_array().unwrap().len(), 2);
+	let pushed = |fake: &Fake| fake.applied.lock().unwrap().last().cloned().unwrap();
+	apply(&h, &session, |inbounds| inbounds[0]["transports"][0]["enabled"] = json!(false)).await;
+	assert_eq!(pushed(&fake)["inbounds"][0]["transports"][0]["enabled"], json!(false), "the switch reaches the node's document");
+	assert!(pushed(&fake)["inbounds"][0]["transports"][1].get("enabled").is_none());
+	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
+	let template = &derived["templates"][0];
+	assert_eq!((template["profile"]["transports"].as_array().unwrap().iter().map(|transport| transport["type"].clone()).collect::<Vec<_>>(), template["refused"][0]["code"].clone(), template["refused"][0]["transport"].clone()), (vec![json!("udp-obfs")], json!("transport_off"), json!("0.0.0.0:51820")));
+	assert_eq!(published(&h, &session).await[0]["transports"].as_array().unwrap().len(), 2, "nothing changes for devices until the next publish");
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(published(&h, &session).await[0]["transports"].as_array().unwrap().len(), 1);
+	apply(&h, &session, |inbounds| inbounds[0]["enabled"] = json!(false)).await;
+	assert_eq!(pushed(&fake)["inbounds"][0]["enabled"], json!(false));
+	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((derived["templates"][0]["profile"]["transports"].clone(), derived["templates"][0]["refused"][0]["code"].clone(), derived["templates"][0]["missing"].clone()), (json!([]), json!("inbound_off"), json!([])));
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(published(&h, &session).await, json!([]), "a switched off inbound is taken down");
+	apply(&h, &session, |inbounds| {inbounds[0].as_object_mut().unwrap().remove("enabled"); inbounds[0]["transports"][0].as_object_mut().unwrap().remove("enabled");}).await;
+	assert!(pushed(&fake)["inbounds"][0].get("enabled").is_none());
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(published(&h, &session).await[0]["transports"].as_array().unwrap().len(), 2, "switched back on and published again");
+}
+
 #[tokio::test]
 async fn relays_are_saved_with_the_settings_and_previewed_before() {
 	let (_fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;

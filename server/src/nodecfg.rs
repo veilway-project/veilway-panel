@@ -323,17 +323,22 @@ pub fn remember_keys(settings: &mut Settings, document: &Value) {
 
 /// One template per `veilway` inbound, with the overrides laid over it and the relays that reach `user` carried in. `user` is the account's id and groups, or None for the relays that reach everyone. `missing` lists what a profile still needs from the operator, since the node never reveals a public key and does not know its own public address.
 /// With `skeleton`, a relays-only inbound keeps its transports with `NO_ADDRESS` for the node's address, which is what is published: each document then carries the relays that reach its account.
+/// The transports of an inbound the node listens on: none for an inbound that is switched off, and not the ones switched off one by one.
+fn live(inbound: &Value) -> Vec<&Value> {if inbound["enabled"] == false {Vec::new()} else {inbound["transports"].as_array().map(|list| list.iter().filter(|transport| transport["enabled"] != false).collect()).unwrap_or_default()}}
+
 fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, exposure: &Exposure, skeleton: bool) -> Vec<Value> {
 	let inbounds = document.get("inbounds").and_then(Value::as_array).cloned().unwrap_or_default();
 	let reached = reaching(relays, user);
 	// Every profile is made up to its overrides first, since the host names and paths a `ws-plain` transport must not share are those of all the inbounds: one subscription carries them all.
 	let bases: Vec<(&Value, String, Value, Vec<Value>, Vec<Value>)> = inbounds.iter().filter(|inbound| inbound["type"] == "veilway").map(|inbound| {
 		let (tag, host) = (inbound["tag"].as_str().unwrap_or_default().to_string(), settings.node_host.as_str());
-		let transports: Vec<&Value> = inbound["transports"].as_array().map(|list| list.iter().collect()).unwrap_or_default();
-		let obfs = transports.iter().any(|transport| transport["type"] == "udp-obfs");
+		let transports = live(inbound);
+		// The node takes its default `mtu` from every transport the inbound has, switched off or not.
+		let obfs = inbound["transports"].as_array().into_iter().flatten().any(|transport| transport["type"] == "udp-obfs");
 		let gateways: Vec<Value> = inbound["address"].as_array().into_iter().flatten().filter_map(|address| address.as_str()?.split('/').next().map(|ip| json!(ip))).collect();
 		let only = relays_only(settings, &tag);
 		let mut refused: Vec<Value> = Vec::new();
+		if inbound["enabled"] == false {refused.push(json!({"transport": "inbound", "code": "inbound_off", "reason": "the inbound is switched off on the node, so it has no profile: switch it on and publish again"}))} else {refused.extend(inbound["transports"].as_array().into_iter().flatten().filter(|transport| transport["enabled"] == false).map(|transport| json!({"transport": transport["listen"], "code": "transport_off", "reason": "the transport is switched off on the node, so the profile leaves it out: switch it on and publish again"})))}
 		let listed: Vec<Value> = transports.iter().filter_map(|transport| {
 			let listen = transport["listen"].as_str()?;
 			let reached = if only {vec![NO_ADDRESS.to_string()]} else {hosts(settings, &tag, listen)};
@@ -366,7 +371,7 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 	let names: Vec<String> = streams.iter().flat_map(|stream| stream["candidates"].as_array().into_iter().flatten().flat_map(|candidate| [candidate["host"].as_str(), candidate["sni"].as_str()]).flatten().map(str::to_lowercase)).collect();
 	let paths: Vec<String> = streams.iter().filter_map(|stream| stream["path"].as_str()).map(str::to_string).collect();
 	bases.into_iter().flat_map(|(inbound, tag, mut profile, mut refused, gateways)| {
-		let transports: Vec<&Value> = inbound["transports"].as_array().map(|list| list.iter().collect()).unwrap_or_default();
+		let (transports, off) = (live(inbound), inbound["enabled"] == false);
 		let (edits, only) = (settings.profile_overrides.get(&tag), relays_only(settings, &tag));
 		if let Some(list) = profile.get_mut("transports").and_then(Value::as_array_mut) {list.retain(|transport| transport["type"] != "ws-plain")}
 		for transport in transports.iter().filter(|transport| transport["type"] == "ws-plain") {
@@ -413,15 +418,16 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 			refused.extend(lost);
 		}
 		// A range that sits inside the account pool still holds the devices whose address falls in it, so only an inbound with no IPv4 range is known to carry none.
-		if crate::subs::range_of(inbound).is_none() {
+		if !off && crate::subs::range_of(inbound).is_none() {
 			refused.push(json!({"transport": "address", "code": "no_address", "reason": "no account device can get an address in this inbound: it has no IPv4 range. Give it an IPv4 range that does not overlap the account pool, or use the account pool's inbound"}));
 			profile["transports"] = json!([]);
 		}
 		let mut missing = Vec::new();
 		if profile.get("inbound_public_key").is_none() {missing.push("inbound_public_key")}
 		let used: Vec<String> = transports.iter().filter_map(|transport| transport["listen"].as_str()).flat_map(|listen| hosts(settings, &tag, listen)).collect();
-		if !only && (used.is_empty() || !used.iter().all(|host| reachable(host))) {missing.push("node_host")}
+		if !only && !transports.is_empty() && (used.is_empty() || !used.iter().all(|host| reachable(host))) {missing.push("node_host")}
 		if profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport["type"] == "tls" || transport["type"] == "ws" || transport["type"] == "fronted-shaped")) && profile.get("transport_public_key").is_none() {missing.push("transport_public_key")}
+		if off {missing.clear()}
 		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES && !NOT_MEMBERS.contains(&key.as_str())).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed, "refused": refused, "pin": pin});
 		let faketls = crate::borrowed::template(settings, document, inbound, &gateways).map(|mut template| {
 			if only {template["profile"]["transports"] = json!([]); template["missing"] = json!([]); template["refused"] = json!([{"transport": "faketls", "code": "relays_only", "reason": "a relay cannot sit in front of the borrowed-site handshake, and the node's own address is not given to apps"}]);}
@@ -999,5 +1005,18 @@ mod tests {
 		assert_eq!(derive(&settings, &document(), &[], None, &with_pin("pinA"), false)[0]["pin"]["stale"], false, "a renewed certificate keeps its key and its pin");
 		let template = derive(&settings, &document(), &[], None, &with_pin("pinB"), false).remove(0);
 		assert_eq!((template["pin"]["stale"].clone(), template["pin"]["published"].clone(), template["pin"]["pins"].clone()), (json!(true), json!(["pinA"]), json!(["pinB"])), "a new key is not in what devices hold");
+	}
+
+	#[test]
+	fn a_switched_off_transport_is_left_out_and_a_switched_off_inbound_has_no_profile() {
+		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
+		let mut document = document();
+		document["inbounds"][0]["transports"][0]["enabled"] = json!(false);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
+		assert_eq!((template["profile"]["transports"].as_array().unwrap().iter().map(|transport| transport["type"].clone()).collect::<Vec<_>>(), template["refused"][0]["code"].clone(), template["refused"][0]["transport"].clone(), template["profile"]["mtu"].clone()), (vec![json!("tls")], json!("transport_off"), json!("0.0.0.0:51820"), json!(1420)));
+		document["inbounds"][0]["enabled"] = json!(false);
+		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
+		assert_eq!((template["profile"]["transports"].clone(), template["refused"][0]["code"].clone(), template["missing"].clone()), (json!([]), json!("inbound_off"), json!([])), "an inbound that is off has no profile and nothing it still lacks");
+		assert_eq!(derive(&settings, &document, &[], None, &Exposure::default(), false).len(), 2, "the other inbound is untouched");
 	}
 }

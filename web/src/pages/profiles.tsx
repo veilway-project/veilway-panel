@@ -6,7 +6,7 @@ import type {PanelKey} from "../locales/en.ts";
 import {SettingsContext} from "../settings.ts";
 
 const MISSING = ["inbound_public_key", "transport_public_key", "node_host"];
-const REFUSALS = ["not_acknowledged", "behind_proxy", "key_shared", "no_public_key", "bad_site", "node_host", "profile_id", "no_name", "plain_host", "plain_shared", "plain_key", "plain_cookie", "relays_only", "no_address"];
+const REFUSALS = ["not_acknowledged", "behind_proxy", "key_shared", "no_public_key", "bad_site", "node_host", "profile_id", "no_name", "plain_host", "plain_shared", "plain_key", "plain_cookie", "relays_only", "no_address", "inbound_off", "transport_off"];
 
 // A profile with every transport left out is not published, so what it lacks blocks nothing.
 const emptyTemplate = (template: Template) => !(Array.isArray(template.profile.transports) && template.profile.transports.length) && (template.kind === "faketls" || (template.refused ?? []).length > 0);
