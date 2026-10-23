@@ -2083,12 +2083,14 @@ export const en = {
 	"proxy.clear": "These addresses carry the password in the clear. Use them only inside a tunnel or behind a TLS front.",
 	"proxy.private.title": "A private address is not a promise",
 	"proxy.private.body": "On a cloud host a private address may be forwarded to a public one, and a local network has other machines. Nothing here is encrypted, so anyone who reaches the port or sits on the path can read the traffic and the password. Listen on loopback and reach it through a tunnel or a TLS front instead.",
-	"proxy.udpNote": "On an address other than loopback, a client has to send the port it will send UDP from when it asks for UDP. A client that sends 0.0.0.0:0 gets no UDP here.",
 	"proxy.counts": "{open} open, {bytes}, {refused} logins refused",
 	"rule.cond.transport": "Transport",
 	"rule.hint.transport": "Transport names such as udp-obfs, tls, socks5.",
 	"rule.none.transport": "No inbound has a transport yet.",
-	"rule.allTransports": "Show every transport, including those no inbound has"
+	"rule.allTransports": "Show every transport, including those no inbound has",
+	"proxy.anyPort": "Allow UDP for clients behind NAT",
+	"proxy.anyPortHint": "A client behind NAT does not know the port it sends from, so it asks for port 0. With this on, the first datagram from its address takes the UDP association. Someone who shares the client's public address could send first and take it. Off, such clients get no UDP here.",
+	"proxy.countsUdp": "{count} UDP packets from the wrong port"
 };
 
 export type PanelKey = keyof typeof en;

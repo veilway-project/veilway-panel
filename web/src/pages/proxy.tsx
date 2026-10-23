@@ -46,15 +46,15 @@ export function ProxyFields({draft, setDraft, access, setAccess, problems, tried
 	const admitted = access === "all" ? accounts.filter(user => user.proxy_login) : accounts.filter(user => user.proxy_login && (chosenUsers.includes(user.name) || user.groups.some(group => chosenGroups.includes(group))));
 	const pick = (key: "users" | "groups", name: string, on: boolean) => { const held = key === "users" ? chosenUsers : chosenGroups; change(key, on ? [...held, name] : held.filter(other => other !== name)); };
 	return <>
-		<TextField label={t("proxy.listen")} hint={t("proxy.listenHint")} placeholder="127.0.0.1:1080" value={str(draft.listen)} onChange={value => { const copy: Item = {...draft, listen: value.trim()}, next = proxyListen(value); if (!value.trim()) delete copy.listen; if (next?.loopback) delete copy.public; setDraft(copy); }} error={say("listen")} technical required/>
+		<TextField label={t("proxy.listen")} hint={t("proxy.listenHint")} placeholder="127.0.0.1:1080" value={str(draft.listen)} onChange={value => { const copy: Item = {...draft, listen: value.trim()}, next = proxyListen(value); if (!value.trim()) delete copy.listen; if (next?.loopback) { delete copy.public; delete copy.udp_any_port; } setDraft(copy); }} error={say("listen")} technical required/>
 		{found?.private && <Banner tone="warning" title={t("proxy.private.title")}>{t("proxy.private.body")}</Banner>}
 		{found && !found.loopback && !found.private && <div className="p-stack">
 			<Banner tone="warning" title={t("proxy.public.title")}>{t("proxy.public.body")}</Banner>
 			<Checkbox label={t("proxy.public.confirm")} checked={draft.public === true} onChange={on => change("public", on ? true : undefined)}/>
 			{say("public") && <p className="vw-note p-exit-problem" role="alert">{say("public")}</p>}
 		</div>}
-		{kind !== "http" && <Switch label={t("proxy.udp")} hint={t("proxy.udpHint")} checked={draft.udp !== false} onChange={on => change("udp", on ? undefined : false)}/>}
-		{kind !== "http" && draft.udp !== false && found && !found.loopback && <p className="vw-small vw-muted">{t("proxy.udpNote")}</p>}
+		{kind !== "http" && <Switch label={t("proxy.udp")} hint={t("proxy.udpHint")} checked={draft.udp !== false} onChange={on => { const copy: Item = {...draft}; if (on) delete copy.udp; else { copy.udp = false; delete copy.udp_any_port; } setDraft(copy); }}/>}
+		{kind !== "http" && draft.udp !== false && found && !found.loopback && <Switch label={t("proxy.anyPort")} hint={t("proxy.anyPortHint")} checked={draft.udp_any_port === true} onChange={on => change("udp_any_port", on ? true : undefined)}/>}
 		<RadioGroup label={t("proxy.access")} value={access} onChange={value => setAccess(value === "chosen" ? "chosen" : "all")} options={[{value: "all", label: t("proxy.access.all"), detail: t("proxy.access.allDetail")}, {value: "chosen", label: t("proxy.access.chosen"), detail: t("proxy.access.chosenDetail")}]}/>
 		{access === "chosen" && <div className="p-stack">
 			{([["users", t("proxy.accounts"), accounts.map(user => ({name: user.name, plain: user.proxy_login})), chosenUsers, t("proxy.noAccounts")], ["groups", t("proxy.groups"), groups.map(name => ({name, plain: true})), chosenGroups, t("proxy.noGroups")]] as const).map(([key, label, options, held, empty]) => <div key={key} className="vw-field">
