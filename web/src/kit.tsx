@@ -133,6 +133,11 @@ export const toDay = (seconds: number | null | undefined) => seconds ? new Date(
 export const fromDay = (day: string) => day ? Math.floor(Date.parse(day + "T23:59:59Z") / 1000) : null;
 
 // A state word after an icon in its tone. The word says it on its own; the icon and its color repeat it.
+// A switch for a table row, with its name only for assistive technology. It wears the design system's switch.
+export function RowSwitch({label, checked, disabled, onChange}: {label: string, checked: boolean, disabled?: boolean, onChange: (checked: boolean) => void}) {
+	return <button type="button" role="switch" aria-checked={checked} aria-label={label} title={label} data-state={checked ? "checked" : "unchecked"} className="vw-switch" disabled={disabled} onClick={() => onChange(!checked)}><span className="vw-switch-thumb"/></button>;
+}
+
 export function Mark({tone, title, children}: {tone?: Tone | "muted", title?: string, children: ReactNode}) {
 	return <span className="p-flag" data-tone={tone} title={title}><Icon name={tone === "success" ? "check" : tone === "warning" ? "warning" : tone === "danger" ? "error" : "info"}/>{children}</span>;
 }

@@ -427,9 +427,9 @@ pub async fn wireguard_config(State(app): State<Arc<App>>, Extension(ctx): Exten
 	taken.extend(document["links"].as_array().into_iter().flatten().flat_map(|link| ["dialler", "listener"].map(|side| link["addresses"][side].clone())).flat_map(|list| list.as_array().cloned().unwrap_or_default()).filter_map(|address| Some(address.as_str()?.split('/').next()?.to_string())));
 	let clean = |text: &str| text.chars().map(|letter| if letter.is_ascii_alphanumeric() || letter == '-' || letter == '_' {letter} else {'-'}).collect::<String>();
 	let mut configs: Vec<WireguardConfig> = Vec::new();
-	for inbound in document["inbounds"].as_array().into_iter().flatten().filter(|inbound| inbound["type"] == "wireguard") {
+	for inbound in document["inbounds"].as_array().into_iter().flatten().filter(|inbound| inbound["type"] == "wireguard" && inbound["enabled"] != false) {
 		let tag = inbound["tag"].as_str().unwrap_or_default();
-		let (Some((range, address)), Some(listen), Some(key)) = (subs::range_of(inbound).and_then(|range| subs::address_in(pool, range, stored).filter(|found| *found == stored || !taken.contains(&found.to_string())).map(|found| (range, found))), inbound["transports"].as_array().into_iter().flatten().find(|transport| transport["type"] == "udp").and_then(|transport| transport["listen"].as_str()), public.get(tag)) else {continue};
+		let (Some((range, address)), Some(listen), Some(key)) = (subs::range_of(inbound).and_then(|range| subs::address_in(pool, range, stored).filter(|found| *found == stored || !taken.contains(&found.to_string())).map(|found| (range, found))), inbound["transports"].as_array().into_iter().flatten().find(|transport| transport["type"] == "udp" && transport["enabled"] != false).and_then(|transport| transport["listen"].as_str()), public.get(tag)) else {continue};
 		let Some(endpoint) = crate::nodecfg::hosts(&settings, tag, listen).into_iter().filter(|host| crate::nodecfg::reachable(host)).find_map(|host| crate::nodecfg::host_port(&host, listen)) else {continue};
 		let mtu = inbound["mtu"].as_u64().map_or(String::new(), |mtu| format!("MTU = {mtu}\n"));
 		let content = format!("[Interface]\nPrivateKey = {}\nAddress = {address}/32\nDNS = {}\n{mtu}\n[Peer]\nPublicKey = {key}\nEndpoint = {endpoint}\nAllowedIPs = 0.0.0.0/0, ::/0\nPersistentKeepalive = 25\n", STANDARD.encode(&private), range.addr());
