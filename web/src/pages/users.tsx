@@ -99,7 +99,7 @@ export function UsersPage({adding}: {adding: boolean}) {
 				<tbody>{visible.map(u => {
 					const node = u.node as NodeUser | null, gone = !!u.expires_at && u.expires_at * 1000 < Date.now();
 					return <tr key={u.id} className={gone || !u.enabled ? "p-row-muted" : undefined}>
-						<td><input type="checkbox" className="p-check" aria-label={t("users.select", {name: u.name})} checked={picked.has(u.id)} onChange={event => toggle(u.id, event.target.checked)}/></td>
+						<td><label className="p-hit"><input type="checkbox" className="p-check" aria-label={t("users.select", {name: u.name})} checked={picked.has(u.id)} onChange={event => toggle(u.id, event.target.checked)}/></label></td>
 						<td data-label={cols[0]}><span className="p-user"><a className="vw-code p-link" href={"#/users/" + u.id}>{u.name}</a>{u.note && <span>{u.note}</span>}</span></td>
 						<td data-label={cols[1]}>{u.groups.length ? <span className="p-tags">{u.groups.map(g => <span key={g} className="p-tag vw-code">{g}</span>)}</span> : <span className="vw-muted">{t("common.none")}</span>}</td>
 						<td data-label={cols[2]}>{Array.isArray(u.exits) ? <span className={u.exits.length ? "vw-num" : "vw-muted"}>{u.exits.length ? t("exits.count", {count: u.exits.length}) : t("exits.none")}</span> : <span className="vw-muted">{t("exits.all")}</span>}</td>
