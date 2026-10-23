@@ -45,16 +45,28 @@ impl Limiter {
 	}
 	/// When the key was last hit, if it was.
 	pub fn last(&self, key: &str) -> Option<i64> {self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(key).and_then(|hits| hits.back().copied())}
-	/// `hit` for a limit that only spaces requests out: a refused request is not counted, so asking again early does not push the next allowed time further away.
-	pub fn admit(&self, key: &str, max: usize, window: i64) -> bool {
-		let (mut all, at) = (self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()), now());
-		if all.len() >= KEYS_MAX {all.retain(|_, hits| hits.back().is_some_and(|last| at - last < 3600))}
-		if all.len() >= KEYS_MAX && !all.contains_key(key) {return false}
+	/// `hit` for a limit that only counts what it let through: a refused request is not recorded, so asking again early does not push the next allowed time further away. A key holds at most `max` times, and a full table drops its stalest key (nothing is kept past a day, the longest window used) instead of refusing a new one.
+	pub fn admit(&self, key: &str, max: usize, window: i64) -> bool {self.admit_at(key, max, window, now())}
+	/// `admit` at a given time, so that a test can slide the window without waiting.
+	pub fn admit_at(&self, key: &str, max: usize, window: i64, at: i64) -> bool {
+		let mut all = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		if all.len() >= KEYS_MAX {all.retain(|_, hits| hits.back().is_some_and(|last| at - last < 86_400))}
+		if all.len() >= KEYS_MAX && !all.contains_key(key) {
+			let stalest = all.iter().min_by_key(|(_, hits)| hits.back().copied()).map(|(stale, _)| stale.clone());
+			if let Some(stale) = stalest {all.remove(&stale);}
+		}
 		let hits = all.entry(key.to_string()).or_default();
 		while hits.front().is_some_and(|first| at - first >= window) {hits.pop_front();}
 		if hits.len() >= max {return false}
 		hits.push_back(at);
 		true
+	}
+	/// Gives back the one hit that `admit` recorded at `at` (give or take a second), for an enrollment that was cancelled. Other hits of the key stay.
+	pub fn give_back(&self, key: &str, at: i64) {
+		let mut all = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		if let Some(hits) = all.get_mut(key) {
+			if let Some(index) = (0..hits.len()).filter(|index| (hits[*index] - at).abs() <= 1).min_by_key(|index| (hits[*index] - at).abs()) {hits.remove(index);}
+		}
 	}
 	pub fn clear(&self, key: &str) {self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(key);}
 }
@@ -108,6 +120,22 @@ pub struct Endpoint {
 	pub pins: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum NoticeKind {Info, Warning}
+
+/// A notice of the signed document: one line of plain text of at most 280 bytes, and the same line in other languages.
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SubNotice {
+	pub severity: NoticeKind,
+	/// The default text, shown when no translation fits the app's language.
+	pub text: String,
+	/// At most 8 translations by language tag (`fa`, `de`, `pt-BR`, `zh-Hans`), each as long as `text` may be.
+	#[serde(default)]
+	pub translations: BTreeMap<String, String>,
+}
+
 /// What an operator sets once for the whole panel.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
 #[serde(deny_unknown_fields, default)]
@@ -116,6 +144,8 @@ pub struct Settings {
 	/// The provider's own terms and privacy policy, put in every document as its `agreement`, which the apps ask users to accept. An `https` URL, or empty for none.
 	pub terms_url: String,
 	pub privacy_url: String,
+	/// Notices put in every document as `notices`, at most 4. Apps keep them from their last refresh and show them with no connection, which the notices a node sends over the tunnel cannot do. A notice with the same text as one the node sends is shown once.
+	pub subscription_notices: Vec<SubNotice>,
 	/// The named subscription endpoints, at most 16, each on its own host and port and each reached by its own path, the panel's `sub_path` and the endpoint's name. An account's links and documents use the endpoint resolved for it: its own, else the first of its groups that has one in `group_endpoints`, else the default.
 	pub endpoints: Vec<Endpoint>,
 	/// The name of the default endpoint. Empty only while there are no endpoints.
@@ -133,8 +163,14 @@ pub struct Settings {
 	pub document_days: u32,
 	/// Devices that have not refreshed for this many days are removed, which frees their places: an app that was uninstalled, or a phone that was lost. 0 keeps them. A device whose key the panel made never refreshes and is never removed this way.
 	pub idle_device_days: u32,
-	/// Minutes an account waits after adding a device before it may add another, which slows down a leaked link. 0 lets devices be added one after another; the device limit still holds.
-	pub new_device_minutes: u32,
+	/// How many new devices one subscription link may enroll in any window of `new_devices_window_minutes` minutes, 1 to 64, which slows down a leaked link. The device limit still holds. A large count with a short window comes close to no limit.
+	pub new_devices: u32,
+	/// The length of the window of `new_devices`, 1 to 1440 minutes. It slides: a device that enrolled leaves the count that many minutes later.
+	pub new_devices_window_minutes: u32,
+	/// Read only to carry an older setting over: the one wait in minutes between two new devices, now `new_devices` of 1 in a window of this length. It is never written and never in the schema; a value read is turned into the two new settings by `migrate`.
+	#[serde(skip_serializing)]
+	#[schemars(skip)]
+	pub new_device_minutes: Option<u32>,
 	/// Days the first transport key of a `veilway` inbound stays first before the panel makes a new one, 7 to 30 (a `ws-plain` transport's key at most 7). The node then holds the two keys, the old one second, and the old key keeps working for one more period of this length before it is destroyed.
 	pub transport_key_days: u32,
 	/// Other endpoints of the same subscription, put in every document as `refresh_urls`. A string, or an object with `url` and `pins`.
@@ -204,9 +240,20 @@ impl TransportClock {
 	}
 }
 
+impl Settings {
+	/// Turns the retired `new_device_minutes` into the sliding window: 1 device per that many minutes, and 0 (no wait) into 64 per minute, the nearest to no limit. A value of 1, the old default, leaves the new defaults.
+	pub fn migrate(&mut self) {
+		match self.new_device_minutes.take() {
+			Some(0) => (self.new_devices, self.new_devices_window_minutes) = (64, 1),
+			Some(minutes) if minutes != 1 => (self.new_devices, self.new_devices_window_minutes) = (1, minutes.min(1440)),
+			_ => {}
+		}
+	}
+}
+
 impl Default for Settings {
 	fn default() -> Self {
-		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, idle_device_days: 0, new_device_minutes: 1, transport_key_days: 30, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), inbound_ranges: BTreeMap::new(), published_relays: Vec::new(), faketls_keys: BTreeMap::new(), inbound_keys: BTreeMap::new(), transport_keys: BTreeMap::new(), transport_clocks: BTreeMap::new()}
+		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), subscription_notices: Vec::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, idle_device_days: 0, new_devices: 3, new_devices_window_minutes: 60, new_device_minutes: None, transport_key_days: 30, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), inbound_ranges: BTreeMap::new(), published_relays: Vec::new(), faketls_keys: BTreeMap::new(), inbound_keys: BTreeMap::new(), transport_keys: BTreeMap::new(), transport_clocks: BTreeMap::new()}
 	}
 }
 

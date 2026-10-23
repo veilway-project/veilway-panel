@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use ipnet::IpNet;
-use std::{collections::{BTreeSet, HashMap}, net::IpAddr, sync::Arc, time::Duration};
+use std::{collections::{BTreeMap, BTreeSet, HashMap}, net::IpAddr, sync::Arc, time::Duration};
 
 const PROTOCOLS: [&str; 3] = ["vless", "trojan", "shadowsocks"];
 
@@ -142,9 +142,9 @@ pub fn addresses(profile: &Value) -> Vec<String> {
 	found
 }
 
-/// Where the Xray inbounds answer, for the rating of the profiles: every profile when one listens on every address, otherwise the listen IPs and the host names the inbounds' links carry. `resolved` holds what the profiles' names looked up to. A name with no answer counts as shared, since an unknown address is treated as shared.
+/// Where the Xray inbounds answer, for the rating of the profiles, and the node's certificate pins by listen address, which profiles are made with: every profile when one listens on every address, otherwise the listen IPs and the host names the inbounds' links carry. `resolved` holds what the profiles' names looked up to. A name with no answer counts as shared, since an unknown address is treated as shared.
 #[derive(Default)]
-pub struct Exposure {all: bool, ips: Vec<IpAddr>, names: Vec<String>, resolved: HashMap<String, Vec<IpAddr>>}
+pub struct Exposure {all: bool, ips: Vec<IpAddr>, names: Vec<String>, resolved: HashMap<String, Vec<IpAddr>>, pub pins: BTreeMap<String, String>}
 
 impl Exposure {
 	/// Whether a profile that names these addresses shares one with an Xray inbound.
@@ -208,7 +208,7 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	let sealed = server_key.as_ref().and_then(|key| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&input.tag), key.as_bytes())));
 	let mut hosts = app.db.call(|db| inbound_hosts(db)).await??;
 	hosts.push((input.tag.clone(), host.clone()));
-	let templates = nodecfg::rated(&app.settings(), &document, &[], None, &hosts, true).await;
+	let templates = nodecfg::rated(&app.settings(), &document, &[], None, &hosts, nodecfg::node_pins(&app).await, true).await;
 	let shared: Vec<Value> = templates.iter().filter(|template| template["profile"]["rating_cap"] == "detectable").map(|template| template["profile"]["id"].clone()).collect();
 	let derived: Vec<Value> = templates.iter().map(|template| template["profile"]["id"].clone()).collect();
 	let (tag, protocol, cache) = (input.tag.clone(), input.protocol.clone(), app.settings.clone());

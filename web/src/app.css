@@ -116,6 +116,9 @@
 .p-flag[data-tone="info"] .vw-icon { color: var(--c-info); }
 .p-tag { display: inline-flex; align-items: center; padding: 0 var(--s-2); border: 1px solid var(--c-line-strong); border-radius: var(--r-1); font-size: var(--text-1); line-height: 20px; color: var(--c-text); white-space: nowrap; }
 .p-tag.vw-code { direction: ltr; unicode-bidi: isolate; }
+.p-tag[data-off] { border-style: dashed; color: var(--c-text-muted); text-decoration: line-through; }
+.p-tags .p-tag[data-off] { text-decoration-thickness: 1px; }
+.vw-switch:disabled { opacity: 0.5; cursor: not-allowed; }
 .p-tags { display: flex; flex-wrap: wrap; gap: var(--s-1); }
 
 /* Page parts */
@@ -160,6 +163,8 @@
 .p-exit-problem { color: var(--c-danger); }
 .p-notices { display: grid; gap: var(--s-3); margin: 0; padding: 0; list-style: none; }
 .p-notices > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--s-3); }
+.p-lang { display: grid; grid-template-columns: 6rem minmax(0, 1fr) auto; align-items: start; gap: var(--s-3); }
+.p-lang > .vw-icon-button, .p-lang > button { margin-block-start: var(--s-6); }
 .p-count-line { margin-block-start: calc(var(--s-2) * -1); color: var(--c-text-muted); font-variant-numeric: tabular-nums; }
 .p-count-line[data-over] { color: var(--c-danger); }
 .p-usage-cell { min-inline-size: 180px; }

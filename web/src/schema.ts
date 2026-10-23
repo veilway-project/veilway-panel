@@ -1271,6 +1271,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users/{id}/devices/{did}/wireguard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** A wg-quick file for each plain WireGuard inbound of the node that has a udp transport and in whose range a device has an address, for a device whose key the panel made. The file holds the device's private key. Plain WireGuard is easy for a censor to recognize. Needs a recent re-authentication and is audited without the file. No API token can do this. */
+        post: operations["wireguardConfig"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users/{id}/endpoint": {
         parameters: {
             query?: never;
@@ -2053,6 +2070,8 @@ export interface components {
             /** Format: uint16 */
             status: number;
         };
+        /** @enum {string} */
+        NoticeKind: "info" | "warning";
         OfferIn: {
             dialler: string[];
             /** @description "forward" or "reverse". In a forward link this node is the exit. */
@@ -2446,10 +2465,16 @@ export interface components {
             };
             /**
              * Format: uint32
-             * @description Minutes an account waits after adding a device before it may add another, which slows down a leaked link. 0 lets devices be added one after another; the device limit still holds.
-             * @default 1
+             * @description How many new devices one subscription link may enroll in any window of `new_devices_window_minutes` minutes, 1 to 64, which slows down a leaked link. The device limit still holds. A large count with a short window comes close to no limit.
+             * @default 3
              */
-            new_device_minutes: number;
+            new_devices: number;
+            /**
+             * Format: uint32
+             * @description The length of the window of `new_devices`, 1 to 1440 minutes. It slides: a device that enrolled leaves the count that many minutes later.
+             * @default 60
+             */
+            new_devices_window_minutes: number;
             /**
              * @description The public host or address of this node, which the profiles' endpoints are made with.
              * @default
@@ -2520,6 +2545,11 @@ export interface components {
              */
             static_mirrors: string[];
             /**
+             * @description Notices put in every document as `notices`, at most 4. Apps keep them from their last refresh and show them with no connection, which the notices a node sends over the tunnel cannot do. A notice with the same text as one the node sends is shown once.
+             * @default []
+             */
+            subscription_notices: components["schemas"]["SubNotice"][];
+            /**
              * @description The provider's own terms and privacy policy, put in every document as its `agreement`, which the apps ask users to accept. An `https` URL, or empty for none.
              * @default
              */
@@ -2574,6 +2604,19 @@ export interface components {
             start_id: string;
             /** @description False when the panel's config file turns the authenticator code off. Read-only: no route changes it. */
             two_step: boolean;
+        };
+        /** @description A notice of the signed document: one line of plain text of at most 280 bytes, and the same line in other languages. */
+        SubNotice: {
+            severity: components["schemas"]["NoticeKind"];
+            /** @description The default text, shown when no translation fits the app's language. */
+            text: string;
+            /**
+             * @description At most 8 translations by language tag (`fa`, `de`, `pt-BR`, `zh-Hans`), each as long as `text` may be.
+             * @default {}
+             */
+            translations: {
+                [key: string]: string;
+            };
         };
         SubscriptionInfo: {
             /** @description Whether the panel holds a sealed copy, so the link can be shown again. False with "show links once". */
@@ -2858,6 +2901,17 @@ export interface components {
         };
         UsersOut: {
             users: components["schemas"]["UserOut"][];
+        };
+        WireguardConfig: {
+            /** @description A wg-quick file. It holds the device's private key. */
+            content: string;
+            /** @description A name for the file: the account, the device and, when there is more than one file, the inbound. */
+            file_name: string;
+            /** @description The tag of the node's `wireguard` inbound the file connects to. */
+            inbound: string;
+        };
+        WireguardOut: {
+            configs: components["schemas"]["WireguardConfig"][];
         };
         XrayInboundOut: {
             cert?: string | null;
@@ -7717,6 +7771,65 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Exported"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    wireguardConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+                did: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireguardOut"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */

@@ -126,6 +126,10 @@ pub fn template(settings: &Settings, document: &Value, inbound: &Value, gateways
 	let (mut emitted, mut refused) = (Vec::new(), Vec::new());
 	for transport in mine {
 		let listen = transport["listen"].as_str().unwrap_or_default();
+		if inbound["enabled"] == false || transport["enabled"] == false {
+			refused.push(json!({"transport": listen, "code": if inbound["enabled"] == false {"inbound_off"} else {"transport_off"}, "reason": "it is switched off on the node, so the profile leaves it out: switch it on and publish again"}));
+			continue;
+		}
 		let public = settings.faketls_keys.get(tag).and_then(|listens| listens.get(listen));
 		let key = transport["transport_key"].as_str().unwrap_or_default();
 		let port = listen.parse::<SocketAddr>().ok().map(|listen| listen.port());
@@ -402,5 +406,16 @@ mod tests {
 		assert!(template["refused"][0]["reason"].as_str().unwrap().contains("written by hand"));
 		settings.relay_profiles.insert("main-faketls".into(), "Main".into());
 		assert_eq!(why(&made(&settings, &document)), Vec::<String>::new(), "the panel's own earlier publish is replaced");
+	}
+
+	#[test]
+	fn a_switched_off_borrowed_transport_is_refused_by_name_and_its_profile_stays_so_that_publishing_takes_it_down() {
+		let document = document(vec![transport(json!({"enabled": false}))]);
+		let template = made(&settings(&document), &document);
+		assert_eq!((template["profile"]["transports"].clone(), why(&template)), (json!([]), vec!["transport_off".to_string()]));
+		let mut off = document.clone();
+		off["inbounds"][0]["enabled"] = json!(false);
+		off["inbounds"][0]["transports"][0].as_object_mut().unwrap().remove("enabled");
+		assert_eq!(why(&made(&settings(&off), &off)), vec!["inbound_off".to_string()]);
 	}
 }

@@ -48,7 +48,8 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 		Ok((accounts, stored, connection.query_row("select count(*) from admins", [], |row| row.get(0))?))
 	}).map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 	// A row that does not parse is never turned into the defaults: the next save would write them over it and drop the profiles, endpoints and relays it held. The row is left as it is for the operator to read or restore.
-	let settings: Settings = stored.map(|text| serde_json::from_str(&text).map_err(|error| format!("the stored settings in {} cannot be read ({error}); the row 'settings' of the table 'settings' is left untouched. Restore a backup, or fix the row by hand with the panel stopped", cfg.database.display()))).transpose()?.unwrap_or_default();
+	let mut settings: Settings = stored.map(|text| serde_json::from_str(&text).map_err(|error| format!("the stored settings in {} cannot be read ({error}); the row 'settings' of the table 'settings' is left untouched. Restore a backup, or fix the row by hand with the panel stopped", cfg.database.display()))).transpose()?.unwrap_or_default();
+	settings.migrate();
 	let keys = match (cfg.keys.exists(), accounts) {
 		(true, _) => crypto::Keys::load(&cfg.keys).map_err(|error| tracing::error!("the key file {} cannot be used: {error}", cfg.keys.display())).ok(),
 		(false, 0) => Some(crypto::Keys::create(&cfg.keys).map_err(|error| format!("{}: {error}", cfg.keys.display()))?),

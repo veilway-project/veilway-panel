@@ -1,6 +1,6 @@
 //! Admin accounts: setup, login, TOTP, sessions, API tokens, the audit log, settings, signing keys and the node.
 use crate::{app::{bucket, publish_settings, store_settings, App, Settings, SigningEntry}, auth::{Agent, COOKIE_NAME, TOKEN_PREFIX}, crypto::{self, now, Keys}, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
-use veilway_proto::subscription::{Url, URL_MAX};
+use veilway_proto::{control::{display, NOTICES_MAX, NOTICE_MAX}, subscription::{Tag, Url, TRANSLATIONS_MAX, URL_MAX}};
 use argon2::{password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
 use axum::{extract::{Path, Query, State}, http::{header::SET_COOKIE, HeaderName, HeaderValue, StatusCode}, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
@@ -186,8 +186,9 @@ pub struct LoggedIn {pub username: String, pub session_id: String, pub csrf: Str
 	pub password_change_required: bool}
 
 pub async fn login(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Extension(agent): Extension<Agent>, Body(input): Body<Login>) -> Result<Response, Failure> {
-	let per_source = if app.cfg.two_step_on() {LOGIN_PER_SOURCE} else {LOGIN_PER_SOURCE_OFF};
-	if !app.limits.hit(&format!("login:{}", bucket(&ctx.source, 64)), per_source.0, per_source.1) {
+	// Only a wrong login counts toward the limit: a right one and a try the limit already turned away are not recorded, so a source that stops guessing is free again once its failures leave the window.
+	let (per_source, key) = (if app.cfg.two_step_on() {LOGIN_PER_SOURCE} else {LOGIN_PER_SOURCE_OFF}, format!("login:{}", bucket(&ctx.source, 64)));
+	if app.limits.count(&key, per_source.1) >= per_source.0 {
 		let actor = actor_of(&app, &input.username).await;
 		app.db.audit(&actor, &ctx.source, "login.limited", "admin", "").await;
 		return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries. Wait a while."));
@@ -196,6 +197,7 @@ pub async fn login(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	let admin = match verify(&app, admin, &input.username, &input.password, &input.totp).await {
 		Ok(admin) => admin,
 		Err(error) => {
+			app.limits.hit(&key, per_source.0, per_source.1);
 			let actor = actor_of(&app, &input.username).await;
 			app.db.audit(&actor, &ctx.source, "login.failed", "admin", "").await;
 			return Err(error);
@@ -488,14 +490,18 @@ pub async fn revoke_token(State(app): State<Arc<App>>, Extension(ctx): Extension
 
 pub async fn get_settings(State(app): State<Arc<App>>) -> Result<Response, Failure> {ok(&app.settings())}
 
-pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Settings>) -> Result<Response, Failure> {
+pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(mut input): Body<Settings>) -> Result<Response, Failure> {
+	input.migrate();
 	if [&input.terms_url, &input.privacy_url].iter().any(|url| !url.is_empty() && Url::parse(url, URL_MAX, true, true).is_none()) {return Err(Failure::bad("terms_url and privacy_url are https URLs of at most 512 characters, or empty."))}
+	// A text the client's display filter would change is refused here, so apps show what the operator wrote.
+	let plain = |text: &String| !text.is_empty() && text == text.trim() && display(text, usize::MAX, NOTICE_MAX) == *text;
+	if input.subscription_notices.len() > NOTICES_MAX || input.subscription_notices.iter().any(|notice| !plain(&notice.text) || notice.translations.len() > TRANSLATIONS_MAX || notice.translations.iter().any(|(tag, text)| Tag::read(tag).is_none() || !plain(text))) {return Err(Failure::bad("subscription_notices are at most 4, each a line of plain text of 1 to 280 bytes with no invisible characters and at most 8 translations by language tag such as fa or pt-BR."))}
 	if input.pool_v4.parse::<Ipv4Net>().map_or(true, |pool| pool.prefix_len() < 16 || pool.prefix_len() > 30) {return Err(Failure::bad("pool_v4 is an IPv4 network from /16 to /30."))}
 	crate::endpoints::validate(&input).map_err(Failure::bad)?;
 	if !(900..=604_800).contains(&input.update_interval) || !(1..=90).contains(&input.document_days) || input.provider_name.is_empty() || input.provider_name.chars().count() > 64 {return Err(Failure::bad("update_interval is 900 to 604800, document_days is 1 to 90 and provider_name is 1 to 64 characters."))}
 	// An app refreshes once every `update_interval` at best, so a limit shorter than three of them would take devices that are in use.
 	if input.idle_device_days > 365 || (input.idle_device_days > 0 && i64::from(input.idle_device_days) * 86_400 < 3 * i64::from(input.update_interval)) {return Err(Failure::bad("idle_device_days is 0, or 1 to 365 and at least three refresh intervals."))}
-	if input.new_device_minutes > 1440 {return Err(Failure::bad("new_device_minutes is 0 to 1440."))}
+	if !(1..=64).contains(&input.new_devices) || !(1..=1440).contains(&input.new_devices_window_minutes) {return Err(Failure::bad("new_devices is 1 to 64 and new_devices_window_minutes is 1 to 1440."))}
 	if !(7..=30).contains(&input.transport_key_days) {return Err(Failure::bad("transport_key_days is 7 to 30."))}
 	if input.profiles.len() > 64 || input.profiles.iter().any(|profile| !profile.is_object() || profile.get("device").is_some()) || input.refresh_mirrors.len() > 4 {return Err(Failure::bad("profiles are at most 64 objects without a device, and refresh_mirrors at most 4."))}
 	if input.profile_overrides.values().any(|edits| edits.as_object().is_some_and(crate::nodecfg::plain_written)) {return Err(Failure::bad("An override of transports may not hold a ws-plain transport."))}

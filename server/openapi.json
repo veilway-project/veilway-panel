@@ -1689,6 +1689,13 @@
         ],
         "type": "object"
       },
+      "NoticeKind": {
+        "enum": [
+          "info",
+          "warning"
+        ],
+        "type": "string"
+      },
       "OfferIn": {
         "additionalProperties": false,
         "properties": {
@@ -2691,9 +2698,16 @@
             "description": "The IPv4 range of each `veilway` inbound, by inbound tag, as it was when the profiles were published. A document gives a device the address it has inside the range of the profile's inbound. Written by publish.",
             "type": "object"
           },
-          "new_device_minutes": {
-            "default": 1,
-            "description": "Minutes an account waits after adding a device before it may add another, which slows down a leaked link. 0 lets devices be added one after another; the device limit still holds.",
+          "new_devices": {
+            "default": 3,
+            "description": "How many new devices one subscription link may enroll in any window of `new_devices_window_minutes` minutes, 1 to 64, which slows down a leaked link. The device limit still holds. A large count with a short window comes close to no limit.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "new_devices_window_minutes": {
+            "default": 60,
+            "description": "The length of the window of `new_devices`, 1 to 1440 minutes. It slides: a device that enrolled leaves the count that many minutes later.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -2787,6 +2801,14 @@
             "description": "Base URLs of static mirrors, put in every document as `static_mirrors`: plain file hosting that holds each device's sealed document. `https`, a path ending in `/`, no pins and no IP literal, at most 4, and none shares host and port with the endpoint or a relay mirror.",
             "items": {
               "type": "string"
+            },
+            "type": "array"
+          },
+          "subscription_notices": {
+            "default": [],
+            "description": "Notices put in every document as `notices`, at most 4. Apps keep them from their last refresh and show them with no connection, which the notices a node sends over the tunnel cannot do. A notice with the same text as one the node sends is shown once.",
+            "items": {
+              "$ref": "#/components/schemas/SubNotice"
             },
             "type": "array"
           },
@@ -2912,6 +2934,32 @@
           "setup_needed",
           "two_step",
           "start_id"
+        ],
+        "type": "object"
+      },
+      "SubNotice": {
+        "additionalProperties": false,
+        "description": "A notice of the signed document: one line of plain text of at most 280 bytes, and the same line in other languages.",
+        "properties": {
+          "severity": {
+            "$ref": "#/components/schemas/NoticeKind"
+          },
+          "text": {
+            "description": "The default text, shown when no translation fits the app's language.",
+            "type": "string"
+          },
+          "translations": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "At most 8 translations by language tag (`fa`, `de`, `pt-BR`, `zh-Hans`), each as long as `text` may be.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "severity",
+          "text"
         ],
         "type": "object"
       },
@@ -3756,6 +3804,42 @@
         },
         "required": [
           "users"
+        ],
+        "type": "object"
+      },
+      "WireguardConfig": {
+        "properties": {
+          "content": {
+            "description": "A wg-quick file. It holds the device's private key.",
+            "type": "string"
+          },
+          "file_name": {
+            "description": "A name for the file: the account, the device and, when there is more than one file, the inbound.",
+            "type": "string"
+          },
+          "inbound": {
+            "description": "The tag of the node's `wireguard` inbound the file connects to.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "inbound",
+          "file_name",
+          "content"
+        ],
+        "type": "object"
+      },
+      "WireguardOut": {
+        "properties": {
+          "configs": {
+            "items": {
+              "$ref": "#/components/schemas/WireguardConfig"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "configs"
         ],
         "type": "object"
       },
@@ -9447,6 +9531,83 @@
           }
         },
         "summary": "The signed document of a panel-keyed device, private key included, as a link or file.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/users/{id}/devices/{did}/wireguard": {
+      "post": {
+        "operationId": "wireguardConfig",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "did",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireguardOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "A wg-quick file for each plain WireGuard inbound of the node that has a udp transport and in whose range a device has an address, for a device whose key the panel made. The file holds the device's private key. Plain WireGuard is easy for a censor to recognize. Needs a recent re-authentication and is audited without the file. No API token can do this.",
         "x-access": "session-reauth"
       }
     },

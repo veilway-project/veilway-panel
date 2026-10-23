@@ -2,7 +2,7 @@ use axum::{body::Body, extract::{ConnectInfo, Path, State}, http::{header::{CONT
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use std::{future::Future, net::SocketAddr, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}};
+use std::{collections::HashMap, future::Future, net::SocketAddr, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}};
 use tower::ServiceExt;
 use veilway_panel::{admin, app::{bucket, App, Limiter, Signing}, build, config::{Config, TrustedMirror}, crypto, mirrors, openapi, router, upkeep_once, Upkeep};
 use veilway_proto::subscription::{envelope::{self, Kid}, exchange::{self, GatewayKey}, link::Link, payload::{self, Payload, Reason}, sealed_file, BODY_MAX};
@@ -620,6 +620,49 @@ async fn signed_document_carries_the_provider_terms_and_privacy_links() {
 }
 
 #[tokio::test]
+async fn subscription_notices_reach_every_document_and_the_client_reads_them_all() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"subscription_notices": [{"severity": "warning", "text": "Maintenance on Friday", "translations": {"fa": "تعمیرات روز جمعه", "pt-BR": "Manutenção na sexta"}}, {"severity": "info", "text": "New server in Frankfurt"}]})).await;
+	let kept = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(kept["subscription_notices"].as_array().map(Vec::len), Some(2));
+	let (id, link) = h.user(&session, "ann", json!({})).await;
+	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
+	let Payload::Subscription(document) = opened(&h.fetch(&link, &kids, 1, "fetch", None).await, &[key]) else {panic!("a document")};
+	assert_eq!(document.notices.len(), 2, "the client kept both notices");
+	assert_eq!(document.left_out, 0, "the client left nothing out");
+	assert!(matches!(document.notices[0].severity, veilway_proto::control::Severity::Warning) && matches!(document.notices[1].severity, veilway_proto::control::Severity::Information));
+	assert_eq!((document.notices[0].text.as_str(), document.notices[1].text.as_str()), ("Maintenance on Friday", "New server in Frankfurt"));
+	let tags: Vec<(String, String)> = document.notices[0].text.translations().map(|translation| (translation.tag.as_str().to_owned(), translation.text.to_owned())).collect();
+	assert_eq!(tags, [("fa".to_owned(), "تعمیرات روز جمعه".to_owned()), ("pt-BR".to_owned(), "Manutenção na sexta".to_owned())]);
+	assert_eq!(document.notices[1].text.translations().count(), 0);
+	h.configure(&session, json!({})).await;
+	h.app.sub_limits.clear(&format!("new:{id}:1"));
+	let Payload::Subscription(document) = opened(&h.fetch(&link, &kids, 2, "fetch", None).await, &[key]) else {panic!("a document")};
+	assert!(document.notices.is_empty(), "no setting, no notices");
+}
+
+#[tokio::test]
+async fn subscription_notice_limits_are_the_clients_and_checked_when_saved() {
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	let one = |text: &str| json!({"severity": "info", "text": text});
+	let many: Vec<Value> = (0..5).map(|i| one(&format!("Notice {i}"))).collect();
+	let translations: serde_json::Map<String, Value> = ["aa", "bb", "cc", "dd", "ee", "ff", "gg", "hh", "ii"].iter().map(|tag| (tag.to_string(), json!("x"))).collect();
+	let cases = [json!(many), json!([one("")]), json!([one(" padded ")]), json!([one(&"a".repeat(281))]), json!([one("hidden\u{200b}mark")]), json!([one("line\nbreak")]), json!([{"severity": "info", "text": "Ok", "translations": {"FA": "x"}}]), json!([{"severity": "info", "text": "Ok", "translations": {"fa": ""}}]), json!([{"severity": "info", "text": "Ok", "translations": translations}]), json!([{"severity": "danger", "text": "Ok"}])];
+	for bad in cases {
+		let answer = h.call(Method::PUT, "/p/api/settings", Some(&session), Some(json!({"subscription_notices": bad})), "10.0.0.1").await;
+		assert_ne!(answer.status, StatusCode::OK, "{bad}");
+	}
+	let edge = "ا".repeat(140);
+	h.configure(&session, json!({"subscription_notices": [one(&"a".repeat(280)), one(&edge), one("Four"), one("Notices")]})).await;
+	let (_, link) = h.user(&session, "ann", json!({})).await;
+	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
+	let Payload::Subscription(document) = opened(&h.fetch(&link, &kids, 1, "fetch", None).await, &[key]) else {panic!("a document")};
+	assert_eq!((document.notices.len(), document.left_out, document.notices[0].text.as_str().len(), document.notices[1].text.as_str()), (4, 0, 280, edge.as_str()));
+}
+
+#[tokio::test]
 async fn web_pages_load_without_a_session() {
 	let h = Harness::new().await;
 	let page = h.call(Method::GET, "/p/", None, None, "10.0.0.1").await;
@@ -750,6 +793,18 @@ impl Fake {
 						}
 					}
 				}
+				for outbound in document["outbounds"].as_array_mut().into_iter().flatten().filter(|outbound| outbound["type"] == "xray") {
+					if let Some(link) = outbound["link"].as_str().map(str::to_string) {
+						fake.calls.lock().unwrap().push(("xray_link".into(), json!(link)));
+						let rest = link.strip_prefix("trojan://").unwrap();
+						let (password, server) = rest.split_once('@').unwrap();
+						*outbound = json!({"tag": outbound["tag"], "type": "xray", "protocol": "trojan", "server": server.split('?').next().unwrap(), "password": password, "security": {"type": "tls"}});
+					}
+					let was = held["outbounds"].as_array().into_iter().flatten().find(|was| was["tag"] == outbound["tag"]).cloned().unwrap_or(Value::Null);
+					for key in ["id", "password"] {
+						if outbound[key].as_str().is_some_and(|text| text.starts_with("<redacted")) {outbound[key] = was[key].clone();}
+					}
+				}
 				*generation += 1;
 				fake.applied.lock().unwrap().push(document.clone());
 				*fake.document.lock().unwrap() = document;
@@ -760,6 +815,7 @@ impl Fake {
 			.route("/v1/config/validate", post(|Json(document): Json<Value>| async move {Json(json!({"valid": document.get("invalid").is_none(), "report": {"errors": [], "warnings": []}}))}))
 			.route("/v1/config/diff", post(|Json(_): Json<Value>| async move {Json(json!({"valid": true, "report": {}, "diff": {"inbounds": {"added": ["x"]}}}))}))
 			.route("/v1/status", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.status.lock().unwrap().clone())}))
+			.route("/v1/inbounds", get(|State(fake): State<Arc<Fake>>| async move {Json(json!({"inbounds": fake.document.lock().unwrap()["inbounds"].as_array().into_iter().flatten().map(|inbound| json!({"tag": inbound["tag"], "kind": inbound["type"], "public_key": STANDARD.encode([9u8; 32]), "transport_public_key": null, "transports": []})).collect::<Vec<_>>(), "public_addresses": []}))}))
 			.route("/v1/stats", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.stats.lock().unwrap().clone())}))
 			.route("/v1/sessions", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.sessions.lock().unwrap().clone())}))
 			.route("/v1/exits", get(|| async {Json(json!({"exits": [{"tag": "main", "udp": true}]}))}))
@@ -809,6 +865,11 @@ fn marked(key: &Value) -> Value {json!(format!("<redacted:{}>", STANDARD.decode(
 
 /// What the node shows of a document: the key of a borrowed-site transport only as a marker made of its first bytes, as the real node shows every secret once it holds it.
 fn redacted(mut document: Value) -> Value {
+	for outbound in document["outbounds"].as_array_mut().into_iter().flatten().filter(|outbound| outbound["type"] == "xray") {
+		for key in ["id", "password"] {
+			if let Some(text) = outbound[key].as_str().map(str::to_string) {outbound[key] = json!(format!("<redacted:{}>", text.bytes().take(4).map(|byte| format!("{byte:02x}")).collect::<String>()));}
+		}
+	}
 	for inbound in document["inbounds"].as_array_mut().into_iter().flatten() {
 		for key in inbound["transport_keys"].as_array_mut().into_iter().flatten() {*key = marked(key);}
 		for stream in inbound["transports"].as_array_mut().into_iter().flatten().filter(|stream| stream["type"] == "ws-plain") {
@@ -861,6 +922,18 @@ async fn config_sections_validate_diff_and_apply_through_the_node() {
 	assert_eq!(fake.applied.lock().unwrap().len(), 1, "a refused document reaches no apply");
 	let audit = h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await.json();
 	assert!(audit["entries"].as_array().unwrap().iter().any(|entry| entry["action"] == "config.apply" && entry["target"] == "outbounds"));
+}
+
+#[tokio::test]
+async fn the_load_setting_of_an_exit_reaches_the_node_document() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	let exit = |load: Value| json!([{"tag": "fra", "backend": {"type": "netstack", "outbound": "plain"}, "load": load}]);
+	let value = exit(json!({"by": "mbps", "busy": 200, "very_busy": 600}));
+	let applied = h.call(Method::PUT, "/p/api/config/exits", Some(&session), Some(json!({"revision": "rev1", "value": value})), "10.0.0.1").await;
+	assert_eq!(applied.status, StatusCode::OK, "{}", String::from_utf8_lossy(&applied.body));
+	assert_eq!(fake.applied.lock().unwrap().last().unwrap()["exits"], value, "the load setting is in the document the node got");
 }
 
 #[tokio::test]
@@ -925,6 +998,38 @@ async fn through_is_written_when_set_and_refused_when_it_loops_breaks_a_user_or_
 	assert!(String::from_utf8_lossy(&refused.body).contains("around the chain of outbound p2"));
 	let target_only = json!([{"tag": "a", "backend": {"type": "netstack", "outbound": "p1", "unsupported": {"udp": "direct"}}}]);
 	assert_eq!(h.call(Method::PUT, "/p/api/config/exits", Some(&session), Some(json!({"revision": "rev3", "value": target_only})), "10.0.0.1").await.status, StatusCode::OK, "an outbound that is only the target of a through dials directly, so direct UDP is allowed");
+}
+
+#[tokio::test]
+async fn an_xray_outbound_goes_to_the_node_from_a_link_or_typed_fields_and_its_secrets_are_never_read_back() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	let from_link = json!([{"tag": "plain", "type": "direct"}, {"tag": "far", "type": "xray", "link": "trojan://hunter2hunter2@vpn.example.com:443?security=tls"}]);
+	let applied = h.call(Method::PUT, "/p/api/config/outbounds", Some(&session), Some(json!({"revision": "rev1", "value": from_link})), "10.0.0.1").await;
+	assert_eq!(applied.status, StatusCode::OK, "{}", String::from_utf8_lossy(&applied.body));
+	assert_eq!(fake.calls.lock().unwrap().iter().find(|(name, _)| name == "xray_link").unwrap().1, "trojan://hunter2hunter2@vpn.example.com:443?security=tls", "the node got the link as pasted");
+	let read = h.call(Method::GET, "/p/api/config/outbounds", Some(&session), None, "10.0.0.1").await;
+	let text = String::from_utf8_lossy(&read.body).to_string();
+	assert!(!text.contains("hunter2") && !text.contains("trojan://"), "{text}");
+	let value = read.json()["value"].clone();
+	assert_eq!((value[1]["protocol"].clone(), value[1]["server"].clone(), value[1].get("link").is_none()), (json!("trojan"), json!("vpn.example.com:443"), true), "the node keeps the typed form");
+	assert!(value[1]["password"].as_str().unwrap().starts_with("<redacted"));
+	let mut typed = value.clone();
+	typed[1]["server"] = json!("vpn2.example.com:8443");
+	typed[1]["transport"] = json!({"type": "ws", "path": "/ws", "host": "vpn2.example.com"});
+	let applied = h.call(Method::PUT, "/p/api/config/outbounds", Some(&session), Some(json!({"revision": "rev2", "value": typed})), "10.0.0.1").await;
+	assert_eq!(applied.status, StatusCode::OK, "{}", String::from_utf8_lossy(&applied.body));
+	let held = fake.applied.lock().unwrap().last().unwrap()["outbounds"][1].clone();
+	assert_eq!((held["server"].clone(), held["password"].clone(), held["transport"]["type"].clone()), (json!("vpn2.example.com:8443"), json!("hunter2hunter2"), json!("ws")), "the marker sent back keeps the saved secret");
+	let read = h.call(Method::GET, "/p/api/config/outbounds", Some(&session), None, "10.0.0.1").await;
+	assert!(!String::from_utf8_lossy(&read.body).contains("hunter2"));
+	let exit = json!([{"tag": "a", "backend": {"type": "netstack", "outbound": "far", "unsupported": {"udp": "direct"}}}]);
+	let refused = h.call(Method::PUT, "/p/api/config/exits", Some(&session), Some(json!({"revision": "rev3", "value": exit})), "10.0.0.1").await;
+	assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+	assert!(String::from_utf8_lossy(&refused.body).contains("an Xray outbound carries UDP itself"));
+	let exit = json!([{"tag": "a", "backend": {"type": "netstack", "outbound": "far", "unsupported": {"udp": "drop"}}}]);
+	assert_eq!(h.call(Method::PUT, "/p/api/config/exits", Some(&session), Some(json!({"revision": "rev3", "value": exit})), "10.0.0.1").await.status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -1068,6 +1173,50 @@ async fn profiles_are_derived_from_inbounds_with_overrides_kept() {
 	let published = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
 	assert_eq!(published["profiles"].as_array().unwrap().iter().map(|profile| profile["id"].as_str().unwrap().to_string()).collect::<Vec<_>>(), vec!["other", "main"]);
 	assert_eq!(published["profile_overrides"]["Main"]["name"], "Edited", "the override stays after a publish");
+}
+
+async fn published(h: &Harness, session: &Session) -> Value {h.call(Method::GET, "/p/api/settings", Some(session), None, "10.0.0.1").await.json()["profiles"].clone()}
+
+async fn apply(h: &Harness, session: &Session, edit: fn(&mut Value)) {
+	let whole = h.call(Method::GET, "/p/api/config", Some(session), None, "10.0.0.1").await.json();
+	let mut inbounds = whole["document"]["inbounds"].clone();
+	edit(&mut inbounds);
+	let applied = h.call(Method::PUT, "/p/api/config/inbounds", Some(session), Some(json!({"revision": whole["revision"], "value": inbounds})), "10.0.0.1").await;
+	assert_eq!(applied.status, StatusCode::OK, "{}", String::from_utf8_lossy(&applied.body));
+}
+
+#[tokio::test]
+async fn a_switched_off_transport_or_inbound_goes_to_the_node_and_out_of_the_profiles_at_the_next_publish() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	settings["node_host"] = json!("192.0.2.10");
+	assert_eq!(h.call(Method::PUT, "/p/api/settings", Some(&session), Some(settings), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32])}})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(published(&h, &session).await[0]["transports"].as_array().unwrap().len(), 2);
+	let pushed = |fake: &Fake| fake.applied.lock().unwrap().last().cloned().unwrap();
+	apply(&h, &session, |inbounds| inbounds[0]["transports"][0]["enabled"] = json!(false)).await;
+	assert_eq!(pushed(&fake)["inbounds"][0]["transports"][0]["enabled"], json!(false), "the switch reaches the node's document");
+	assert!(pushed(&fake)["inbounds"][0]["transports"][1].get("enabled").is_none());
+	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
+	let template = &derived["templates"][0];
+	assert_eq!((template["profile"]["transports"].as_array().unwrap().iter().map(|transport| transport["type"].clone()).collect::<Vec<_>>(), template["refused"][0]["code"].clone(), template["refused"][0]["transport"].clone()), (vec![json!("udp-obfs")], json!("transport_off"), json!("0.0.0.0:51820")));
+	assert_eq!(published(&h, &session).await[0]["transports"].as_array().unwrap().len(), 2, "nothing changes for devices until the next publish");
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(published(&h, &session).await[0]["transports"].as_array().unwrap().len(), 1);
+	apply(&h, &session, |inbounds| inbounds[0]["enabled"] = json!(false)).await;
+	assert_eq!(pushed(&fake)["inbounds"][0]["enabled"], json!(false));
+	let derived = h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((derived["templates"][0]["profile"]["transports"].clone(), derived["templates"][0]["refused"][0]["code"].clone(), derived["templates"][0]["missing"].clone()), (json!([]), json!("inbound_off"), json!([])));
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(published(&h, &session).await, json!([]), "a switched off inbound is taken down");
+	apply(&h, &session, |inbounds| {inbounds[0].as_object_mut().unwrap().remove("enabled"); inbounds[0]["transports"][0].as_object_mut().unwrap().remove("enabled");}).await;
+	assert!(pushed(&fake)["inbounds"][0].get("enabled").is_none());
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(published(&h, &session).await[0]["transports"].as_array().unwrap().len(), 2, "switched back on and published again");
 }
 
 #[tokio::test]
@@ -1873,6 +2022,16 @@ async fn no_admin_is_left_without_a_secret_after_setup_add_reset_or_change_in_ei
 		assert!(!changed.json()["totp_secret"].as_str().unwrap().is_empty(), "{two_step}");
 		assert_eq!(h.app.db.call(|db| db.query_row("select count(*) from admins where length(totp_secret) = 0", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap(), 0, "{two_step}");
 	}
+}
+
+#[tokio::test]
+async fn only_wrong_logins_count_toward_the_limit_of_a_source() {
+	let h = Harness::with_config(None, |cfg| cfg.two_step = "off".into()).await;
+	let login = |password: &'static str| h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": password})), "10.2.0.1");
+	for n in 0..8 {assert_eq!(login(PASSWORD).await.status, StatusCode::OK, "right login {n} was held back");}
+	for _ in 0..5 {assert_eq!(login("not the password at all").await.status, StatusCode::UNAUTHORIZED);}
+	assert_eq!(login(PASSWORD).await.status, StatusCode::TOO_MANY_REQUESTS, "five wrong logins did not stop the source");
+	assert_eq!(h.app.limits.count("login:10.2.0.1", 900), 5, "a try the limit turned away was counted");
 }
 
 #[tokio::test]
@@ -2835,26 +2994,74 @@ async fn the_console_lists_admins_and_resets_a_password() {
 }
 
 #[tokio::test]
-async fn the_wait_between_new_devices_is_a_setting_and_0_lets_them_come_one_after_another() {
+async fn new_devices_per_link_are_a_sliding_window_setting_and_a_cancelled_import_gives_its_place_back() {
 	let h = Harness::new().await;
 	let session = h.login("10.0.0.1").await;
-	let refused = h.call(Method::PUT, "/p/api/settings", Some(&session), Some({let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json(); settings["new_device_minutes"] = json!(1441); settings}), "10.0.0.1").await;
-	assert_eq!(refused.status, StatusCode::BAD_REQUEST);
-	h.configure(&session, json!({"new_device_minutes": 10})).await;
-	let (_, link) = h.user(&session, "ann", json!({"device_limit": 4})).await;
+	h.configure(&session, json!({})).await;
+	for bad in [json!({"new_devices": 0}), json!({"new_devices": 65}), json!({"new_devices_window_minutes": 0}), json!({"new_devices_window_minutes": 1441})] {
+		let refused = h.call(Method::PUT, "/p/api/settings", Some(&session), Some({let mut settings = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json(); settings.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone()); settings}), "10.0.0.1").await;
+		assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+	}
+	let defaults = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((defaults["new_devices"].clone(), defaults["new_devices_window_minutes"].clone()), (json!(3), json!(60)));
+	assert!(defaults.get("new_device_minutes").is_none());
+	let (_, link) = h.user(&session, "ann", json!({"device_limit": 8})).await;
 	let (key, kids) = (key_of(&link), [key_of(&link).kid()]);
-	assert!(matches!(opened(&h.fetch(&link, &kids, 1, "confirm", None).await, &[key.clone()]), Payload::Subscription(_)));
-	assert_eq!(refusal_of(&h.fetch(&link, &kids, 2, "confirm", None).await, &[key.clone()]), Reason::RateLimited);
-	// An import that was given up releases its pending device, and the next one does not wait.
-	let (_, other) = h.user(&session, "bob", json!({"device_limit": 4})).await;
+	for device in [1, 2, 3] {assert!(matches!(opened(&h.fetch(&link, &kids, device, "confirm", None).await, &[key.clone()]), Payload::Subscription(_)))}
+	assert_eq!(refusal_of(&h.fetch(&link, &kids, 4, "confirm", None).await, &[key.clone()]), Reason::RateLimited);
+	assert_eq!(refusal_of(&h.fetch(&link, &kids, 4, "confirm", None).await, &[key.clone()]), Reason::RateLimited, "a refused try is not counted");
+	// An import that was given up releases its pending device and gives back exactly its place.
+	let (_, other) = h.user(&session, "bob", json!({"device_limit": 8})).await;
 	let kids = [key_of(&other).kid()];
-	assert!(matches!(opened(&h.fetch(&other, &kids, 11, "fetch", None).await, &[key.clone()]), Payload::Subscription(_)));
-	assert_eq!(refusal_of(&h.fetch(&other, &kids, 12, "fetch", None).await, &[key.clone()]), Reason::RateLimited);
-	assert_eq!(refusal_of(&h.fetch(&other, &kids, 11, "release", None).await, &[key.clone()]), Reason::Released);
-	assert!(matches!(opened(&h.fetch(&other, &kids, 12, "fetch", None).await, &[key.clone()]), Payload::Subscription(_)));
+	for (device, op) in [(11, "confirm"), (12, "confirm"), (13, "fetch")] {assert!(matches!(opened(&h.fetch(&other, &kids, device, op, None).await, &[key.clone()]), Payload::Subscription(_)))}
+	assert_eq!(refusal_of(&h.fetch(&other, &kids, 14, "fetch", None).await, &[key.clone()]), Reason::RateLimited);
+	assert_eq!(refusal_of(&h.fetch(&other, &kids, 13, "release", None).await, &[key.clone()]), Reason::Released);
+	assert!(matches!(opened(&h.fetch(&other, &kids, 14, "fetch", None).await, &[key.clone()]), Payload::Subscription(_)));
+	assert_eq!(refusal_of(&h.fetch(&other, &kids, 15, "fetch", None).await, &[key.clone()]), Reason::RateLimited, "only one place came back");
 	let kids = [key_of(&link).kid()];
-	h.configure(&session, json!({"new_device_minutes": 0})).await;
-	for device in [2, 3] {assert!(matches!(opened(&h.fetch(&link, &kids, device, "confirm", None).await, &[key.clone()]), Payload::Subscription(_)))}
+	h.configure(&session, json!({"new_devices": 5, "new_devices_window_minutes": 10})).await;
+	for device in [4, 5] {assert!(matches!(opened(&h.fetch(&link, &kids, device, "confirm", None).await, &[key.clone()]), Payload::Subscription(_)))}
+	assert_eq!(refusal_of(&h.fetch(&link, &kids, 6, "confirm", None).await, &[key.clone()]), Reason::RateLimited);
+}
+
+#[test]
+fn the_limiter_admits_at_most_max_in_any_rolling_window_and_forgets_the_oldest_first() {
+	let limiter = Limiter::default();
+	let window = 3600;
+	for at in [0, 10, 20] {assert!(limiter.admit_at("k", 3, window, 1000 + at));}
+	assert!(!limiter.admit_at("k", 3, window, 1000 + 30));
+	assert!(!limiter.admit_at("k", 3, window, 1000 + 3599), "the first one is still inside the window");
+	assert!(limiter.admit_at("k", 3, window, 1000 + 3600), "the first one left, so one place is free");
+	assert!(!limiter.admit_at("k", 3, window, 1000 + 3601), "the second has not left yet");
+	assert!(limiter.admit_at("k", 3, window, 1000 + 3610));
+	assert!(limiter.admit_at("other", 3, window, 1000 + 3610), "keys are separate");
+	limiter.give_back("k", 1000 + 3610);
+	assert!(limiter.admit_at("k", 3, window, 1000 + 3611), "a given back place is free again");
+	assert!(!limiter.admit_at("k", 3, window, 1000 + 3612));
+	for index in 0..100_001 {limiter.admit_at(&format!("flood{index}"), 3, window, 5000);}
+	assert!(limiter.admit_at("late", 3, window, 5001), "a full table drops its stalest key and takes a new one");
+}
+
+#[tokio::test]
+async fn an_older_new_device_wait_becomes_the_sliding_window() {
+	let mut old = serde_json::to_value(veilway_panel::app::Settings::default()).unwrap();
+	let object = old.as_object_mut().unwrap();
+	object.remove("new_devices");
+	object.remove("new_devices_window_minutes");
+	for (minutes, expected) in [(json!(1), (3, 60)), (json!(10), (1, 10)), (json!(1440), (1, 1440)), (json!(0), (64, 1))] {
+		old["new_device_minutes"] = minutes;
+		let mut settings: veilway_panel::app::Settings = serde_json::from_value(old.clone()).unwrap();
+		settings.migrate();
+		assert_eq!((settings.new_devices, settings.new_devices_window_minutes, settings.new_device_minutes), (expected.0, expected.1, None));
+		assert!(serde_json::to_value(&settings).unwrap().get("new_device_minutes").is_none());
+	}
+	let none: veilway_panel::app::Settings = serde_json::from_value(json!({})).unwrap();
+	assert_eq!((none.new_devices, none.new_devices_window_minutes), (3, 60));
+	let h = Harness::new().await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"new_device_minutes": 10})).await;
+	let saved = h.call(Method::GET, "/p/api/settings", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((saved["new_devices"].clone(), saved["new_devices_window_minutes"].clone()), (json!(1), json!(10)), "an older client's value is carried over");
 }
 
 #[tokio::test]
@@ -3223,4 +3430,119 @@ async fn fetches_wait_at_most_four_and_a_config_the_node_refuses_stops_a_removal
 	assert_eq!(fake.calls.lock().unwrap().len(), 4);
 	assert_eq!(h.call(Method::DELETE, "/p/api/upstreams/previews/pv0", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
 	assert_eq!(h.call(Method::POST, "/p/api/upstreams/previews", Some(&session), Some(json!({"link": native.veilway()})), "10.0.0.1").await.status, StatusCode::OK, "a declined place is free again");
+}
+
+fn wireguard_document() -> Value {
+	let mut document = node_document("10.9.0.1/24");
+	document["inbounds"].as_array_mut().unwrap().extend([
+		json!({"tag": "plain", "type": "wireguard", "private_key": "<redacted>", "address": ["10.66.0.1/24"], "mtu": 1380, "transports": [{"type": "udp", "listen": "203.0.113.5:51830"}]}),
+		json!({"tag": "behind-ws", "type": "wireguard", "private_key": "<redacted>", "address": ["10.66.0.1/24"], "transports": [{"type": "ws", "listen": "127.0.0.1:8080", "path": "/wg"}]}),
+		json!({"tag": "elsewhere", "type": "wireguard", "private_key": "<redacted>", "address": ["10.66.0.129/25"], "transports": [{"type": "udp", "listen": "203.0.113.5:51831"}]}),
+	]);
+	document
+}
+
+#[tokio::test]
+async fn a_wireguard_file_is_made_for_a_panel_key_after_a_reauth_and_never_for_a_token_or_a_device_key() {
+	let (_fake, socket) = Fake::start(wireguard_document()).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let full = h.token(&session, "full", json!({})).await;
+	let (id, _) = h.user(&session, "ann", json!({})).await;
+	let made = h.call(Method::POST, &format!("/p/api/users/{id}/devices"), Some(&session), Some(json!({"name": "panel phone"})), "10.0.0.1").await.json();
+	let path = format!("/p/api/users/{id}/devices/{}/wireguard", made["device"]["id"]);
+	assert_eq!(h.bearer(Method::POST, &path, &full, None, "10.1.1.1").await.status, StatusCode::FORBIDDEN);
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
+	assert_eq!(h.call(Method::POST, &path, Some(&session), None, "10.0.0.1").await.json()["error"]["code"], "reauth_required");
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
+	let answer = h.call(Method::POST, &path, Some(&session), None, "10.0.0.1").await;
+	assert_eq!(answer.status, StatusCode::OK, "{}", String::from_utf8_lossy(&answer.body));
+	let configs = answer.json()["configs"].as_array().unwrap().clone();
+	assert_eq!(configs.len(), 1, "only the inbound with a udp transport and the device's address in its range");
+	assert_eq!((configs[0]["inbound"].clone(), configs[0]["file_name"].clone()), (json!("plain"), json!("ann-panel-phone.conf")));
+	let text = configs[0]["content"].as_str().unwrap();
+	let mut sections: Vec<(String, HashMap<String, String>)> = Vec::new();
+	for line in text.lines().filter(|line| !line.is_empty()) {
+		if let Some(name) = line.strip_prefix('[').and_then(|line| line.strip_suffix(']')) {sections.push((name.to_string(), HashMap::new()))} else {
+			let (key, value) = line.split_once(" = ").unwrap_or_else(|| panic!("not a key line: {line}"));
+			sections.last_mut().unwrap().1.insert(key.to_string(), value.to_string());
+		}
+	}
+	assert_eq!(sections.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["Interface", "Peer"]);
+	let (interface, peer) = (&sections[0].1, &sections[1].1);
+	let private: Vec<u8> = h.app.db.call(|db| db.query_row("select private_key from devices", [], |row| row.get(0)).unwrap()).await.unwrap();
+	assert_eq!(STANDARD.decode(&interface["PrivateKey"]).unwrap().len(), 32);
+	assert!(!private.windows(32).any(|window| window == STANDARD.decode(&interface["PrivateKey"]).unwrap().as_slice()), "the column holds the key sealed");
+	assert_eq!((interface["Address"].as_str(), interface["DNS"].as_str(), interface["MTU"].as_str()), ("10.66.0.2/32", "10.66.0.1", "1380"));
+	assert_eq!((peer["PublicKey"].clone(), peer["Endpoint"].as_str(), peer["AllowedIPs"].as_str(), peer["PersistentKeepalive"].as_str()), (STANDARD.encode([9u8; 32]), "203.0.113.5:51830", "0.0.0.0/0, ::/0", "25"));
+	let audit = String::from_utf8_lossy(&h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await.body).to_string();
+	assert!(audit.contains("device.wireguard") && !audit.contains(&interface["PrivateKey"]), "the audit line names the action and holds no key");
+	// A device that made its own key has no private key on the panel.
+	let own = h.app.db.call(move |db| db.execute("update devices set private_key = null", []).unwrap()).await.unwrap();
+	assert_eq!(own, 1);
+	assert_eq!(h.call(Method::POST, &path, Some(&session), None, "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_wireguard_file_needs_an_inbound_the_device_can_use() {
+	let mut document = wireguard_document();
+	document["inbounds"].as_array_mut().unwrap().retain(|inbound| inbound["tag"] != "plain");
+	let (_fake, socket) = Fake::start(document).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (id, _) = h.user(&session, "ann", json!({})).await;
+	let made = h.call(Method::POST, &format!("/p/api/users/{id}/devices"), Some(&session), Some(json!({"name": "phone"})), "10.0.0.1").await.json();
+	let answer = h.call(Method::POST, &format!("/p/api/users/{id}/devices/{}/wireguard", made["device"]["id"]), Some(&session), None, "10.0.0.1").await;
+	assert_eq!(answer.status, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&answer.body));
+}
+
+#[tokio::test]
+async fn the_nodes_pin_reaches_the_published_profile_and_a_new_key_marks_it_stale_until_it_is_published_again() {
+	let mut document = node_document("10.66.0.1/24");
+	document["inbounds"][0]["transports"].as_array_mut().unwrap().push(json!({"type": "tls", "listen": "0.0.0.0:443", "tls": {"self_signed": true, "name": "node.example.org"}, "decoy": "127.0.0.1:8443", "path": "/a-long-enough-path"}));
+	document["inbounds"][0]["transport_keys"] = json!([STANDARD.encode([5u8; 32])]);
+	let (fake, socket) = Fake::start(document).await;
+	let certificate = |pin: &str| json!({"version": "0.0.0", "uptime_secs": 5, "generation": 1, "certificates": [{"listen": "0.0.0.0:443", "pin": pin, "not_before": 1, "not_after": 2}]});
+	*fake.status.lock().unwrap() = certificate("pinA");
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"node_host": "192.0.2.10", "profiles": []})).await;
+	let applied = h.call(Method::GET, "/p/api/config", Some(&session), None, "10.0.0.1").await.json();
+	let put = h.call(Method::PUT, "/p/api/config", Some(&session), Some(json!({"revision": applied["revision"], "document": applied["document"]})), "10.0.0.1").await;
+	assert_eq!(put.status, StatusCode::OK, "{}", String::from_utf8_lossy(&put.body));
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32]), "transport_public_key": STANDARD.encode([6u8; 32])}})), "10.0.0.1").await.status, StatusCode::OK);
+	let template = || async {h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json()["templates"][0].clone()};
+	let first = template().await;
+	assert_eq!((first["pin"]["source"].clone(), first["pin"]["pins"].clone(), first["pin"]["stale"].clone()), (json!("node"), json!(["pinA"]), json!(false)), "{first}");
+	let published = h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await;
+	assert_eq!(published.status, StatusCode::OK, "{}", String::from_utf8_lossy(&published.body));
+	let tls = published.json()["profiles"][0]["transports"].as_array().unwrap().iter().find(|transport| transport["type"] == "tls").unwrap().clone();
+	assert_eq!((tls["candidates"][0]["pins"].clone(), tls["candidates"][0]["self_signed"].clone()), (json!(["pinA"]), json!(true)));
+	*fake.status.lock().unwrap() = certificate("pinA");
+	assert_eq!(template().await["pin"]["stale"], false, "a renewal keeps the key and the pin");
+	*fake.status.lock().unwrap() = certificate("pinB");
+	let changed = template().await;
+	assert_eq!((changed["pin"]["stale"].clone(), changed["pin"]["published"].clone(), changed["pin"]["pins"].clone()), (json!(true), json!(["pinA"]), json!(["pinB"])));
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	let after = template().await;
+	assert_eq!((after["pin"]["stale"].clone(), after["pin"]["published"].clone()), (json!(false), json!(["pinB"])));
+}
+
+#[tokio::test]
+async fn a_device_has_an_address_in_a_separate_wireguard_inbound_in_the_node_config_and_in_its_file() {
+	let mut document = node_document("10.66.0.1/16");
+	document["inbounds"].as_array_mut().unwrap().push(json!({"tag": "plain", "type": "wireguard", "private_key": "<redacted>", "address": ["10.8.0.1/24"], "transports": [{"type": "udp", "listen": "203.0.113.5:51830"}]}));
+	let (fake, socket) = Fake::start(document).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"pool_v4": "10.66.0.0/16"})).await;
+	let (id, _) = h.user(&session, "ann", json!({})).await;
+	let made = h.call(Method::POST, &format!("/p/api/users/{id}/devices"), Some(&session), Some(json!({"name": "phone"})), "10.0.0.1").await.json();
+	assert_eq!(fake.applied.lock().unwrap().last().unwrap()["users"][0]["devices"][0]["addresses"], json!(["10.66.0.2", "10.8.0.2"]));
+	let answer = h.call(Method::POST, &format!("/p/api/users/{id}/devices/{}/wireguard", made["device"]["id"]), Some(&session), None, "10.0.0.1").await;
+	assert_eq!(answer.status, StatusCode::OK, "{}", String::from_utf8_lossy(&answer.body));
+	let text = answer.json()["configs"][0]["content"].as_str().unwrap().to_string();
+	assert!(text.contains("Address = 10.8.0.2/32\n") && text.contains("DNS = 10.8.0.1\n"), "{text}");
 }

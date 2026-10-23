@@ -1,6 +1,6 @@
 import {Banner, Button, Checkbox, ConfirmDialog, DataTable, Dialog, Glass, Icon, IconButton, SecretField, StatRow, StatTile, StateBlock, TextField, useToast} from "@veilway/ui";
 import {useEffect, useState} from "react";
-import {api, type Device, type LinkView, type NodeState, type NodeUser, type UserPatch, type XrayLink} from "../api.ts";
+import {api, type Device, type LinkView, type NodeState, type NodeUser, type UserPatch, type WireguardConfig, type XrayLink} from "../api.ts";
 import {Copyable, ErrorNote, Mark, NodeNote, Qr, useCopy, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import {useSettings} from "../settings.ts";
 import {EndpointPick, PlainNote} from "./endpoints.tsx";
@@ -15,7 +15,7 @@ export function UserPage({id}: {id: number}) {
 	const [totals, setTotals] = useState(false), [removeOld, setRemoveOld] = useState(false), [deviceName, setDeviceName] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [linkError, setLinkError] = useState<unknown>(null), [sealPass, setSealPass] = useState(""), [sealAgain, setSealAgain] = useState(""), [sealTried, setSealTried] = useState(false);
 	// fresh is a link made just now, by adding the user or resetting the link; otherwise it is the panel's copy, opened after re-authentication.
 	const [shown, setShown] = useState<{link: LinkView, once: boolean, fresh: boolean} | null>(() => { const made = handoff.current?.id === id ? handoff.current : null; handoff.current = null; return made && {link: made.link, once: settings?.show_links_once ?? false, fresh: true}; });
-	const [exported, setExported] = useState<{name: string, file: string, link?: string | null} | null>(null), [node, setNode] = useState<NodeState | null>(null), [xray, setXray] = useState<XrayLink[] | null>(null);
+	const [exported, setExported] = useState<{name: string, file: string, link?: string | null} | null>(null), [wireguard, setWireguard] = useState<{name: string, configs: WireguardConfig[]} | null>(null), [node, setNode] = useState<NodeState | null>(null), [xray, setXray] = useState<XrayLink[] | null>(null);
 	const nodeExits = useExits(), [exits, setExits] = useState<Exits | null>(null), [exitsTried, setExitsTried] = useState(false), [exitsBusy, setExitsBusy] = useState(false), [exitsError, setExitsError] = useState<unknown>(null), [fallback, setFallback] = useState<string | null | undefined>(undefined), [ownEndpoint, setOwnEndpoint] = useState<string | undefined>(undefined), [endpointBusy, setEndpointBusy] = useState(false), [endpointError, setEndpointError] = useState<unknown>(null);
 	useEffect(() => { if (shown) document.getElementById("link-title")?.scrollIntoView({block: "nearest"}); }, [shown]);
 	if (page.error && !page.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={page.reload}>{t("action.retry")}</Button>}>{say(page.error)}</StateBlock>;
@@ -137,6 +137,7 @@ export function UserPage({id}: {id: number}) {
 						{id: "seen", header: t("device.col.seen"), cell: d => fresh.has(d.public_key) ? <Mark tone="success">{t("device.online")}</Mark> : d.last_seen ? <span className="vw-small vw-muted vw-num">{date(new Date(d.last_seen * 1000), {month: "short", day: "numeric"}) + " " + time(new Date(d.last_seen * 1000))}</span> : <span className="vw-small vw-muted">{t("device.neverSeen")}</span>},
 						{id: "actions", header: "", align: "end", cell: d => <span className="p-cluster p-end">
 							{d.key_origin === "panel" && <IconButton icon="download" label={t("device.export", {name: d.name})} onClick={async () => { setError(null); try { setExported({name: d.name, ...await guard(() => api("post", "/users/{id}/devices/{did}/export", {params: {id, did: d.id}}))}); } catch (failure) { setError(failure); } }}/>}
+							<IconButton icon="device" label={t(d.key_origin === "panel" ? "device.wg" : "device.wgOwnKey", {name: d.name})} disabled={d.key_origin !== "panel"} onClick={async () => { setError(null); try { setWireguard({name: d.name, ...await guard(() => api("post", "/users/{id}/devices/{did}/wireguard", {params: {id, did: d.id}}))}); } catch (failure) { setError(failure); } }}/>
 							<IconButton icon="close" label={t("device.remove", {name: d.name})} onClick={() => setRemoving(d)}/>
 						</span>}
 					]}/>}
@@ -240,6 +241,17 @@ export function UserPage({id}: {id: number}) {
 			{exported && <div className="p-stack">
 				<Copyable label={t("device.file")} value={exported.file} multiline/>
 				{exported.link && <Copyable label={t("device.exportLink")} value={exported.link}/>}
+			</div>}
+		</Dialog>
+		<Dialog open={wireguard !== null} onOpenChange={o => { if (!o) setWireguard(null); }} title={t("device.wgTitle", {name: wireguard?.name ?? ""})} description={t("device.wgBody")}>
+			{wireguard && <div className="p-stack">
+				<Banner tone="warning" title={t("device.wgWarnPlain")}>{t("device.wgWarnKey")}</Banner>
+				{wireguard.configs.map(config => <div key={config.inbound} className="p-stack">
+					{wireguard.configs.length > 1 && <h3 className="vw-h3 vw-code">{t("device.wgInbound", {tag: config.inbound})}</h3>}
+					<Qr text={config.content} label={t("device.wgQr")}/>
+					<Copyable label={t("device.wgFile")} value={config.content} multiline/>
+					<div><Button icon="download" onClick={() => { const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([config.content], {type: "text/plain;charset=utf-8"})); link.download = config.file_name; link.click(); URL.revokeObjectURL(link.href); }}>{t("device.wgDownload", {name: config.file_name})}</Button></div>
+				</div>)}
 			</div>}
 		</Dialog>
 		<XrayLinksDialog name={user.name} links={xray} onClose={() => setXray(null)}/>

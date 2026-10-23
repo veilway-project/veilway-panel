@@ -48,6 +48,7 @@ export function EndpointsSection({rows, onRows, draft, patch, saved, onMoved}: {
 						<TextField label={t("endpoints.name")} hint={t("endpoints.nameHint")} value={row.name} onChange={value => change(i, {name: value.trim()})} maxLength={64} technical/>
 						<TextField label={t("endpoints.url")} hint={t("endpoints.urlHint")} type="url" placeholder="https://" value={row.url} onChange={value => change(i, {url: value.trim()})} technical/>
 					</div>
+					{row.name.trim() !== "" && /^https?:\/\/[^/]+/.test(row.url) && !new RegExp("/" + row.name.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "/?$").test(row.url.replace(/[?#].*$/, "")) && <Mark tone="warning">{t("endpoints.pathName", {name: row.name.trim()})}</Mark>}
 					{isPlain(row.url) ? <PlainNote/> : <LinesField label={t("subs.pins")} hint={t("endpoints.pinsHint")} value={row.pins} onChange={value => change(i, {pins: value})} rows={2}/>}
 					{own && <p className="vw-small vw-muted">{t("endpoints.users", {count: own.users})}{own.assigned > 0 ? " " + t("endpoints.assigned", {count: own.assigned}) : ""}</p>}
 					{own && own.still_here > 0 && <Mark tone="warning">{t("endpoints.stillHere", {count: own.still_here})}</Mark>}

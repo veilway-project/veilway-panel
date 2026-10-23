@@ -68,11 +68,11 @@ pub fn address_in(pool: Ipv4Net, range: Ipv4Net, stored: Ipv4Addr) -> Option<Ipv
 	(range.contains(&found) && found != range.network() && found != range.broadcast() && found != range.addr()).then_some(found)
 }
 
-/// The stored address of a device and its address in each other `veilway` inbound of the node's config, at most one per inbound. An address in `taken` (another device's stored address, from a pool used before, or a link's) is skipped, since the node refuses a config where two peers share one.
+/// The stored address of a device and its address in each other `veilway` or `wireguard` inbound of the node's config, at most one per inbound. An address in `taken` (another device's stored address, from a pool used before, or a link's) is skipped, since the node refuses a config where two peers share one.
 pub fn node_addresses(pool: &str, inbounds: &[Value], stored: &str, taken: &HashSet<String>) -> Vec<String> {
 	let (Ok(pool), Ok(stored_ip)) = (pool.parse::<Ipv4Net>(), stored.parse::<Ipv4Addr>()) else {return vec![stored.to_string()]};
 	let mut out = vec![stored.to_string()];
-	for found in inbounds.iter().filter(|inbound| inbound["type"] == "veilway").filter_map(range_of).filter_map(|range| address_in(pool, range, stored_ip)).map(|found| found.to_string()) {if !out.contains(&found) && !taken.contains(&found) {out.push(found)}}
+	for found in inbounds.iter().filter(|inbound| inbound["type"] == "veilway" || inbound["type"] == "wireguard").filter_map(range_of).filter_map(|range| address_in(pool, range, stored_ip)).map(|found| found.to_string()) {if !out.contains(&found) && !taken.contains(&found) {out.push(found)}}
 	out
 }
 
@@ -153,6 +153,13 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 	// The apps ask the user to accept these before the first connection, and again when either changes.
 	let agreement: serde_json::Map<String, Value> = [("terms", &settings.terms_url), ("privacy", &settings.privacy_url)].into_iter().filter(|(_, url)| !url.is_empty()).map(|(name, url)| (name.into(), json!(url))).collect();
 	if !agreement.is_empty() {payload["agreement"] = Value::Object(agreement);}
+	if !settings.subscription_notices.is_empty() {
+		payload["notices"] = settings.subscription_notices.iter().map(|notice| {
+			let mut text: serde_json::Map<String, Value> = notice.translations.iter().map(|(tag, translated)| (tag.clone(), json!(translated))).collect();
+			text.insert("default".into(), json!(notice.text));
+			json!({"severity": notice.severity, "text": if notice.translations.is_empty() {json!(notice.text)} else {Value::Object(text)}})
+		}).collect();
+	}
 	if form != Form::Whole && !settings.static_mirrors.is_empty() {payload["static_mirrors"] = json!(settings.static_mirrors);}
 	Ok(sign(signer, &payload))
 }
@@ -255,7 +262,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	// A key that is some inbound's public key of this node is never a device's: the node would take the device for the node itself.
 	let node_key = settings.profiles.iter().chain(settings.profile_overrides.values()).filter_map(|profile| profile.get("inbound_public_key")?.as_str()).any(|key| STANDARD.decode(key).is_ok_and(|bytes| STANDARD.encode(bytes) == public_key));
 	let (changed, outcome) = {
-		let (handle, held, user, dirty, pool, wait) = (app.db.clone(), app.clone(), user.clone(), app.dirty.clone(), settings.pool_v4.clone(), i64::from(settings.new_device_minutes) * 60);
+		let (handle, held, user, dirty, pool, (new_max, window)) = (app.db.clone(), app.clone(), user.clone(), app.dirty.clone(), settings.pool_v4.clone(), (settings.new_devices as usize, i64::from(settings.new_devices_window_minutes) * 60));
 		match handle.call(move |db| -> rusqlite::Result<(bool, Result<Option<DeviceRow>, &'static str>)> {
 			let (keys, mut changed, tx) = (held.keys.as_ref().expect("checked before the lookup"), false, db.transaction()?);
 			changed |= tx.execute("delete from devices where user_id = ? and state = 'pending' and created < ?", params![user.id, at - PENDING_LAPSE])? > 0;
@@ -265,8 +272,8 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 			let outcome = match device {
 				Some(device) if !crypto::equal(&device.secret_hash, &hash) => Err("device_mismatch"),
 				Some(device) => match op {
-					// An import that was cancelled or failed gives back the wait for a new device as well, so that trying again does not meet `rate_limited`.
-					"release" if device.state == "pending" => {changed |= tx.execute("delete from devices where id = ?", [device.id])? > 0; held.sub_limits.clear(&format!("new:{}:{}", user.id, user.token_gen)); Ok(None)}
+					// An import that was cancelled or failed gives back its place in the window of new devices as well, so that trying again does not meet `rate_limited`.
+					"release" if device.state == "pending" => {changed |= tx.execute("delete from devices where id = ?", [device.id])? > 0; held.sub_limits.give_back(&format!("new:{}:{}", user.id, user.token_gen), device.created); Ok(None)}
 					// The user removed the subscription from the app, which proved the device's secret to ask: the device goes, confirmed or not, and its place is free.
 					"leave" => {
 						changed |= tx.execute("delete from devices where id = ?", [device.id])? > 0;
@@ -288,7 +295,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 					let limit = if user.device_limit == 0 {NODE_DEVICES_MAX} else {user.device_limit.min(NODE_DEVICES_MAX)};
 					let (address, enroll) = (allocate(&tx, &pool), op == "confirm");
 					if total >= limit || (!enroll && pending >= PENDING_PLACES) || address.is_none() {Err("device_limit")}
-					else if wait > 0 && !held.sub_limits.admit(&format!("new:{}:{}", user.id, user.token_gen), 1, wait) {Err("rate_limited")}
+					else if !held.sub_limits.admit(&format!("new:{}:{}", user.id, user.token_gen), new_max, window) {Err("rate_limited")}
 					else {
 						let secret = keys.seal_secret(&user.record_id, &format!("transport_secret:{}", public_key), &crypto::random::<32>());
 						tx.execute("insert into devices (user_id, name, public_key, secret_hash, address, transport_secret, state, token_gen, created, confirmed_at, last_seen) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![user.id, name.clone().unwrap_or_default(), public_key, hash.as_slice(), address, secret, if enroll {"enrolled"} else {"pending"}, user.token_gen, at, enroll.then_some(at), at])?;

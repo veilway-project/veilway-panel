@@ -6,7 +6,7 @@ import type {PanelKey} from "../locales/en.ts";
 import {SettingsContext} from "../settings.ts";
 
 const MISSING = ["inbound_public_key", "transport_public_key", "node_host"];
-const REFUSALS = ["not_acknowledged", "behind_proxy", "key_shared", "no_public_key", "bad_site", "node_host", "profile_id", "no_name", "plain_host", "plain_shared", "plain_key", "plain_cookie", "relays_only", "no_address"];
+const REFUSALS = ["not_acknowledged", "behind_proxy", "key_shared", "no_public_key", "bad_site", "node_host", "profile_id", "no_name", "plain_host", "plain_shared", "plain_key", "plain_cookie", "relays_only", "no_address", "inbound_off", "transport_off"];
 
 // A profile with every transport left out is not published, so what it lacks blocks nothing.
 const emptyTemplate = (template: Template) => !(Array.isArray(template.profile.transports) && template.profile.transports.length) && (template.kind === "faketls" || (template.refused ?? []).length > 0);
@@ -50,6 +50,15 @@ function Refusals({refused}: {refused: NonNullable<Template["refused"]>}) {
 	return refused.length > 0 ? <Banner tone="warning" title={t("profiles.refused")}>{refused.map(item => <span key={item.transport} className="p-block"><span className="vw-code p-block" dir="ltr">{item.transport}</span>{REFUSALS.includes(item.code) ? t(`profiles.refused.${item.code}` as PanelKey) : item.reason}</span>)}</Banner> : null;
 }
 
+// Where the pin of the tls candidates came from, and a warning when the node's key is no longer the one devices were given.
+function PinLine({pin}: {pin: Template["pin"]}) {
+	const {t} = useP();
+	return pin ? <>
+		<p className="vw-small vw-muted">{pin.source && pin.pins.length ? <>{t(pin.source === "node" ? "profiles.pin.node" : "profiles.pin.override")} <span className="vw-code" dir="ltr">{pin.pins.join(" ")}</span></> : t("profiles.pin.none")}</p>
+		{pin.stale && <Banner tone="warning" title={t("profiles.pin.stale")}>{t("profiles.pin.staleBody")}</Banner>}
+	</> : null;
+}
+
 function Override({template, onSaved}: {template: Template, onSaved: () => void}) {
 	const {t} = useP(), toast = useToast(), shared = useContext(SettingsContext), current = (shared.settings?.profile_overrides?.[template.inbound] ?? {}) as Record<string, unknown>;
 	const [text, setText] = useState(JSON.stringify(current, null, 2)), [key, setKey] = useState(String(current.inbound_public_key ?? "")), [hosts, setHosts] = useState((Array.isArray(current.node_addresses) ? current.node_addresses as string[] : []).join(", ")), [port, setPort] = useState<number | "">(typeof current.web_port === "number" ? current.web_port : ""), [plainHost, setPlainHost] = useState(String(current.plain_host ?? "")), [plainPort, setPlainPort] = useState<number | "">(typeof current.plain_port === "number" ? current.plain_port : ""), plain = ((template.profile.transports ?? []) as {type?: string}[]).some(transport => transport.type === "ws-plain") || (template.refused ?? []).some(item => item.code.startsWith("plain_")), fronted = ((template.profile.transports ?? []) as {type?: string}[]).some(transport => transport.type === "ws" || transport.type === "fronted-shaped"), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
@@ -73,6 +82,7 @@ function Override({template, onSaved}: {template: Template, onSaved: () => void}
 		<div className="p-row"><h2 className="vw-h3 vw-code">{template.inbound}</h2>{emptyTemplate(template) || template.missing.length ? <Mark tone="warning">{t("profiles.incomplete")}</Mark> : <Mark tone="success">{t("profiles.ready")}</Mark>}</div>
 		{template.missing.length > 0 && <Banner tone="warning" title={t("profiles.missing")}>{template.missing.map(name => MISSING.includes(name) ? t(`profiles.missing.${name}` as PanelKey) : name).join(" ")}</Banner>}
 		<Refusals refused={template.refused ?? []}/>
+		<PinLine pin={template.pin}/>
 		{template.missing.includes("inbound_public_key") && <form className="p-inline-form" onSubmit={event => { event.preventDefault(); void save({...current, inbound_public_key: key.trim()}); }}>
 			<TextField label={t("profiles.inboundKey")} hint={t("profiles.inboundKeyHint")} value={key} onChange={setKey} technical/>
 			<Button type="submit" disabled={busy || !key.trim()}>{t("common.save")}</Button>
