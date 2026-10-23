@@ -397,6 +397,51 @@ pub async fn export_device(State(app): State<Arc<App>>, Extension(ctx): Extensio
 }
 
 #[derive(Serialize, JsonSchema)]
+pub struct WireguardConfig {
+	/// The tag of the node's `wireguard` inbound the file connects to.
+	pub inbound: String,
+	/// A name for the file: the account, the device and, when there is more than one file, the inbound.
+	pub file_name: String,
+	/// A wg-quick file. It holds the device's private key.
+	pub content: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct WireguardOut {pub configs: Vec<WireguardConfig>}
+
+/// A wg-quick file for each plain `wireguard` inbound of the node that has a `udp` transport and in whose range the device has an address, for a device whose key the panel made. The address is the device's one in that inbound's range, as the node's config gives it (`address_in`, skipping one another device or a link holds). The file holds the private key, so the route needs a recent re-authentication, and the audit log says that it was made, not what it held. Plain WireGuard is easy to recognize, which the answer does not change.
+pub async fn wireguard_config(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path((id, device)): Path<(i64, i64)>) -> Result<Response, Failure> {
+	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
+	let (user, row) = app.db.call(move |db| -> Result<(UserRow, DeviceRow), Failure> {
+		Ok((UserRow::load(db, id)?, DeviceRow::for_user(db, id)?.into_iter().find(|row| row.id == device).ok_or_else(|| Failure::missing("device"))?))
+	}).await??;
+	let sealed = row.private_key.as_deref().ok_or_else(|| Failure::bad("This device made its own key, so the panel holds no private key to put in a file."))?;
+	let private = keys.open_secret(&user.record_id, &format!("private_key:{}", row.public_key), sealed).ok_or_else(|| Failure::internal("a private key does not open"))?;
+	let (_, _, document) = crate::nodecfg::running(&app).await?;
+	let (status, body) = node::request(&app.cfg.node_socket, "GET", "/v1/inbounds", None, None).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
+	if status != 200 {return Err(Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", format!("the node answered {status} to the inbounds")))}
+	let public: HashMap<String, String> = serde_json::from_slice::<Value>(&body).map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", format!("the node's inbounds: {error}")))?["inbounds"].as_array().into_iter().flatten().filter_map(|inbound| Some((inbound["tag"].as_str()?.to_string(), inbound["public_key"].as_str()?.to_string()))).collect();
+	let (settings, stored) = (app.settings(), row.address.parse::<std::net::Ipv4Addr>().map_err(|_| Failure::internal("a device address is not an IPv4 address"))?);
+	let pool = settings.pool_v4.parse::<ipnet::Ipv4Net>().map_err(|_| Failure::internal("the address pool is not a range"))?;
+	let mut taken: std::collections::HashSet<String> = app.db.call(|db| db.prepare("select address from devices")?.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()).await??;
+	taken.extend(document["links"].as_array().into_iter().flatten().flat_map(|link| ["dialler", "listener"].map(|side| link["addresses"][side].clone())).flat_map(|list| list.as_array().cloned().unwrap_or_default()).filter_map(|address| Some(address.as_str()?.split('/').next()?.to_string())));
+	let clean = |text: &str| text.chars().map(|letter| if letter.is_ascii_alphanumeric() || letter == '-' || letter == '_' {letter} else {'-'}).collect::<String>();
+	let mut configs: Vec<WireguardConfig> = Vec::new();
+	for inbound in document["inbounds"].as_array().into_iter().flatten().filter(|inbound| inbound["type"] == "wireguard") {
+		let tag = inbound["tag"].as_str().unwrap_or_default();
+		let (Some((range, address)), Some(listen), Some(key)) = (subs::range_of(inbound).and_then(|range| subs::address_in(pool, range, stored).filter(|found| *found == stored || !taken.contains(&found.to_string())).map(|found| (range, found))), inbound["transports"].as_array().into_iter().flatten().find(|transport| transport["type"] == "udp").and_then(|transport| transport["listen"].as_str()), public.get(tag)) else {continue};
+		let Some(endpoint) = crate::nodecfg::hosts(&settings, tag, listen).into_iter().filter(|host| crate::nodecfg::reachable(host)).find_map(|host| crate::nodecfg::host_port(&host, listen)) else {continue};
+		let mtu = inbound["mtu"].as_u64().map_or(String::new(), |mtu| format!("MTU = {mtu}\n"));
+		let content = format!("[Interface]\nPrivateKey = {}\nAddress = {address}/32\nDNS = {}\n{mtu}\n[Peer]\nPublicKey = {key}\nEndpoint = {endpoint}\nAllowedIPs = 0.0.0.0/0, ::/0\nPersistentKeepalive = 25\n", STANDARD.encode(&private), range.addr());
+		configs.push(WireguardConfig {inbound: tag.to_string(), file_name: format!("{}-{}.conf", clean(&user.name), clean(&row.name)), content});
+	}
+	if configs.is_empty() {return Err(Failure::conflict("The node has no plain WireGuard inbound with a udp transport that this device has an address in and that apps can reach. Check the inbound's range and the node address on the Profiles page."))}
+	if configs.len() > 1 {for config in &mut configs {config.file_name = config.file_name.replace(".conf", &format!("-{}.conf", clean(&config.inbound)))}}
+	app.db.audit(&ctx.actor, &ctx.source, "device.wireguard", &format!("user:{id}"), &format!("device:{device}")).await;
+	ok(&WireguardOut {configs})
+}
+
+#[derive(Serialize, JsonSchema)]
 pub struct SubscriptionInfo {
 	pub subscription_id: String,
 	/// The URL of the endpoint the account's links use now, empty while none is set.

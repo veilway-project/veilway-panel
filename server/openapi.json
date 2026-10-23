@@ -3766,6 +3766,42 @@
         ],
         "type": "object"
       },
+      "WireguardConfig": {
+        "properties": {
+          "content": {
+            "description": "A wg-quick file. It holds the device's private key.",
+            "type": "string"
+          },
+          "file_name": {
+            "description": "A name for the file: the account, the device and, when there is more than one file, the inbound.",
+            "type": "string"
+          },
+          "inbound": {
+            "description": "The tag of the node's `wireguard` inbound the file connects to.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "inbound",
+          "file_name",
+          "content"
+        ],
+        "type": "object"
+      },
+      "WireguardOut": {
+        "properties": {
+          "configs": {
+            "items": {
+              "$ref": "#/components/schemas/WireguardConfig"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "configs"
+        ],
+        "type": "object"
+      },
       "XrayInboundOut": {
         "properties": {
           "cert": {
@@ -9454,6 +9490,83 @@
           }
         },
         "summary": "The signed document of a panel-keyed device, private key included, as a link or file.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/users/{id}/devices/{did}/wireguard": {
+      "post": {
+        "operationId": "wireguardConfig",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "did",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WireguardOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "A wg-quick file for each plain WireGuard inbound of the node that has a udp transport and in whose range a device has an address, for a device whose key the panel made. The file holds the device's private key. Plain WireGuard is easy for a censor to recognize. Needs a recent re-authentication and is audited without the file. No API token can do this.",
         "x-access": "session-reauth"
       }
     },

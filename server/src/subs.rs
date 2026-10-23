@@ -68,11 +68,11 @@ pub fn address_in(pool: Ipv4Net, range: Ipv4Net, stored: Ipv4Addr) -> Option<Ipv
 	(range.contains(&found) && found != range.network() && found != range.broadcast() && found != range.addr()).then_some(found)
 }
 
-/// The stored address of a device and its address in each other `veilway` inbound of the node's config, at most one per inbound. An address in `taken` (another device's stored address, from a pool used before, or a link's) is skipped, since the node refuses a config where two peers share one.
+/// The stored address of a device and its address in each other `veilway` or `wireguard` inbound of the node's config, at most one per inbound. An address in `taken` (another device's stored address, from a pool used before, or a link's) is skipped, since the node refuses a config where two peers share one.
 pub fn node_addresses(pool: &str, inbounds: &[Value], stored: &str, taken: &HashSet<String>) -> Vec<String> {
 	let (Ok(pool), Ok(stored_ip)) = (pool.parse::<Ipv4Net>(), stored.parse::<Ipv4Addr>()) else {return vec![stored.to_string()]};
 	let mut out = vec![stored.to_string()];
-	for found in inbounds.iter().filter(|inbound| inbound["type"] == "veilway").filter_map(range_of).filter_map(|range| address_in(pool, range, stored_ip)).map(|found| found.to_string()) {if !out.contains(&found) && !taken.contains(&found) {out.push(found)}}
+	for found in inbounds.iter().filter(|inbound| inbound["type"] == "veilway" || inbound["type"] == "wireguard").filter_map(range_of).filter_map(|range| address_in(pool, range, stored_ip)).map(|found| found.to_string()) {if !out.contains(&found) && !taken.contains(&found) {out.push(found)}}
 	out
 }
 

@@ -384,6 +384,24 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 			if paths.iter().any(|used| used == path) {refused.push(json!({"transport": transport["listen"], "code": "plain_shared", "reason": "its path is also used by another transport of the profiles, so the network could tie them together: use a path of its own"})); continue}
 			if let Some(list) = profile.get_mut("transports").and_then(Value::as_array_mut) {list.push(json!({"type": "ws-plain", "path": path, "cookie": cookie, "transport_public_key": public, "candidates": endpoints.iter().map(|endpoint| json!({"address": endpoint, "host": name})).collect::<Vec<_>>()}));}
 		}
+		// A self-signed certificate is trusted through its pin alone, so the node's own pin goes into each `tls` candidate the operator gave no pins. A candidate that has pins, written by an override of `transports`, is left as it is. The listener is found by the candidate's port.
+		let node_pins: Vec<(u64, &String)> = transports.iter().filter(|transport| transport["type"] == "tls").filter_map(|transport| Some((transport["listen"].as_str()?.rsplit_once(':')?.1.parse().ok()?, exposure.pins.get(transport["listen"].as_str()?)?))).collect();
+		let (mut source, mut held, mut has_tls) = (Value::Null, BTreeSet::new(), false);
+		for transport in profile.get_mut("transports").and_then(Value::as_array_mut).into_iter().flatten().filter(|transport| transport["type"] == "tls") {
+			has_tls = true;
+			for candidate in transport["candidates"].as_array_mut().into_iter().flatten() {
+				let port = candidate["address"].as_str().and_then(|address| address.rsplit_once(':')?.1.parse::<u64>().ok());
+				if candidate.get("pins").is_some() {source = json!("override")} else if let Some((_, pin)) = node_pins.iter().find(|(listen, _)| Some(*listen) == port) {
+					candidate["pins"] = json!([pin]);
+					candidate["self_signed"] = json!(true);
+					if source.is_null() {source = json!("node")}
+				}
+				held.extend(candidate["pins"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string));
+			}
+		}
+		// The published profile is what devices hold, so a pin that differs from it is a change that has not reached them.
+		let published: BTreeSet<String> = settings.profiles.iter().filter(|published| published["id"] == profile["id"]).flat_map(|published| published["transports"].as_array().into_iter().flatten().filter(|transport| transport["type"] == "tls")).flat_map(|transport| transport["candidates"].as_array().into_iter().flatten()).flat_map(|candidate| candidate["pins"].as_array().into_iter().flatten()).filter_map(Value::as_str).map(str::to_string).collect();
+		let pin = if has_tls {json!({"source": source, "pins": held, "published": published, "stale": !published.is_empty() && published != held})} else {Value::Null};
 		// The Xray inbounds answer on the addresses a profile names, so one that shares an address may not claim more than Detectable. An override of `unsafe` is the operator's own choice and stays.
 		if exposure.shares(&addresses(&profile)) && profile["rating_cap"] != "unsafe" {profile["rating_cap"] = json!("detectable");}
 		// Relays come after the overrides, so a transport an override wrote gets them too.
@@ -404,7 +422,7 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 		let used: Vec<String> = transports.iter().filter_map(|transport| transport["listen"].as_str()).flat_map(|listen| hosts(settings, &tag, listen)).collect();
 		if !only && (used.is_empty() || !used.iter().all(|host| reachable(host))) {missing.push("node_host")}
 		if profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport["type"] == "tls" || transport["type"] == "ws" || transport["type"] == "fronted-shaped")) && profile.get("transport_public_key").is_none() {missing.push("transport_public_key")}
-		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES && !NOT_MEMBERS.contains(&key.as_str())).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed, "refused": refused});
+		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES && !NOT_MEMBERS.contains(&key.as_str())).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed, "refused": refused, "pin": pin});
 		let faketls = crate::borrowed::template(settings, document, inbound, &gateways).map(|mut template| {
 			if only {template["profile"]["transports"] = json!([]); template["missing"] = json!([]); template["refused"] = json!([{"transport": "faketls", "code": "relays_only", "reason": "a relay cannot sit in front of the borrowed-site handshake, and the node's own address is not given to apps"}]);}
 			template
@@ -414,17 +432,24 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 }
 
 /// The templates with each profile's rating decided by the Xray inbounds it shares an address with. The names the profiles carry are looked up first, so the derivation itself does no lookup.
-pub async fn rated(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, hosts: &[(String, String)], skeleton: bool) -> Vec<Value> {
+pub async fn rated(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, hosts: &[(String, String)], pins: BTreeMap<String, String>, skeleton: bool) -> Vec<Value> {
 	let names: Vec<String> = derive(settings, document, relays, user, &Exposure::default(), skeleton).iter().flat_map(|template| addresses(&template["profile"])).collect();
-	let exposure = xray::exposure(document, hosts, &settings.node_host, names).await;
+	let mut exposure = xray::exposure(document, hosts, &settings.node_host, names).await;
+	exposure.pins = pins;
 	derive(settings, document, relays, user, &exposure, skeleton)
+}
+
+/// The pin of each self-signed `tls` certificate the node made, by listen address, as its status reports them. The pin is the hash of the certificate's key, which the node keeps when it renews the certificate, so it changes only when the node makes a new key. A node that does not answer gives none, and the templates are made without.
+pub async fn node_pins(app: &App) -> BTreeMap<String, String> {
+	let Ok((200, body)) = call(app, "GET", "/v1/status", None, None).await else {return BTreeMap::new()};
+	body["certificates"].as_array().into_iter().flatten().filter_map(|made| Some((made["listen"].as_str()?.to_string(), made["pin"].as_str()?.to_string()))).collect()
 }
 
 pub async fn derived_profiles(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let (revision, _, document) = running(&app).await?;
 	let settings = app.settings();
 	let hosts = app.db.call(|db| xray::inbound_hosts(db)).await??;
-	ok(&json!({"revision": revision, "templates": rated(&settings, &document, &settings.relays, None, &hosts, false).await}))
+	ok(&json!({"revision": revision, "templates": rated(&settings, &document, &settings.relays, None, &hosts, node_pins(&app).await, false).await}))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -445,7 +470,7 @@ pub async fn preview_profiles(State(app): State<Arc<App>>, Body(input): Body<Pre
 	};
 	let groups: Vec<String> = account.as_ref().map(|user| serde_json::from_str(&user.groups).unwrap_or_default()).unwrap_or_default();
 	let hosts = app.db.call(|db| xray::inbound_hosts(db)).await??;
-	ok(&json!({"revision": revision, "templates": rated(&app.settings(), &document, &input.relays, account.as_ref().map(|user| (user.id, groups.as_slice())), &hosts, false).await}))
+	ok(&json!({"revision": revision, "templates": rated(&app.settings(), &document, &input.relays, account.as_ref().map(|user| (user.id, groups.as_slice())), &hosts, node_pins(&app).await, false).await}))
 }
 
 /// Takes a deleted account out of the audiences of the saved and the published relays, in the transaction that deletes it. SQLite gives a new account the id of the last one deleted, so no relay may keep it.
@@ -480,7 +505,7 @@ pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Exten
 	let (_, _, document) = running(&app).await?;
 	let current = app.settings();
 	let hosts = app.db.call(|db| xray::inbound_hosts(db)).await??;
-	let templates = rated(&current, &document, &[], None, &hosts, true).await;
+	let templates = rated(&current, &document, &[], None, &hosts, node_pins(&app).await, true).await;
 	// A profile whose transports were all refused is not published, and what it said before is taken down. Its refusals are shown on the Profiles page and block nothing else.
 	let empty = |template: &Value| template["profile"]["transports"].as_array().is_none_or(Vec::is_empty) && (template["kind"] == "faketls" || template["refused"].as_array().is_some_and(|list| !list.is_empty()));
 	if let Some(bad) = templates.iter().filter(|template| !empty(template)).find(|template| !template["missing"].as_array().is_some_and(Vec::is_empty)) {return Err(Failure::bad(format!("The profile of inbound {} still needs: {}.", bad["inbound"].as_str().unwrap_or_default(), bad["missing"])))}
@@ -931,5 +956,48 @@ mod tests {
 		settings.profile_overrides.insert("Main".into(), json!({PLAIN_HOST: "plain.example.org"}));
 		let template = derive(&settings, &document, &[], None, &Exposure::default(), false).remove(0);
 		assert_eq!(template["refused"][0]["code"], "plain_key");
+	}
+	fn with_pin(pin: &str) -> Exposure {
+		let mut exposure = Exposure::default();
+		exposure.pins.insert("0.0.0.0:443".into(), pin.into());
+		exposure
+	}
+
+	fn tls_candidates(template: &Value) -> Value {template["profile"]["transports"].as_array().unwrap().iter().find(|transport| transport["type"] == "tls").unwrap()["candidates"].clone()}
+
+	#[test]
+	fn the_nodes_pin_fills_a_tls_candidate_that_has_none_and_comes_from_the_node() {
+		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
+		let template = derive(&settings, &document(), &[], None, &with_pin("pinA"), false).remove(0);
+		assert_eq!(tls_candidates(&template), json!([{"address": "192.0.2.10:443", "sni": "node.example.org", "host": "node.example.org", "pins": ["pinA"], "self_signed": true}]));
+		assert_eq!(template["pin"], json!({"source": "node", "pins": ["pinA"], "published": [], "stale": false}));
+		let without = derive(&settings, &document(), &[], None, &Exposure::default(), false).remove(0);
+		assert_eq!((tls_candidates(&without)[0].get("pins").is_none(), without["pin"]["source"].clone()), (true, Value::Null), "a node that reports no certificate gives no pin");
+		assert!(derive(&settings, &document(), &[], None, &with_pin("pinA"), false)[1]["pin"].is_null(), "a profile with no tls transport has no pin line");
+	}
+
+	#[test]
+	fn a_pin_the_operator_wrote_wins_and_a_relay_candidate_carries_the_pin_it_forwards() {
+		let mut settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
+		settings.profile_overrides.insert("Main".into(), json!({"transports": [{"type": "tls", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:443", "sni": "node.example.org", "host": "node.example.org", "pins": ["mine"], "self_signed": true}]}]}));
+		let template = derive(&settings, &document(), &[], None, &with_pin("pinA"), false).remove(0);
+		assert_eq!((tls_candidates(&template)[0]["pins"].clone(), template["pin"]["source"].clone()), (json!(["mine"]), json!("override")));
+		settings.profile_overrides.insert("Main".into(), json!({"transports": [{"type": "tls", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:443", "sni": "node.example.org", "host": "node.example.org"}]}]}));
+		let template = derive(&settings, &document(), &[], None, &with_pin("pinA"), false).remove(0);
+		assert_eq!((tls_candidates(&template)[0]["pins"].clone(), template["pin"]["source"].clone()), (json!(["pinA"]), json!("node")), "an override with no pins is filled");
+		settings.profile_overrides.clear();
+		let relays = vec![relay(json!({"transports": ["tls"]}))];
+		let template = derive(&settings, &document(), &relays, None, &with_pin("pinA"), false).remove(0);
+		assert_eq!(tls_candidates(&template).as_array().unwrap().iter().map(|candidate| candidate["pins"].clone()).collect::<Vec<_>>(), vec![json!(["pinA"]), json!(["pinA"])], "the relay forwards to the same certificate");
+	}
+
+	#[test]
+	fn a_pin_that_differs_from_the_published_one_is_stale_and_one_that_matches_is_not() {
+		let mut settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
+		let published = derive(&settings, &document(), &[], None, &with_pin("pinA"), false).remove(0)["profile"].clone();
+		settings.profiles = vec![published];
+		assert_eq!(derive(&settings, &document(), &[], None, &with_pin("pinA"), false)[0]["pin"]["stale"], false, "a renewed certificate keeps its key and its pin");
+		let template = derive(&settings, &document(), &[], None, &with_pin("pinB"), false).remove(0);
+		assert_eq!((template["pin"]["stale"].clone(), template["pin"]["published"].clone(), template["pin"]["pins"].clone()), (json!(true), json!(["pinA"]), json!(["pinB"])), "a new key is not in what devices hold");
 	}
 }

@@ -1271,6 +1271,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users/{id}/devices/{did}/wireguard": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** A wg-quick file for each plain WireGuard inbound of the node that has a udp transport and in whose range a device has an address, for a device whose key the panel made. The file holds the device's private key. Plain WireGuard is easy for a censor to recognize. Needs a recent re-authentication and is audited without the file. No API token can do this. */
+        post: operations["wireguardConfig"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users/{id}/endpoint": {
         parameters: {
             query?: never;
@@ -2864,6 +2881,17 @@ export interface components {
         };
         UsersOut: {
             users: components["schemas"]["UserOut"][];
+        };
+        WireguardConfig: {
+            /** @description A wg-quick file. It holds the device's private key. */
+            content: string;
+            /** @description A name for the file: the account, the device and, when there is more than one file, the inbound. */
+            file_name: string;
+            /** @description The tag of the node's `wireguard` inbound the file connects to. */
+            inbound: string;
+        };
+        WireguardOut: {
+            configs: components["schemas"]["WireguardConfig"][];
         };
         XrayInboundOut: {
             cert?: string | null;
@@ -7723,6 +7751,65 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Exported"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    wireguardConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+                did: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WireguardOut"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */

@@ -2,7 +2,7 @@ use axum::{body::Body, extract::{ConnectInfo, Path, State}, http::{header::{CONT
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use std::{future::Future, net::SocketAddr, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}};
+use std::{collections::HashMap, future::Future, net::SocketAddr, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}};
 use tower::ServiceExt;
 use veilway_panel::{admin, app::{bucket, App, Limiter, Signing}, build, config::{Config, TrustedMirror}, crypto, mirrors, openapi, router, upkeep_once, Upkeep};
 use veilway_proto::subscription::{envelope::{self, Kid}, exchange::{self, GatewayKey}, link::Link, payload::{self, Payload, Reason}, sealed_file, BODY_MAX};
@@ -760,6 +760,7 @@ impl Fake {
 			.route("/v1/config/validate", post(|Json(document): Json<Value>| async move {Json(json!({"valid": document.get("invalid").is_none(), "report": {"errors": [], "warnings": []}}))}))
 			.route("/v1/config/diff", post(|Json(_): Json<Value>| async move {Json(json!({"valid": true, "report": {}, "diff": {"inbounds": {"added": ["x"]}}}))}))
 			.route("/v1/status", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.status.lock().unwrap().clone())}))
+			.route("/v1/inbounds", get(|State(fake): State<Arc<Fake>>| async move {Json(json!({"inbounds": fake.document.lock().unwrap()["inbounds"].as_array().into_iter().flatten().map(|inbound| json!({"tag": inbound["tag"], "kind": inbound["type"], "public_key": STANDARD.encode([9u8; 32]), "transport_public_key": null, "transports": []})).collect::<Vec<_>>(), "public_addresses": []}))}))
 			.route("/v1/stats", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.stats.lock().unwrap().clone())}))
 			.route("/v1/sessions", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.sessions.lock().unwrap().clone())}))
 			.route("/v1/exits", get(|| async {Json(json!({"exits": [{"tag": "main", "udp": true}]}))}))
@@ -3271,4 +3272,119 @@ async fn fetches_wait_at_most_four_and_a_config_the_node_refuses_stops_a_removal
 	assert_eq!(fake.calls.lock().unwrap().len(), 4);
 	assert_eq!(h.call(Method::DELETE, "/p/api/upstreams/previews/pv0", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
 	assert_eq!(h.call(Method::POST, "/p/api/upstreams/previews", Some(&session), Some(json!({"link": native.veilway()})), "10.0.0.1").await.status, StatusCode::OK, "a declined place is free again");
+}
+
+fn wireguard_document() -> Value {
+	let mut document = node_document("10.9.0.1/24");
+	document["inbounds"].as_array_mut().unwrap().extend([
+		json!({"tag": "plain", "type": "wireguard", "private_key": "<redacted>", "address": ["10.66.0.1/24"], "mtu": 1380, "transports": [{"type": "udp", "listen": "203.0.113.5:51830"}]}),
+		json!({"tag": "behind-ws", "type": "wireguard", "private_key": "<redacted>", "address": ["10.66.0.1/24"], "transports": [{"type": "ws", "listen": "127.0.0.1:8080", "path": "/wg"}]}),
+		json!({"tag": "elsewhere", "type": "wireguard", "private_key": "<redacted>", "address": ["10.66.0.129/25"], "transports": [{"type": "udp", "listen": "203.0.113.5:51831"}]}),
+	]);
+	document
+}
+
+#[tokio::test]
+async fn a_wireguard_file_is_made_for_a_panel_key_after_a_reauth_and_never_for_a_token_or_a_device_key() {
+	let (_fake, socket) = Fake::start(wireguard_document()).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let full = h.token(&session, "full", json!({})).await;
+	let (id, _) = h.user(&session, "ann", json!({})).await;
+	let made = h.call(Method::POST, &format!("/p/api/users/{id}/devices"), Some(&session), Some(json!({"name": "panel phone"})), "10.0.0.1").await.json();
+	let path = format!("/p/api/users/{id}/devices/{}/wireguard", made["device"]["id"]);
+	assert_eq!(h.bearer(Method::POST, &path, &full, None, "10.1.1.1").await.status, StatusCode::FORBIDDEN);
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = 0", []).unwrap()).await.unwrap();
+	assert_eq!(h.call(Method::POST, &path, Some(&session), None, "10.0.0.1").await.json()["error"]["code"], "reauth_required");
+	h.app.db.call(|db| db.execute("update sessions set reauth_at = ?", [crypto::now()]).unwrap()).await.unwrap();
+	let answer = h.call(Method::POST, &path, Some(&session), None, "10.0.0.1").await;
+	assert_eq!(answer.status, StatusCode::OK, "{}", String::from_utf8_lossy(&answer.body));
+	let configs = answer.json()["configs"].as_array().unwrap().clone();
+	assert_eq!(configs.len(), 1, "only the inbound with a udp transport and the device's address in its range");
+	assert_eq!((configs[0]["inbound"].clone(), configs[0]["file_name"].clone()), (json!("plain"), json!("ann-panel-phone.conf")));
+	let text = configs[0]["content"].as_str().unwrap();
+	let mut sections: Vec<(String, HashMap<String, String>)> = Vec::new();
+	for line in text.lines().filter(|line| !line.is_empty()) {
+		if let Some(name) = line.strip_prefix('[').and_then(|line| line.strip_suffix(']')) {sections.push((name.to_string(), HashMap::new()))} else {
+			let (key, value) = line.split_once(" = ").unwrap_or_else(|| panic!("not a key line: {line}"));
+			sections.last_mut().unwrap().1.insert(key.to_string(), value.to_string());
+		}
+	}
+	assert_eq!(sections.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["Interface", "Peer"]);
+	let (interface, peer) = (&sections[0].1, &sections[1].1);
+	let private: Vec<u8> = h.app.db.call(|db| db.query_row("select private_key from devices", [], |row| row.get(0)).unwrap()).await.unwrap();
+	assert_eq!(STANDARD.decode(&interface["PrivateKey"]).unwrap().len(), 32);
+	assert!(!private.windows(32).any(|window| window == STANDARD.decode(&interface["PrivateKey"]).unwrap().as_slice()), "the column holds the key sealed");
+	assert_eq!((interface["Address"].as_str(), interface["DNS"].as_str(), interface["MTU"].as_str()), ("10.66.0.2/32", "10.66.0.1", "1380"));
+	assert_eq!((peer["PublicKey"].clone(), peer["Endpoint"].as_str(), peer["AllowedIPs"].as_str(), peer["PersistentKeepalive"].as_str()), (STANDARD.encode([9u8; 32]), "203.0.113.5:51830", "0.0.0.0/0, ::/0", "25"));
+	let audit = String::from_utf8_lossy(&h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await.body).to_string();
+	assert!(audit.contains("device.wireguard") && !audit.contains(&interface["PrivateKey"]), "the audit line names the action and holds no key");
+	// A device that made its own key has no private key on the panel.
+	let own = h.app.db.call(move |db| db.execute("update devices set private_key = null", []).unwrap()).await.unwrap();
+	assert_eq!(own, 1);
+	assert_eq!(h.call(Method::POST, &path, Some(&session), None, "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn a_wireguard_file_needs_an_inbound_the_device_can_use() {
+	let mut document = wireguard_document();
+	document["inbounds"].as_array_mut().unwrap().retain(|inbound| inbound["tag"] != "plain");
+	let (_fake, socket) = Fake::start(document).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (id, _) = h.user(&session, "ann", json!({})).await;
+	let made = h.call(Method::POST, &format!("/p/api/users/{id}/devices"), Some(&session), Some(json!({"name": "phone"})), "10.0.0.1").await.json();
+	let answer = h.call(Method::POST, &format!("/p/api/users/{id}/devices/{}/wireguard", made["device"]["id"]), Some(&session), None, "10.0.0.1").await;
+	assert_eq!(answer.status, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&answer.body));
+}
+
+#[tokio::test]
+async fn the_nodes_pin_reaches_the_published_profile_and_a_new_key_marks_it_stale_until_it_is_published_again() {
+	let mut document = node_document("10.66.0.1/24");
+	document["inbounds"][0]["transports"].as_array_mut().unwrap().push(json!({"type": "tls", "listen": "0.0.0.0:443", "tls": {"self_signed": true, "name": "node.example.org"}, "decoy": "127.0.0.1:8443", "path": "/a-long-enough-path"}));
+	document["inbounds"][0]["transport_keys"] = json!([STANDARD.encode([5u8; 32])]);
+	let (fake, socket) = Fake::start(document).await;
+	let certificate = |pin: &str| json!({"version": "0.0.0", "uptime_secs": 5, "generation": 1, "certificates": [{"listen": "0.0.0.0:443", "pin": pin, "not_before": 1, "not_after": 2}]});
+	*fake.status.lock().unwrap() = certificate("pinA");
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"node_host": "192.0.2.10", "profiles": []})).await;
+	let applied = h.call(Method::GET, "/p/api/config", Some(&session), None, "10.0.0.1").await.json();
+	let put = h.call(Method::PUT, "/p/api/config", Some(&session), Some(json!({"revision": applied["revision"], "document": applied["document"]})), "10.0.0.1").await;
+	assert_eq!(put.status, StatusCode::OK, "{}", String::from_utf8_lossy(&put.body));
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32]), "transport_public_key": STANDARD.encode([6u8; 32])}})), "10.0.0.1").await.status, StatusCode::OK);
+	let template = || async {h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json()["templates"][0].clone()};
+	let first = template().await;
+	assert_eq!((first["pin"]["source"].clone(), first["pin"]["pins"].clone(), first["pin"]["stale"].clone()), (json!("node"), json!(["pinA"]), json!(false)), "{first}");
+	let published = h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await;
+	assert_eq!(published.status, StatusCode::OK, "{}", String::from_utf8_lossy(&published.body));
+	let tls = published.json()["profiles"][0]["transports"].as_array().unwrap().iter().find(|transport| transport["type"] == "tls").unwrap().clone();
+	assert_eq!((tls["candidates"][0]["pins"].clone(), tls["candidates"][0]["self_signed"].clone()), (json!(["pinA"]), json!(true)));
+	*fake.status.lock().unwrap() = certificate("pinA");
+	assert_eq!(template().await["pin"]["stale"], false, "a renewal keeps the key and the pin");
+	*fake.status.lock().unwrap() = certificate("pinB");
+	let changed = template().await;
+	assert_eq!((changed["pin"]["stale"].clone(), changed["pin"]["published"].clone(), changed["pin"]["pins"].clone()), (json!(true), json!(["pinA"]), json!(["pinB"])));
+	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
+	let after = template().await;
+	assert_eq!((after["pin"]["stale"].clone(), after["pin"]["published"].clone()), (json!(false), json!(["pinB"])));
+}
+
+#[tokio::test]
+async fn a_device_has_an_address_in_a_separate_wireguard_inbound_in_the_node_config_and_in_its_file() {
+	let mut document = node_document("10.66.0.1/16");
+	document["inbounds"].as_array_mut().unwrap().push(json!({"tag": "plain", "type": "wireguard", "private_key": "<redacted>", "address": ["10.8.0.1/24"], "transports": [{"type": "udp", "listen": "203.0.113.5:51830"}]}));
+	let (fake, socket) = Fake::start(document).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"pool_v4": "10.66.0.0/16"})).await;
+	let (id, _) = h.user(&session, "ann", json!({})).await;
+	let made = h.call(Method::POST, &format!("/p/api/users/{id}/devices"), Some(&session), Some(json!({"name": "phone"})), "10.0.0.1").await.json();
+	assert_eq!(fake.applied.lock().unwrap().last().unwrap()["users"][0]["devices"][0]["addresses"], json!(["10.66.0.2", "10.8.0.2"]));
+	let answer = h.call(Method::POST, &format!("/p/api/users/{id}/devices/{}/wireguard", made["device"]["id"]), Some(&session), None, "10.0.0.1").await;
+	assert_eq!(answer.status, StatusCode::OK, "{}", String::from_utf8_lossy(&answer.body));
+	let text = answer.json()["configs"][0]["content"].as_str().unwrap().to_string();
+	assert!(text.contains("Address = 10.8.0.2/32\n") && text.contains("DNS = 10.8.0.1\n"), "{text}");
 }
