@@ -125,11 +125,13 @@ export function RoutingPage({tab}: {tab: string}) {
 }
 
 function SectionTab({section}: {section: Exclude<Section, "inbounds">}) {
-	const {t} = useP(), say = useSay(), config = useLoad(loadRunning, []), schema = useLoad(loadSchema, []), [json, setJson] = useState(false), [proposed, setProposed] = useState<unknown>(undefined), [editing, setEditing] = useState<{index: number | null} | null>(null), [moves, setMoves] = useState<string[]>([]);
+	const {t} = useP(), say = useSay(), config = useLoad(loadRunning, []), schema = useLoad(loadSchema, []), live = useLoad(() => api("get", "/stats/now"), []), [json, setJson] = useState(false), [proposed, setProposed] = useState<unknown>(undefined), [editing, setEditing] = useState<{index: number | null} | null>(null), [moves, setMoves] = useState<string[]>([]);
+	useEffect(() => { const timer = setInterval(live.reload, 10000); return () => clearInterval(timer); }, [live.reload]);
 	if (config.error && !config.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={config.reload}>{t("action.retry")}</Button>}>{say(config.error)}</StateBlock>;
 	if (!config.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
 	const running = config.data, value = running.document[section] ?? (section === "routing" ? {default: ""} : []), items = list(value), document = running.document;
 	const tags = (name: string) => list(document[name]).map(item => str(item.tag)).filter(Boolean);
+	const levels = new Map(((live.data?.reachable && Array.isArray(live.data.exits) ? live.data.exits : []) as {tag: string, load_level?: string | null}[]).filter(exit => exit.load_level).map(exit => [exit.tag, exit.load_level!]));
 	const propose = (next: unknown, notes: string[] = []) => { setMoves(notes); setProposed(next); };
 	const remove = (index: number) => propose(items.filter((_, i) => i !== index));
 	const edit = (index: number | null) => setEditing({index});
@@ -140,7 +142,7 @@ function SectionTab({section}: {section: Exclude<Section, "inbounds">}) {
 		: <Glass className="p-panel">
 			<div className="p-row p-table-head"><span className="vw-muted vw-small">{t("config.count", {count: items.length})}</span><Button size="sm" icon="plus" onClick={() => edit(null)}>{t(`config.add.${section}`)}</Button></div>
 			<DataTable caption={t(`node.tab.${section}`)} rows={items.map((item, index) => ({item, index}))} rowKey={row => str(row.item.tag) || String(row.index)} empty={<StateBlock kind="empty" title={t(`config.empty.${section}`)} action={<Button variant="primary" icon="plus" onClick={() => edit(null)}>{t(`config.add.${section}`)}</Button>}>{t(`config.emptyBody.${section}`)}</StateBlock>} columns={[
-				{id: "tag", header: t("config.col.tag"), cell: ({item}) => <span className="p-user"><span className="vw-code">{str(item.tag)}</span><span className="vw-muted vw-small">{section === "exits" ? [str(item.name), str(item.country)].filter(Boolean).join(", ") : str(item.type)}</span></span>},
+				{id: "tag", header: t("config.col.tag"), cell: ({item}) => <span className="p-user"><span className="vw-code">{str(item.tag)}</span><span className="vw-muted vw-small">{section === "exits" ? [str(item.name), str(item.country), item.load ? t(`exit.level.${levels.get(str(item.tag)) ?? "none"}` as PanelKey) : ""].filter(Boolean).join(", ") : str(item.type)}</span></span>},
 				...(section === "outbounds" ? [
 					{id: "target", header: t("config.col.target"), cell: ({item}: {item: Item}) => item.type === "socks5" ? <span className="p-user"><span className="vw-code">{str(item.server)}</span>{str(item.via) && <span className="vw-muted vw-small">{t("config.viaName", {outbound: str(item.via)})}</span>}</span> : <span className="vw-muted">{(item.bind ? t("config.bind", {address: str(item.bind)}) : t("config.fromNode")) + (item.interface ? t("config.onInterface", {name: str(item.interface)}) : "")}</span>}
 				] : [
@@ -322,6 +324,8 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 	const keys = Array.isArray(draft.transport_keys) ? draft.transport_keys as string[] : [], keyWrong = proved && !(KEY.test(keys[0] ?? "") || (keys[0] ?? "").startsWith("<redacted")), cookieWrong = cookied && !/^[A-Za-z0-9_-]{1,32}$/.test(str(draft.upgrade_cookie));
 	const borrowed = rows.map((row, i) => veilway && row.type === "faketls" ? borrowedProblems(row, rows, [...keys, ...rows.filter((other, j) => j !== i && other.type === "faketls").map(other => other.siteKey.trim())].filter(Boolean)) : null), borrowedWrong = borrowed.some(problem => problem && Object.keys(problem).length > 0);
 	const others = chain.filter(other => str(other.tag) !== str(item?.tag)), through = others.filter(other => other.type === "socks5" && str(other.tag) !== tag).map(other => str(other.tag)), viaWrong = section === "outbounds" && kind === "socks5" && str(draft.via) ? viaProblem(tag, str(draft.via), [...others, draft]) : undefined;
+	const load = (draft.load ?? null) as Item | null, whole = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 1000000, loadWrong = section === "exits" && load !== null && !(whole(load.busy) && whole(load.very_busy) && (load.very_busy as number) > (load.busy as number));
+	const setLoad = (key: string, value: unknown) => set("load", {...load, [key]: value});
 	const udpChained = section === "exits" && back.type === "netstack" && chained.includes(str(back.outbound));
 	// The form writes the keys it shows and keeps every other key of the item and of each transport as it was.
 	const build = (): Item => proxyKind ? draft : section === "exits" ? back.type === "chain" ? {...draft, backend: {...back, links: lines(form.links)}} : draft : section === "outbounds" ? draft : {...Object.fromEntries(Object.entries(draft).filter(([key]) => key !== "upgrade_headers")), ...(headers.length ? {upgrade_headers: headers} : {}), address: lines(form.addresses), transports: rows.map(row => {
@@ -344,7 +348,7 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 	const save = () => {
 		setTried(true);
 		if (json !== null && issues.length && issues[0]!.path === "json") return;
-		if (Object.keys(proxyWrong).length || problems.some(problem => problem && (Object.keys(problem.errors).length || problem.shape.length)) || borrowedWrong || keyWrong || plainWrong || cookieWrong || headersWrong || paddingWrong("normal") || paddingWrong("wide") || rows.some(row => (POOLS[row.type] ?? []).some(key => outside(row, key))) || around || viaWrong || (udpChained && policy("udp") === "direct") || idleWrong("tcp_idle_secs") || idleWrong("udp_idle_secs") || (back.type === "netstack" && ["icmp_echo", "udp", "other"].some(key => policy(key) === "via" && !targets(key).includes(viaOf(key))))) return;
+		if (Object.keys(proxyWrong).length || problems.some(problem => problem && (Object.keys(problem.errors).length || problem.shape.length)) || borrowedWrong || keyWrong || plainWrong || cookieWrong || headersWrong || paddingWrong("normal") || paddingWrong("wide") || rows.some(row => (POOLS[row.type] ?? []).some(key => outside(row, key))) || around || loadWrong || viaWrong || (udpChained && policy("udp") === "direct") || idleWrong("tcp_idle_secs") || idleWrong("udp_idle_secs") || (back.type === "netstack" && ["icmp_echo", "udp", "other"].some(key => policy(key) === "via" && !targets(key).includes(viaOf(key))))) return;
 		const made = build(), found = schema && typeof schema === "object" ? say(check(((schema.properties as Record<string, Item>)[section]?.items ?? true) as Schema, made, schema, section)) : [];
 		setIssues(clash ? [{path: "tag", text: t("config.tagTaken")}, ...found] : found);
 		if (!clash && !found.length) onSave(made, section === "inbounds" ? moved(rows.map(row => row.at)).map(move => t("review.moveTransport", {name: rows[move.to]!.type + " " + (rows[move.to]!.path || rows[move.to]!.listen), inbound: tag, from: number(move.from + 1), to: number(move.to + 1)})) : []);
@@ -514,6 +518,17 @@ function ItemForm({section, hidden, item, taken, outbounds, socks = [], exits = 
 						</>}
 					</div>
 				</details>}
+				{back.type !== "block" && <fieldset className="p-mirror">
+					<legend className="vw-label">{t("exit.load")}</legend>
+					<Switch label={t("exit.loadReport")} hint={t("exit.loadHint")} checked={load !== null} onChange={on => set("load", on ? {by: "flows", busy: 50, very_busy: 200} : undefined)}/>
+					{load !== null && <>
+						<SelectField label={t("exit.loadBy")} value={str(load.by)} onChange={value => setLoad("by", value)} options={[{value: "flows", label: t("exit.loadByFlows")}, {value: "mbps", label: t("exit.loadByMbps"), detail: t("exit.loadByMbpsDetail")}]}/>
+						<div className="p-pair">
+							<NumberField label={t("exit.loadBusy")} unit={t(load.by === "mbps" ? "unit.mbit" : "unit.connections")} min={1} max={1000000} value={typeof load.busy === "number" ? load.busy : ""} onChange={value => setLoad("busy", value)} error={tried && loadWrong ? t("limit.range", {min: number(1), max: number(1000000)}) : undefined}/>
+							<NumberField label={t("exit.loadVeryBusy")} unit={t(load.by === "mbps" ? "unit.mbit" : "unit.connections")} min={2} max={1000000} value={typeof load.very_busy === "number" ? load.very_busy : ""} onChange={value => setLoad("very_busy", value)} error={tried && loadWrong ? t("exit.err.loadOrder") : undefined}/>
+						</div>
+					</>}
+				</fieldset>}
 				{back.type === "chain" && <LinesField label={t("config.links")} hint={t("config.linksHint")} value={form.links} onChange={links => patch({links})} rows={2}/>}
 			</>}
 			</>}

@@ -865,6 +865,18 @@ async fn config_sections_validate_diff_and_apply_through_the_node() {
 }
 
 #[tokio::test]
+async fn the_load_setting_of_an_exit_reaches_the_node_document() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	let exit = |load: Value| json!([{"tag": "fra", "backend": {"type": "netstack", "outbound": "plain"}, "load": load}]);
+	let value = exit(json!({"by": "mbps", "busy": 200, "very_busy": 600}));
+	let applied = h.call(Method::PUT, "/p/api/config/exits", Some(&session), Some(json!({"revision": "rev1", "value": value})), "10.0.0.1").await;
+	assert_eq!(applied.status, StatusCode::OK, "{}", String::from_utf8_lossy(&applied.body));
+	assert_eq!(fake.applied.lock().unwrap().last().unwrap()["exits"], value, "the load setting is in the document the node got");
+}
+
+#[tokio::test]
 async fn notices_dns_log_links_and_replay_are_sections_like_the_others() {
 	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
 	let h = Harness::with_socket(Some(socket)).await;
