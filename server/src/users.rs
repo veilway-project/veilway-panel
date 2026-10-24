@@ -1,5 +1,5 @@
 //! Users, their devices and their subscription links.
-use crate::{app::{App, Settings}, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, subs::{self, DeviceRow, UserRow, USER_COLUMNS}};
+use crate::{app::{App, Settings, LOCAL}, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, subs::{self, DeviceRow, UserRow, USER_COLUMNS}};
 use axum::{extract::{Path, Query, State}, http::StatusCode, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use rusqlite::{params, Connection};
@@ -18,7 +18,7 @@ pub struct NodeState {pub synced: bool, pub error: Option<String>}
 pub async fn push(app: &Arc<App>) -> NodeState {
 	let held = app.clone();
 	// Its own task, so a client that goes away mid-push does not stop the push half way.
-	match tokio::spawn(async move {node::sync(&held).await}).await.map_err(|error| error.to_string()).and_then(|done| done) {Ok(()) => NodeState {synced: true, error: None}, Err(error) => NodeState {synced: false, error: Some(error)}}
+	match tokio::spawn(async move {node::sync(&held, LOCAL).await}).await.map_err(|error| error.to_string()).and_then(|done| done) {Ok(()) => NodeState {synced: true, error: None}, Err(error) => NodeState {synced: false, error: Some(error)}}
 }
 
 pub(crate) fn name_ok(name: &str, dots: bool) -> bool {
@@ -67,7 +67,7 @@ pub async fn list(State(app): State<Arc<App>>, Query(query): Query<UserQuery>) -
 		let counted = db.prepare("select user_id, count(*), coalesce(sum(state = 'pending'), 0) from devices group by user_id")?.query_map([], |row| Ok((row.get::<_, i64>(0)?, (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))))?.collect::<Result<HashMap<_, _>, _>>()?;
 		Ok((rows, counted))
 	}).await??;
-	let nodes = node::usage(&app).await;
+	let nodes = node::usage(&app, LOCAL).await;
 	let mut users = Vec::new();
 	for user in rows.iter().filter(|user| query.q.as_ref().is_none_or(|q| user.name.contains(q.as_str())) && query.enabled.is_none_or(|enabled| user.enabled == enabled) && query.group.as_ref().is_none_or(|group| serde_json::from_str::<Vec<String>>(&user.groups).unwrap_or_default().contains(group))) {
 		let (devices, pending) = counted.get(&user.id).copied().unwrap_or((0, 0));
@@ -79,7 +79,7 @@ pub async fn list(State(app): State<Arc<App>>, Query(query): Query<UserQuery>) -
 pub async fn get(State(app): State<Arc<App>>, Path(id): Path<i64>) -> Result<Response, Failure> {
 	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
 	let (devices, pending) = counts(&app, id).await?;
-	ok(&out(&user, devices, pending, node::usage(&app).await.remove(&user.name)))
+	ok(&out(&user, devices, pending, node::usage(&app, LOCAL).await.remove(&user.name)))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -184,7 +184,7 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	if input.name.as_ref().is_some_and(|name| !name_ok(name, true)) {return Err(Failure::bad("name is 1 to 64 characters of a-z, 0-9, dot, dash and underscore, starting with a letter or digit."))}
 	let endpoint = input.endpoint.clone().unwrap_or(user.endpoint.clone());
 	if endpoint.as_deref().is_some_and(|name| app.settings().named(name).is_none()) {return Err(Failure::bad("endpoint is the name of one of the endpoints, or null."))}
-	let dirty = app.dirty.clone();
+	let dirty = app.node(LOCAL).dirty.clone();
 	app.db.call(move |db| -> rusqlite::Result<()> {
 		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ?, default_exit = ?, endpoint = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), serde_json::to_string(&exits).unwrap_or_default(), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), exit, endpoint, id])?;
 		audit(db, &ctx.actor, &ctx.source, "user.update", &format!("user:{id}"), &user.name);
@@ -212,7 +212,7 @@ fn delete_account(db: &mut Connection, cache: &RwLock<Settings>, lookups: &RwLoc
 }
 
 pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
-	let (dirty, lookups, cache) = (app.dirty.clone(), app.lookups.clone(), app.settings.clone());
+	let (dirty, lookups, cache) = (app.node(LOCAL).dirty.clone(), app.lookups.clone(), app.settings.clone());
 	app.db.call(move |db| -> Result<(), Failure> {
 		let name: String = db.query_row("select name from users where id = ?", [id], |row| row.get(0))?;
 		delete_account(db, &cache, &lookups, id)?;
@@ -252,11 +252,11 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 		let result: Result<(), String> = async {
 			let id = *id;
 			let user = app.db.call(move |db| UserRow::load(db, id)).await.map_err(|error| error.to_string())?.map_err(|error| if matches!(error, rusqlite::Error::QueryReturnedNoRows) {"no such user".to_string()} else {error.to_string()})?;
-			let (value, dirty, lookups) = (input.value.clone(), app.dirty.clone(), app.lookups.clone());
+			let (value, dirty, lookups) = (input.value.clone(), app.node(LOCAL).dirty.clone(), app.lookups.clone());
 			match input.action.as_str() {
 				"enable" | "disable" => {let enable = input.action == "enable"; app.db.call(move |db| db.execute("update users set enabled = ? where id = ?", params![enable, id]).inspect(|_| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
 				"delete" => {let cache = app.settings.clone(); app.db.call(move |db| delete_account(db, &cache, &lookups, id).map(|()| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.message)?;}
-				"reset_usage" => {let (status, _) = node::request(&app.cfg.node_socket, "POST", &format!("/v1/users/{}/usage/reset", user.name), None, Some(&json!({"totals": false}))).await?; if status != 200 {return Err(format!("the node answered {status}"))}}
+				"reset_usage" => {let (status, _) = node::request(&app, LOCAL, "POST", &format!("/v1/users/{}/usage/reset", user.name), None, Some(&json!({"totals": false}))).await?; if status != 200 {return Err(format!("the node answered {status}"))}}
 				"reset_links" => {let (_, old) = reset_link(&app, &ctx, id, input.remove_devices).await.map_err(|error| error.message)?; if input.remove_devices {removed += old.len()}}
 				"add_group" | "remove_group" => {
 					let group = value.as_ref().and_then(Value::as_str).filter(|group| name_ok(group, true)).ok_or("value is a group name")?;
@@ -298,7 +298,7 @@ pub struct ResetUsage {#[serde(default)] pub totals: bool}
 
 pub async fn reset_usage(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>, Body(input): Body<ResetUsage>) -> Result<Response, Failure> {
 	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
-	let (status, body) = node::request(&app.cfg.node_socket, "POST", &format!("/v1/users/{}/usage/reset", user.name), None, Some(&json!({"totals": input.totals}))).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
+	let (status, body) = node::request(&app, LOCAL, "POST", &format!("/v1/users/{}/usage/reset", user.name), None, Some(&json!({"totals": input.totals}))).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
 	if status != 200 {return Err(Failure::new(StatusCode::BAD_GATEWAY, "node_refused", format!("The node answered {status}.")))}
 	app.db.audit(&ctx.actor, &ctx.source, "user.usage_reset", &format!("user:{id}"), if input.totals {"with totals"} else {"quota count"}).await;
 	ok(&serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null))
@@ -345,14 +345,15 @@ pub async fn make_device(State(app): State<Arc<App>>, Extension(ctx): Extension<
 		let secret = x25519_dalek::StaticSecret::from(crypto::random::<32>());
 		(secret.to_bytes(), x25519_dalek::PublicKey::from(&secret).to_bytes())
 	};
-	let (public_key, pool, held, dirty) = (STANDARD.encode(public), app.settings().pool_v4, app.clone(), app.dirty.clone());
+	let (public_key, held, dirty) = (STANDARD.encode(public), app.clone(), app.node(LOCAL).dirty.clone());
 	let device = app.db.call(move |db| -> Result<DeviceRow, Failure> {
 		let keys = held.keys.as_ref().expect("checked before the lookup");
 		let user = UserRow::load(db, id)?;
 		let total: i64 = db.query_row("select count(*) from devices where user_id = ?", [id], |row| row.get(0))?;
 		if total >= if user.device_limit == 0 {16} else {user.device_limit.min(16)} {return Err(Failure::conflict("Every device place of this account is taken."))}
-		let address = subs::allocate(db, &pool).ok_or_else(|| Failure::conflict("The address pool is full."))?;
-		db.execute("insert into devices (user_id, name, public_key, secret_hash, address, transport_secret, private_key, state, token_gen, created, confirmed_at) values (?, ?, ?, ?, ?, ?, ?, 'enrolled', ?, ?, ?)", params![id, veilway_proto::control::display(&input.name, 32, 128), public_key, keys.device_secret_hash(&crypto::random::<16>()).as_slice(), address, keys.seal_secret(&user.record_id, &format!("transport_secret:{public_key}"), &crypto::random::<32>()), keys.seal_secret(&user.record_id, &format!("private_key:{public_key}"), &secret), user.token_gen, now(), now()])?;
+		let address = subs::allocate(db, LOCAL).ok_or_else(|| Failure::conflict("The address pool is full."))?;
+		db.execute("insert into devices (user_id, name, public_key, secret_hash, transport_secret, private_key, state, token_gen, created, confirmed_at) values (?, ?, ?, ?, ?, ?, 'enrolled', ?, ?, ?)", params![id, veilway_proto::control::display(&input.name, 32, 128), public_key, keys.device_secret_hash(&crypto::random::<16>()).as_slice(), keys.seal_secret(&user.record_id, &format!("transport_secret:{public_key}"), &crypto::random::<32>()), keys.seal_secret(&user.record_id, &format!("private_key:{public_key}"), &secret), user.token_gen, now(), now()])?;
+		db.execute("insert into device_addresses (node_id, device_id, address) values (?, last_insert_rowid(), ?)", params![LOCAL.0, address])?;
 		audit(db, &ctx.actor, &ctx.source, "device.create", &format!("user:{id}"), "key made by the panel");
 		dirty.store(true, Ordering::Relaxed);
 		DeviceRow::for_user(db, id)?.into_iter().find(|device| device.public_key == public_key).ok_or_else(|| Failure::internal("the new device is gone"))
@@ -361,7 +362,7 @@ pub async fn make_device(State(app): State<Arc<App>>, Extension(ctx): Extension<
 }
 
 pub async fn remove_device(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path((id, device)): Path<(i64, i64)>) -> Result<Response, Failure> {
-	let dirty = app.dirty.clone();
+	let dirty = app.node(LOCAL).dirty.clone();
 	app.db.call(move |db| -> Result<(), Failure> {
 		if db.execute("delete from devices where id = ? and user_id = ?", params![device, id])? == 0 {return Err(Failure::missing("device"))}
 		audit(db, &ctx.actor, &ctx.source, "device.remove", &format!("user:{id}"), &format!("device:{device}"));
@@ -390,7 +391,7 @@ pub async fn export_device(State(app): State<Arc<App>>, Extension(ctx): Extensio
 		let signing: Vec<_> = held.current().into_iter().cloned().collect();
 		(signing.clone(), signing.last().cloned().ok_or_else(|| Failure::internal("no signing key"))?)
 	};
-	let document = subs::document(&app, &user, &row, &signing, &signer, subs::Form::Whole, node::usage(&app).await.get(&user.name), None).await.map_err(Failure::bad)?;
+	let document = subs::document(&app, &user, &row, &signing, &signer, subs::Form::Whole, node::usage(&app, LOCAL).await.get(&user.name), None).await.map_err(Failure::bad)?;
 	let carried = Carried::file(format!("v1.{}.{}", URL_SAFE_NO_PAD.encode(signer.public()), document).as_bytes()).map_err(|error| Failure::bad(error.to_string()))?;
 	app.db.audit(&ctx.actor, &ctx.source, "device.export", &format!("user:{id}"), &format!("device:{device}")).await;
 	ok(&Exported {link: carried.veilway(), file: carried.file_content()})
@@ -417,13 +418,13 @@ pub async fn wireguard_config(State(app): State<Arc<App>>, Extension(ctx): Exten
 	}).await??;
 	let sealed = row.private_key.as_deref().ok_or_else(|| Failure::bad("This device made its own key, so the panel holds no private key to put in a file."))?;
 	let private = keys.open_secret(&user.record_id, &format!("private_key:{}", row.public_key), sealed).ok_or_else(|| Failure::internal("a private key does not open"))?;
-	let (_, _, document) = crate::nodecfg::running(&app).await?;
-	let (status, body) = node::request(&app.cfg.node_socket, "GET", "/v1/inbounds", None, None).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
+	let (_, _, document) = crate::nodecfg::running(&app, LOCAL).await?;
+	let (status, body) = node::request(&app, LOCAL, "GET", "/v1/inbounds", None, None).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
 	if status != 200 {return Err(Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", format!("the node answered {status} to the inbounds")))}
 	let public: HashMap<String, String> = serde_json::from_slice::<Value>(&body).map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", format!("the node's inbounds: {error}")))?["inbounds"].as_array().into_iter().flatten().filter_map(|inbound| Some((inbound["tag"].as_str()?.to_string(), inbound["public_key"].as_str()?.to_string()))).collect();
 	let (settings, stored) = (app.settings(), row.address.parse::<std::net::Ipv4Addr>().map_err(|_| Failure::internal("a device address is not an IPv4 address"))?);
-	let pool = settings.pool_v4.parse::<ipnet::Ipv4Net>().map_err(|_| Failure::internal("the address pool is not a range"))?;
-	let mut taken: std::collections::HashSet<String> = app.db.call(|db| db.prepare("select address from devices")?.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()).await??;
+	let (pool, mut taken): (String, std::collections::HashSet<String>) = app.db.call(|db| -> rusqlite::Result<_> {Ok((db.query_row("select pool_v4 from nodes where id = ?", [LOCAL.0], |row| row.get(0))?, db.prepare("select address from device_addresses where node_id = ?")?.query_map([LOCAL.0], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?))}).await??;
+	let pool = pool.parse::<ipnet::Ipv4Net>().map_err(|_| Failure::internal("the address pool is not a range"))?;
 	taken.extend(document["links"].as_array().into_iter().flatten().flat_map(|link| ["dialler", "listener"].map(|side| link["addresses"][side].clone())).flat_map(|list| list.as_array().cloned().unwrap_or_default()).filter_map(|address| Some(address.as_str()?.split('/').next()?.to_string())));
 	let clean = |text: &str| text.chars().map(|letter| if letter.is_ascii_alphanumeric() || letter == '-' || letter == '_' {letter} else {'-'}).collect::<String>();
 	let mut configs: Vec<WireguardConfig> = Vec::new();
@@ -525,7 +526,7 @@ const PROXY_LABEL: &str = "proxy_password";
 /// Makes or replaces the user's proxy password: 32 characters of letters and digits, drawn without bias, so no ':' and nothing a proxy URL needs escaped. The caller pushes to the node.
 pub async fn proxy_set(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
 	if app.keys.is_none() {return Err(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))}
-	let (held, dirty) = (app.clone(), app.dirty.clone());
+	let (held, dirty) = (app.clone(), app.node(LOCAL).dirty.clone());
 	app.db.call(move |db| -> Result<(), Failure> {
 		let user = UserRow::load(db, id)?;
 		let mut password = String::new();
@@ -543,7 +544,7 @@ pub async fn proxy_set(State(app): State<Arc<App>>, Extension(ctx): Extension<Ct
 }
 
 pub async fn proxy_remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
-	let dirty = app.dirty.clone();
+	let dirty = app.node(LOCAL).dirty.clone();
 	app.db.call(move |db| -> Result<(), Failure> {
 		let user = UserRow::load(db, id)?;
 		db.execute("update users set proxy_password = null where id = ?", [id])?;
@@ -579,7 +580,7 @@ pub struct LinkReset {pub link: Option<LinkView>, pub link_error: Option<String>
 /// Makes a new token for the user and returns it with the devices enrolled with the old one. The caller pushes to the node.
 async fn reset_link(app: &Arc<App>, ctx: &Ctx, id: i64, remove_devices: bool) -> Result<([u8; 16], Vec<DeviceRow>), Failure> {
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
-	let (token, held, cache, dirty) = (crypto::random::<16>(), app.clone(), app.settings.clone(), app.dirty.clone());
+	let (token, held, cache, dirty) = (crypto::random::<16>(), app.clone(), app.settings.clone(), app.node(LOCAL).dirty.clone());
 	let (lookup, actor, source) = (keys.token_lookup(&token), ctx.actor.clone(), ctx.source.clone());
 	let old = app.db.call(move |db| -> Result<Vec<DeviceRow>, Failure> {
 		let keys = held.keys.as_ref().expect("checked before the lookup");

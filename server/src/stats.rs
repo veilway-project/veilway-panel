@@ -1,5 +1,5 @@
 //! The node's stats: polled every few seconds for the live view, and added up into minute, hour and day buckets in SQLite. The node counts from its last start, so the buckets hold what grew between two polls, which a restart does not reset.
-use crate::{app::App, crypto::now, http::{ok, Failure}, node};
+use crate::{app::{App, Node}, crypto::now, http::{ok, Failure}, node};
 use axum::{extract::{Query, State}, response::Response};
 use rusqlite::{params, Connection};
 use schemars::JsonSchema;
@@ -31,19 +31,19 @@ pub struct Live {
 	pub online_users: Vec<String>,
 }
 
-async fn fetch(app: &App, path: &str) -> Option<Value> {
-	let (200, body) = node::request(&app.cfg.node_socket, "GET", path, None, None).await.ok()? else {return None};
+async fn fetch(app: &App, node: Node, path: &str) -> Option<Value> {
+	let (200, body) = node::request(app, node, "GET", path, None, None).await.ok()? else {return None};
 	serde_json::from_slice(&body).ok()
 }
 
-pub async fn poll(app: &Arc<App>) {
+pub async fn poll(app: &Arc<App>, node: Node) {
 	let at = now();
-	let (Some(stats), status) = (fetch(app, "/v1/stats").await, fetch(app, "/v1/status").await) else {
+	let (Some(stats), status) = (fetch(app, node, "/v1/stats").await, fetch(app, node, "/v1/status").await) else {
 		let mut live = app.live.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		match live.as_mut() {Some(last) => (last.at, last.reachable) = (at, false), None => *live = Some(Live {at, ..Live::default()})}
 		return;
 	};
-	let (exits, sessions) = (fetch(app, "/v1/exits").await, fetch(app, "/v1/sessions").await);
+	let (exits, sessions) = (fetch(app, node, "/v1/exits").await, fetch(app, node, "/v1/sessions").await);
 	let sessions = sessions.and_then(|value| value.get("sessions").cloned()).and_then(|list| list.as_array().cloned()).unwrap_or_default();
 	let mut online: Vec<String> = sessions.iter().filter_map(|session| session["user"].as_str().map(str::to_string)).collect();
 	online.sort();

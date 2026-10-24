@@ -1,5 +1,5 @@
 //! The subscription side: the link, the signed document, and the public endpoint that answers a valid token and nothing else.
-use crate::{app::{bucket, App, Endpoint, SigningEntry}, auth, crypto::{self, now}, gateway, mirrors, statics};
+use crate::{app::{bucket, App, Endpoint, Node, SigningEntry, LOCAL}, auth, crypto::{self, now}, gateway, mirrors, statics};
 use axum::{body::Body, extract::{Request, State}, http::{header::{CACHE_CONTROL, CONTENT_TYPE}, HeaderValue, Method, StatusCode}, response::Response};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
@@ -28,7 +28,8 @@ impl UserRow {
 #[derive(Clone, Debug)]
 pub struct DeviceRow {pub id: i64, pub user_id: i64, pub name: String, pub public_key: String, pub secret_hash: Vec<u8>, pub address: String, pub transport_secret: Vec<u8>, pub private_key: Option<Vec<u8>>, pub state: String, pub token_gen: i64, pub created: i64, pub confirmed_at: Option<i64>, pub last_seen: Option<i64>}
 
-pub const DEVICE_COLUMNS: &str = "id, user_id, name, public_key, secret_hash, address, transport_secret, private_key, state, token_gen, created, confirmed_at, last_seen";
+/// The `address` of a row is the device's address at node 1.
+pub const DEVICE_COLUMNS: &str = "id, user_id, name, public_key, secret_hash, (select address from device_addresses where node_id = 1 and device_id = devices.id), transport_secret, private_key, state, token_gen, created, confirmed_at, last_seen";
 
 impl DeviceRow {
 	pub fn read(row: &Row) -> rusqlite::Result<Self> {
@@ -50,10 +51,10 @@ pub fn forget_idle(db: &Connection, at: i64, days: u32) -> rusqlite::Result<usiz
 	Ok(gone)
 }
 
-/// The lowest free host address of the pool, leaving the first one to the gateway.
-pub fn allocate(db: &Connection, pool: &str) -> Option<String> {
-	let pool: Ipv4Net = pool.parse().ok()?;
-	let taken: HashSet<String> = db.prepare("select address from devices").ok()?.query_map([], |row| row.get(0)).ok()?.filter_map(Result::ok).collect();
+/// The lowest free host address of a node's pool, leaving the first one to the gateway.
+pub fn allocate(db: &Connection, node: Node) -> Option<String> {
+	let pool: Ipv4Net = db.query_row("select pool_v4 from nodes where id = ?", [node.0], |row| row.get::<_, String>(0)).ok()?.parse().ok()?;
+	let taken: HashSet<String> = db.prepare("select address from device_addresses where node_id = ?").ok()?.query_map([node.0], |row| row.get(0)).ok()?.filter_map(Result::ok).collect();
 	pool.hosts().skip(1).map(|address| address.to_string()).find(|address| !taken.contains(address))
 }
 
@@ -110,8 +111,8 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 	if let Some(sealed) = &this.private_key {device["private_key"] = json!(STANDARD.encode(keys.open_secret(&user.record_id, &format!("private_key:{}", this.public_key), sealed).ok_or("a private key does not open")?));}
 	let groups: Vec<String> = serde_json::from_str(&user.groups).unwrap_or_default();
 	let reaching = crate::nodecfg::reaching(&settings.published_relays, Some((user.id, groups.as_slice())));
-	let (pool, stored) = (settings.pool_v4.parse::<Ipv4Net>().ok(), this.address.parse::<Ipv4Addr>().ok());
-	let taken: HashSet<String> = app.db.call(|db| db.prepare("select address from devices")?.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+	let (pooled, taken): (String, HashSet<String>) = app.db.call(|db| -> rusqlite::Result<_> {Ok((db.query_row("select pool_v4 from nodes where id = ?", [LOCAL.0], |row| row.get(0))?, db.prepare("select address from device_addresses where node_id = ?")?.query_map([LOCAL.0], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?))}).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+	let (pool, stored) = (pooled.parse::<Ipv4Net>().ok(), this.address.parse::<Ipv4Addr>().ok());
 	let profiles: Vec<Value> = settings.profiles.iter().cloned().filter_map(|mut profile| {
 		// A relays-only inbound is switched on at once, before the next publish: the node's own addresses of an older snapshot are dropped here, and a profile no relay reaches this account with is not given.
 		let only = profile["id"].as_str().and_then(|id| settings.relay_profiles.get(id)).is_some_and(|tag| crate::nodecfg::relays_only(&settings, tag)) || crate::xray::addresses(&profile).iter().any(|host| host == crate::nodecfg::NO_ADDRESS);
@@ -262,7 +263,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	// A key that is some inbound's public key of this node is never a device's: the node would take the device for the node itself.
 	let node_key = settings.profiles.iter().chain(settings.profile_overrides.values()).filter_map(|profile| profile.get("inbound_public_key")?.as_str()).any(|key| STANDARD.decode(key).is_ok_and(|bytes| STANDARD.encode(bytes) == public_key));
 	let (changed, outcome) = {
-		let (handle, held, user, dirty, pool, (new_max, window)) = (app.db.clone(), app.clone(), user.clone(), app.dirty.clone(), settings.pool_v4.clone(), (settings.new_devices as usize, i64::from(settings.new_devices_window_minutes) * 60));
+		let (handle, held, user, dirty, (new_max, window)) = (app.db.clone(), app.clone(), user.clone(), app.node(LOCAL).dirty.clone(), (settings.new_devices as usize, i64::from(settings.new_devices_window_minutes) * 60));
 		match handle.call(move |db| -> rusqlite::Result<(bool, Result<Option<DeviceRow>, &'static str>)> {
 			let (keys, mut changed, tx) = (held.keys.as_ref().expect("checked before the lookup"), false, db.transaction()?);
 			changed |= tx.execute("delete from devices where user_id = ? and state = 'pending' and created < ?", params![user.id, at - PENDING_LAPSE])? > 0;
@@ -293,12 +294,13 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 				None => {
 					let (total, pending): (i64, i64) = tx.query_row("select count(*), coalesce(sum(state = 'pending'), 0) from devices where user_id = ?", [user.id], |row| Ok((row.get(0)?, row.get(1)?)))?;
 					let limit = if user.device_limit == 0 {NODE_DEVICES_MAX} else {user.device_limit.min(NODE_DEVICES_MAX)};
-					let (address, enroll) = (allocate(&tx, &pool), op == "confirm");
+					let (address, enroll) = (allocate(&tx, LOCAL), op == "confirm");
 					if total >= limit || (!enroll && pending >= PENDING_PLACES) || address.is_none() {Err("device_limit")}
 					else if !held.sub_limits.admit(&format!("new:{}:{}", user.id, user.token_gen), new_max, window) {Err("rate_limited")}
 					else {
 						let secret = keys.seal_secret(&user.record_id, &format!("transport_secret:{}", public_key), &crypto::random::<32>());
-						tx.execute("insert into devices (user_id, name, public_key, secret_hash, address, transport_secret, state, token_gen, created, confirmed_at, last_seen) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![user.id, name.clone().unwrap_or_default(), public_key, hash.as_slice(), address, secret, if enroll {"enrolled"} else {"pending"}, user.token_gen, at, enroll.then_some(at), at])?;
+						tx.execute("insert into devices (user_id, name, public_key, secret_hash, transport_secret, state, token_gen, created, confirmed_at, last_seen) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![user.id, name.clone().unwrap_or_default(), public_key, hash.as_slice(), secret, if enroll {"enrolled"} else {"pending"}, user.token_gen, at, enroll.then_some(at), at])?;
+						tx.execute("insert into device_addresses (node_id, device_id, address) values (?, last_insert_rowid(), ?)", params![LOCAL.0, address])?;
 						changed = true;
 						Ok(Some(tx.query_row(&format!("select {DEVICE_COLUMNS} from devices where user_id = ? and public_key = ?"), params![user.id, public_key], DeviceRow::read)?))
 					}
@@ -316,7 +318,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	// An app answered before the node has its new device is refused on its first connection and then waits out its retry, so the answer waits for the push, for a few seconds at most. The push goes on by itself if it takes longer.
 	if changed {
 		let app = app.clone();
-		let push = tokio::spawn(async move {let _ = crate::node::sync(&app).await;});
+		let push = tokio::spawn(async move {let _ = crate::node::sync(&app, LOCAL).await;});
 		let _ = tokio::time::timeout(std::time::Duration::from_secs(5), push).await;
 	}
 	let device = match outcome {
@@ -325,7 +327,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 		Ok(Some(device)) => device,
 	};
 	if device.state == "enrolled" {statics::remember(&app, &user, &device, &token, ask.device_secret().expose()).await}
-	let used = crate::node::usage(&app).await.remove(&user.name);
+	let used = crate::node::usage(&app, LOCAL).await.remove(&user.name);
 	match document(&app, &user, &device, &signing, &signer, Form::Answer, used.as_ref(), reached.as_ref()).await {
 		Ok(text) => answer(&text),
 		Err(error) => {

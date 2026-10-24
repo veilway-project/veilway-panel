@@ -1,5 +1,5 @@
 //! The node's control API over its unix socket, and the one place the panel's users become the node's `users`.
-use crate::{app::App, crypto::{self, now}, subs};
+use crate::{app::{App, Node, LOCAL}, crypto::{self, now}, subs};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use crate::xray::{key32, server_label};
 use http_body_util::{BodyExt, Full};
@@ -7,17 +7,18 @@ use hyper::{body::Bytes, Request};
 use hyper_util::rt::TokioIo;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
-use std::{collections::{HashMap, HashSet}, path::Path, sync::{atomic::Ordering, Arc}, time::Duration};
+use std::{collections::{HashMap, HashSet}, sync::{atomic::Ordering, Arc}, time::Duration};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::net::UnixStream;
 
-/// One request to the node. The answer is the status and the body.
-pub async fn request(socket: &Path, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>) -> Result<(u16, Vec<u8>), String> {request_within(socket, method, path, if_match, body, Duration::from_secs(20)).await}
+/// One request to a node. The answer is the status and the body. Node 1 is reached on the panel's own control socket, and no other node can be reached yet.
+pub async fn request(app: &App, node: Node, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>) -> Result<(u16, Vec<u8>), String> {request_within(app, node, method, path, if_match, body, Duration::from_secs(20)).await}
 
 /// Like `request`, for a call that waits on a third party (the fetch of another provider's subscription).
-pub async fn request_within(socket: &Path, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>, limit: Duration) -> Result<(u16, Vec<u8>), String> {
+pub async fn request_within(app: &App, node: Node, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>, limit: Duration) -> Result<(u16, Vec<u8>), String> {
+	if node != LOCAL {return Err(format!("node {} cannot be reached: only the node on the panel's own socket is supported so far", node.0))}
 	let attempt = async {
-		let stream = UnixStream::connect(socket).await.map_err(|error| format!("the node's socket: {error}"))?;
+		let stream = UnixStream::connect(&app.cfg.node_socket).await.map_err(|error| format!("the node's socket: {error}"))?;
 		let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.map_err(|error| error.to_string())?;
 		tokio::spawn(connection);
 		let mut builder = Request::builder().method(method).uri(path).header("host", "node");
@@ -32,8 +33,8 @@ pub async fn request_within(socket: &Path, method: &str, path: &str, if_match: O
 }
 
 /// The node's users by name, with their usage, for the pages and for a document's `usage`. Empty when the node cannot be reached.
-pub async fn usage(app: &App) -> HashMap<String, Value> {
-	let Ok((200, body)) = request(&app.cfg.node_socket, "GET", "/v1/users", None, None).await else {return HashMap::new()};
+pub async fn usage(app: &App, node: Node) -> HashMap<String, Value> {
+	let Ok((200, body)) = request(app, node, "GET", "/v1/users", None, None).await else {return HashMap::new()};
 	serde_json::from_slice::<Value>(&body).ok().and_then(|value| value.get("users").cloned()).and_then(|users| users.as_array().cloned()).unwrap_or_default().into_iter().filter_map(|user| Some((user.get("name")?.as_str()?.to_string(), user))).collect()
 }
 
@@ -58,14 +59,14 @@ pub(crate) async fn clear_defaults(app: &App, document: &Value) {
 }
 
 /// Puts the panel's users into the document's `users`, and the panel's credentials into the `clients` of the Xray inbounds it made, making one for a user who has none yet. A user with no device and no proxy password is left out, since the node needs one of them. An Xray inbound the panel did not make keeps its clients, less those whose user is gone.
-pub(crate) async fn fill(app: &Arc<App>, document: &mut Value) -> Result<(), String> {
-	let (handle, app, mut copy, dirty) = (app.db.clone(), app.clone(), document.clone(), app.dirty.clone());
+pub(crate) async fn fill(app: &Arc<App>, node: Node, document: &mut Value) -> Result<(), String> {
+	let (handle, app, mut copy, dirty) = (app.db.clone(), app.clone(), document.clone(), app.node(node).dirty.clone());
 	*document = handle.call(move |db| -> Result<Value, String> {
 		let (document, keys) = (&mut copy, app.keys.as_ref().ok_or("the key file is missing, so no secret can be opened")?);
 		// An inbound a node link uses carries no users' devices (the node refuses a config that gives it one), so no device gets an address there.
 		let linked: Vec<Value> = document["links"].as_array().into_iter().flatten().filter_map(|link| link.get("inbound").cloned()).collect();
-		let (pool, inbounds) = (app.settings().pool_v4, document["inbounds"].as_array().into_iter().flatten().filter(|inbound| !linked.contains(&inbound["tag"])).cloned().collect::<Vec<_>>());
-		let mut taken: HashSet<String> = db.prepare("select address from devices").and_then(|mut statement| statement.query_map([], |row| row.get(0))?.collect()).map_err(|error| error.to_string())?;
+		let (pool, inbounds): (String, Vec<Value>) = (db.query_row("select pool_v4 from nodes where id = ?", [node.0], |row| row.get(0)).map_err(|error| error.to_string())?, document["inbounds"].as_array().into_iter().flatten().filter(|inbound| !linked.contains(&inbound["tag"])).cloned().collect());
+		let mut taken: HashSet<String> = db.prepare("select address from device_addresses where node_id = ?").and_then(|mut statement| statement.query_map([node.0], |row| row.get(0))?.collect()).map_err(|error| error.to_string())?;
 		taken.extend(document["links"].as_array().into_iter().flatten().flat_map(|link| ["dialler", "listener"].map(|side| link["addresses"][side].clone())).flat_map(|list| list.as_array().cloned().unwrap_or_default()).filter_map(|address| Some(address.as_str()?.split('/').next()?.to_string())));
 		subs::expire_pending(db, now()).map_err(|error| error.to_string())?;
 		let mut statement = db.prepare("select id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, record_id, default_exit from users order by id").map_err(|error| error.to_string())?;
@@ -73,8 +74,8 @@ pub(crate) async fn fill(app: &Arc<App>, document: &mut Value) -> Result<(), Str
 		let (mut out, mut present) = (Vec::new(), Vec::new());
 		for (id, name, enabled, groups, exits, quota, period, expires, record, exit) in rows {
 			let record: [u8; 16] = record.try_into().map_err(|_| "a user record id is not 16 bytes")?;
-			let mut devices = db.prepare("select id, public_key, address, transport_secret from devices where user_id = ? and state = 'enrolled' order by id").map_err(|error| error.to_string())?;
-			let devices = devices.query_map([id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+			let mut devices = db.prepare("select devices.id, devices.public_key, device_addresses.address, devices.transport_secret from devices join device_addresses on device_addresses.device_id = devices.id and device_addresses.node_id = ? where devices.user_id = ? and devices.state = 'enrolled' order by devices.id").map_err(|error| error.to_string())?;
+			let devices = devices.query_map([node.0, id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
 			let proxy: Option<Vec<u8>> = db.query_row("select proxy_password from users where id = ?", [id], |row| row.get(0)).map_err(|error| error.to_string())?;
 			if devices.is_empty() && proxy.is_none() {continue}
 			let devices: Vec<Value> = devices.into_iter().map(|(device, public_key, address, sealed)| {
@@ -130,21 +131,25 @@ pub(crate) async fn fill(app: &Arc<App>, document: &mut Value) -> Result<(), Str
 }
 
 /// Puts the panel's users into the node's running config. A stale revision is read again once.
-pub async fn sync(app: &Arc<App>) -> Result<(), String> {
-	let _turn = app.node_lock.lock().await;
+pub async fn sync(app: &Arc<App>, node: Node) -> Result<(), String> {
+	let _turn = app.turn(node).await;
+	let state = app.node(node);
+	let mut pushed = None;
 	// Cleared before the document is read, so a change committed while this push runs keeps the flag set.
-	app.dirty.store(false, Ordering::Relaxed);
+	state.dirty.store(false, Ordering::Relaxed);
 	let result = async {
 		for _ in 0..3 {
-			let (status, body) = request(&app.cfg.node_socket, "GET", "/v1/config", None, None).await?;
+			let (status, body) = request(app, node, "GET", "/v1/config", None, None).await?;
 			if status != 200 {return Err(format!("the node answered {status} to the config"))}
 			let running: Value = serde_json::from_slice(&body).map_err(|error| error.to_string())?;
 			let (Some(revision), Some(mut document)) = (running.get("revision").and_then(Value::as_str).map(str::to_string), running.get("document").cloned()) else {return Err("the node's config answer has no revision or document".into())};
-			fill(app, &mut document).await?;
-			let (status, body) = request(&app.cfg.node_socket, "PUT", "/v1/config", Some(&revision), Some(&document)).await?;
+			fill(app, node, &mut document).await?;
+			let (status, body) = request(app, node, "PUT", "/v1/config", Some(&revision), Some(&document)).await?;
 			match status {
 				200 => {
-					clear_defaults(app, &document).await;
+					// Defaults are the user's, and are judged against the document of node 1 alone.
+					if node == LOCAL {clear_defaults(app, &document).await}
+					pushed = serde_json::from_slice::<Value>(&body).ok().and_then(|answer| answer["revision"].as_str().map(str::to_string));
 					return Ok(())
 				}
 				409 => continue,
@@ -153,8 +158,10 @@ pub async fn sync(app: &Arc<App>) -> Result<(), String> {
 		}
 		Err("the node's config kept changing underneath the panel".into())
 	}.await;
-	*app.last_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(match &result {Ok(()) => format!("ok at {}", now()), Err(error) => format!("failed at {}: {error}", now())});
-	if result.is_err() {app.dirty.store(true, Ordering::Relaxed)}
+	*state.last_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(match &result {Ok(()) => format!("ok at {}", now()), Err(error) => format!("failed at {}: {error}", now())});
+	if result.is_err() {state.dirty.store(true, Ordering::Relaxed)}
+	let (seen, failure) = (result.is_ok().then(now), result.as_ref().err().cloned());
+	let _ = app.db.call(move |db| db.execute("update nodes set config_rev = coalesce(?, config_rev), last_seen = coalesce(?, last_seen), last_error = ? where id = ?", params![pushed, seen, failure, node.0])).await;
 	if let Err(error) = &result {tracing::warn!("the node was not updated: {error}")}
 	result
 }

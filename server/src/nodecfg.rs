@@ -1,5 +1,5 @@
 //! The node's config through its control API: the schema, the document as a whole and by section, dry runs, the one path that applies a change, and the profile templates derived from the inbounds.
-use crate::{app::{store_settings, App, Settings, TransportClock}, auth::reauthed, crypto::{now, random}, http::{json, ok, Body, Ctx, Failure}, node, subs::UserRow, users::name_ok, xray::{self, addresses, Exposure}};
+use crate::{app::{store_settings, App, Node, Settings, TransportClock, LOCAL}, auth::reauthed, crypto::{now, random}, http::{json, ok, Body, Ctx, Failure}, node, subs::UserRow, users::name_ok, xray::{self, addresses, Exposure}};
 use axum::{extract::{Path, State}, http::{header::CONTENT_TYPE, HeaderValue, StatusCode}, response::{IntoResponse, Response}, Extension};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::Connection;
@@ -74,27 +74,27 @@ pub fn checked_relays<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<
 
 pub async fn schema() -> Response {(StatusCode::OK, [(CONTENT_TYPE, HeaderValue::from_static("application/json"))], SCHEMA).into_response()}
 
-pub(crate) async fn call(app: &App, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>) -> Result<(u16, Value), Failure> {
-	let (status, bytes) = node::request(&app.cfg.node_socket, method, path, if_match, body).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
+pub(crate) async fn call(app: &App, node: Node, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>) -> Result<(u16, Value), Failure> {
+	let (status, bytes) = node::request(app, node, method, path, if_match, body).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
 	Ok((status, serde_json::from_slice(&bytes).unwrap_or(Value::Null)))
 }
 
 /// The revision, the generation and the document the node runs, secrets as the node's marker.
-pub(crate) async fn running(app: &App) -> Result<(String, u64, Value), Failure> {
-	let (status, body) = call(app, "GET", "/v1/config", None, None).await?;
+pub(crate) async fn running(app: &App, node: Node) -> Result<(String, u64, Value), Failure> {
+	let (status, body) = call(app, node, "GET", "/v1/config", None, None).await?;
 	let (Some(revision), Some(document)) = (body.get("revision").and_then(Value::as_str), body.get("document")) else {return Err(Failure::new(StatusCode::BAD_GATEWAY, "node_refused", format!("The node answered {status} to the config.")))};
 	Ok((revision.to_string(), body.get("generation").and_then(Value::as_u64).unwrap_or(0), document.clone()))
 }
 
 pub async fn get_config(State(app): State<Arc<App>>) -> Result<Response, Failure> {
-	let (revision, generation, mut document) = running(&app).await?;
+	let (revision, generation, mut document) = running(&app, LOCAL).await?;
 	document.as_object_mut().map(|document| document.remove("users"));
 	ok(&json!({"revision": revision, "generation": generation, "document": document}))
 }
 
 pub async fn get_section(State(app): State<Arc<App>>, Path(section): Path<String>) -> Result<Response, Failure> {
 	if !SECTIONS.contains(&section.as_str()) {return Err(Failure::missing("section"))}
-	let (revision, generation, document) = running(&app).await?;
+	let (revision, generation, document) = running(&app, LOCAL).await?;
 	let mut answer = json!({"revision": revision, "generation": generation, "value": document.get(&section).cloned().unwrap_or(Value::Null)});
 	// The node reads the size of its replay memory once, at start.
 	if section == "replay" {answer["read_at_start"] = json!(["cache"]);}
@@ -102,9 +102,9 @@ pub async fn get_section(State(app): State<Arc<App>>, Path(section): Path<String
 }
 
 /// The document with the panel's users in it, and their Xray credentials, since the node's `users` is what the panel owns.
-pub(crate) async fn with_users(app: &Arc<App>, mut document: Value) -> Result<Value, Failure> {
+pub(crate) async fn with_users(app: &Arc<App>, node: Node, mut document: Value) -> Result<Value, Failure> {
 	if !document.is_object() {return Err(Failure::bad("The document is a JSON object."))}
-	node::fill(app, &mut document).await.map_err(|error| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "users_unavailable", error))?;
+	node::fill(app, node, &mut document).await.map_err(|error| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "users_unavailable", error))?;
 	Ok(document)
 }
 
@@ -116,32 +116,32 @@ pub struct DocumentIn {pub document: Value}
 fn invalid(found: &[String]) -> Failure {Failure::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", json!({"valid": false, "report": {"errors": found.iter().map(|text| json!({"path": text.split(':').next().unwrap_or_default(), "message": text.split_once(": ").map_or(text.as_str(), |(_, message)| message)})).collect::<Vec<_>>(), "warnings": [], "more_errors": 0, "more_warnings": 0}}).to_string())}
 
 /// Asks the node whether the document is valid, or what applying it would change. Nothing changes.
-pub async fn dry_run(app: Arc<App>, document: Value, path: &str) -> Result<Response, Failure> {
-	let (_, _, live) = running(&app).await?;
+pub async fn dry_run(app: Arc<App>, node: Node, document: Value, path: &str) -> Result<Response, Failure> {
+	let (_, _, live) = running(&app, node).await?;
 	let found = [crate::borrowed::problems(&document, &live), crate::via::problems(&document, &live)].concat();
 	if !found.is_empty() {return Err(invalid(&found))}
-	let (status, body) = call(&app, "POST", path, None, Some(&with_users(&app, document).await?)).await?;
+	let (status, body) = call(&app, node, "POST", path, None, Some(&with_users(&app, node, document).await?)).await?;
 	Ok(json(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY), &body))
 }
 
-pub async fn validate(State(app): State<Arc<App>>, Body(input): Body<DocumentIn>) -> Result<Response, Failure> {dry_run(app, input.document, "/v1/config/validate").await}
+pub async fn validate(State(app): State<Arc<App>>, Body(input): Body<DocumentIn>) -> Result<Response, Failure> {dry_run(app, LOCAL, input.document, "/v1/config/validate").await}
 
-pub async fn diff(State(app): State<Arc<App>>, Body(input): Body<DocumentIn>) -> Result<Response, Failure> {dry_run(app, input.document, "/v1/config/diff").await}
+pub async fn diff(State(app): State<Arc<App>>, Body(input): Body<DocumentIn>) -> Result<Response, Failure> {dry_run(app, LOCAL, input.document, "/v1/config/diff").await}
 
 /// Validates the document on the node, then puts it in force with If-Match. The caller holds the panel's one turn at the node's config. A document the node refuses, or a revision that moved, changes nothing. The audit line names what changed, never a secret. The Xray inbounds are left out: their own audit lines name their changes, and the node shows their credentials as markers.
-pub(crate) async fn apply(app: &Arc<App>, ctx: &Ctx, document: Value, revision: &str, target: &str) -> Result<Value, Failure> {
-	let document = with_users(app, document).await?;
-	let (_, _, before) = running(app).await?;
+pub(crate) async fn apply(app: &Arc<App>, node: Node, ctx: &Ctx, document: Value, revision: &str, target: &str) -> Result<Value, Failure> {
+	let document = with_users(app, node, document).await?;
+	let (_, _, before) = running(app, node).await?;
 	// The site of a borrowed-site transport has not agreed to it, so adding one or changing its site or acknowledgment is a person's act, as the guarded sections are. A token never passes.
 	if crate::borrowed::sensitive(&before, &document) {reauthed(app, ctx).await?}
 	let found = [crate::borrowed::problems(&document, &before), crate::via::problems(&document, &before)].concat();
 	if !found.is_empty() {return Err(invalid(&found))}
-	let (status, checked) = call(app, "POST", "/v1/config/validate", None, Some(&document)).await?;
+	let (status, checked) = call(app, node, "POST", "/v1/config/validate", None, Some(&document)).await?;
 	if status != 200 || checked.get("valid") != Some(&Value::Bool(true)) {return Err(Failure::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", checked.to_string().chars().take(4000).collect::<String>()))}
-	let (status, applied) = call(app, "PUT", "/v1/config", Some(revision), Some(&document)).await?;
+	let (status, applied) = call(app, node, "PUT", "/v1/config", Some(revision), Some(&document)).await?;
 	match status {
 		200 => {
-			node::clear_defaults(app, &document).await;
+			if node == LOCAL {node::clear_defaults(app, &document).await}
 			let (kept, published) = (document.clone(), app.settings().profiles);
 			// A profile of a borrowed site that was published is made again from what the node runs now, or taken down when it can no longer be emitted, so that no document carries the key or the listener it had before. One that was never published, and one written by hand, stay as they are.
 			let republished = app.update_settings(move |settings| {
@@ -202,12 +202,12 @@ pub struct ConfigIn {
 }
 
 pub async fn put_config(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<ConfigIn>) -> Result<Response, Failure> {
-	let _turn = app.node_lock.lock().await;
-	let (_, _, live) = running(&app).await?;
+	let _turn = app.turn(LOCAL).await;
+	let (_, _, live) = running(&app, LOCAL).await?;
 	let changed = |sections: &[&str]| sections.iter().any(|section| live[*section] != input.document[*section]);
 	if ctx.token_id.is_some() && changed(&["exits", "outbounds", "links", "tunnels", "log", "dns", "notices", "upstreams"]) {return Err(Failure::new(StatusCode::FORBIDDEN, "forbidden", "An API token cannot change exits, outbounds, links, tunnels, log, dns, notices or upstreams through the whole config."))}
 	if changed(&GUARDED) {reauthed(&app, &ctx).await?}
-	ok(&apply(&app, &ctx, input.document, &input.revision, "config").await?)
+	ok(&apply(&app, LOCAL, &ctx, input.document, &input.revision, "config").await?)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -223,10 +223,10 @@ pub async fn put_section(State(app): State<Arc<App>>, Extension(ctx): Extension<
 	if input.value.is_null() && !OPTIONAL.contains(&section.as_str()) {return Err(Failure::bad("This section is required, so it cannot be null."))}
 	if !input.value.is_null() && (input.value.is_object() != OBJECTS.contains(&section.as_str()) || !(input.value.is_object() || input.value.is_array())) {return Err(Failure::bad(if OBJECTS.contains(&section.as_str()) {"This section is an object."} else {"This section is a list."}))}
 	if GUARDED.contains(&section.as_str()) {reauthed(&app, &ctx).await?}
-	let _turn = app.node_lock.lock().await;
-	let (_, _, mut document) = running(&app).await?;
+	let _turn = app.turn(LOCAL).await;
+	let (_, _, mut document) = running(&app, LOCAL).await?;
 	if input.value.is_null() {document.as_object_mut().map(|document| document.remove(&section));} else {document[&section] = input.value;}
-	ok(&apply(&app, &ctx, document, &input.revision, &section).await?)
+	ok(&apply(&app, LOCAL, &ctx, document, &input.revision, &section).await?)
 }
 
 /// The override member with the addresses apps reach an inbound's profiles at, IP addresses or host names, in place of the node address.
@@ -446,16 +446,16 @@ pub async fn rated(settings: &Settings, document: &Value, relays: &[Relay], user
 }
 
 /// The pin of each self-signed `tls` certificate the node made, by listen address, as its status reports them. The pin is the hash of the certificate's key, which the node keeps when it renews the certificate, so it changes only when the node makes a new key. A node that does not answer gives none, and the templates are made without.
-pub async fn node_pins(app: &App) -> BTreeMap<String, String> {
-	let Ok((200, body)) = call(app, "GET", "/v1/status", None, None).await else {return BTreeMap::new()};
+pub async fn node_pins(app: &App, node: Node) -> BTreeMap<String, String> {
+	let Ok((200, body)) = call(app, node, "GET", "/v1/status", None, None).await else {return BTreeMap::new()};
 	body["certificates"].as_array().into_iter().flatten().filter_map(|made| Some((made["listen"].as_str()?.to_string(), made["pin"].as_str()?.to_string()))).collect()
 }
 
 pub async fn derived_profiles(State(app): State<Arc<App>>) -> Result<Response, Failure> {
-	let (revision, _, document) = running(&app).await?;
+	let (revision, _, document) = running(&app, LOCAL).await?;
 	let settings = app.settings();
 	let hosts = app.db.call(|db| xray::inbound_hosts(db)).await??;
-	ok(&json!({"revision": revision, "templates": rated(&settings, &document, &settings.relays, None, &hosts, node_pins(&app).await, false).await}))
+	ok(&json!({"revision": revision, "templates": rated(&settings, &document, &settings.relays, None, &hosts, node_pins(&app, LOCAL).await, false).await}))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -469,14 +469,14 @@ pub struct PreviewIn {
 
 /// The templates as they would be with these relays instead of the saved ones, for the account given or for no account. Nothing is saved.
 pub async fn preview_profiles(State(app): State<Arc<App>>, Body(input): Body<PreviewIn>) -> Result<Response, Failure> {
-	let (revision, _, document) = running(&app).await?;
+	let (revision, _, document) = running(&app, LOCAL).await?;
 	let account = match input.user {
 		Some(id) => Some(app.db.call(move |db| UserRow::load(db, id)).await??),
 		None => None,
 	};
 	let groups: Vec<String> = account.as_ref().map(|user| serde_json::from_str(&user.groups).unwrap_or_default()).unwrap_or_default();
 	let hosts = app.db.call(|db| xray::inbound_hosts(db)).await??;
-	ok(&json!({"revision": revision, "templates": rated(&app.settings(), &document, &input.relays, account.as_ref().map(|user| (user.id, groups.as_slice())), &hosts, node_pins(&app).await, false).await}))
+	ok(&json!({"revision": revision, "templates": rated(&app.settings(), &document, &input.relays, account.as_ref().map(|user| (user.id, groups.as_slice())), &hosts, node_pins(&app, LOCAL).await, false).await}))
 }
 
 /// Takes a deleted account out of the audiences of the saved and the published relays, in the transaction that deletes it. SQLite gives a new account the id of the last one deleted, so no relay may keep it.
@@ -508,10 +508,10 @@ pub async fn put_override(State(app): State<Arc<App>>, Extension(ctx): Extension
 
 /// Writes the derived templates into the settings' `profiles`, which is what the subscription endpoint serves. A profile that is not derived from an inbound stays. A template with something missing stops the publish.
 pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {
-	let (_, _, document) = running(&app).await?;
+	let (_, _, document) = running(&app, LOCAL).await?;
 	let current = app.settings();
 	let hosts = app.db.call(|db| xray::inbound_hosts(db)).await??;
-	let templates = rated(&current, &document, &[], None, &hosts, node_pins(&app).await, true).await;
+	let templates = rated(&current, &document, &[], None, &hosts, node_pins(&app, LOCAL).await, true).await;
 	// A profile whose transports were all refused is not published, and what it said before is taken down. Its refusals are shown on the Profiles page and block nothing else.
 	let empty = |template: &Value| template["profile"]["transports"].as_array().is_none_or(Vec::is_empty) && (template["kind"] == "faketls" || template["refused"].as_array().is_some_and(|list| !list.is_empty()));
 	if let Some(bad) = templates.iter().filter(|template| !empty(template)).find(|template| !template["missing"].as_array().is_some_and(Vec::is_empty)) {return Err(Failure::bad(format!("The profile of inbound {} still needs: {}.", bad["inbound"].as_str().unwrap_or_default(), bad["missing"])))}
@@ -564,8 +564,8 @@ pub fn plain_written(edits: &serde_json::Map<String, Value>) -> bool {edits.get(
 /// The hourly rotation of the transport keys the panel makes: the first key of each `veilway` inbound (every `transport_key_days`) and of each of its `ws-plain` transports (every 7 days at most, since its proofs travel in clear). A slot holds two keys at most, so a rotation sets the node's list to the fresh key and the current one: the one that was second is destroyed and the current one lives one more period. Before that, no published profile may carry the key that is destroyed, and once the node holds the fresh key the profiles that carry the current one take the fresh one. A rotation is written before the node is asked, so one whose answer was lost is finished by a later pass, and one that stays unconfirmed for 2 days (the node's markers change when it restarts) is given up. The panel keeps no private key: the new one goes to the node and the old one is only ever a marker here.
 pub async fn rotate_keys(app: &Arc<App>, at: i64) {
 	let ctx = Ctx {actor: "system".into(), admin_id: 0, token_id: None, session_id: None, source: "upkeep".into()};
-	let _turn = app.node_lock.lock().await;
-	let (_, _, listed) = match running(app).await {Ok(found) => found, Err(error) => {tracing::warn!("transport keys: the node's config could not be read, so no key was checked: {}", error.message); return}};
+	let _turn = app.turn(LOCAL).await;
+	let (_, _, listed) = match running(app, LOCAL).await {Ok(found) => found, Err(error) => {tracing::warn!("transport keys: the node's config could not be read, so no key was checked: {}", error.message); return}};
 	let slots: Vec<(String, String)> = listed["inbounds"].as_array().into_iter().flatten().filter(|inbound| inbound["type"] == "veilway").flat_map(|inbound| {
 		let tag = inbound["tag"].as_str().unwrap_or_default().to_string();
 		let own = inbound["transport_keys"].as_array().is_some_and(|keys| !keys.is_empty()).then(|| (tag.clone(), String::new()));
@@ -574,7 +574,7 @@ pub async fn rotate_keys(app: &Arc<App>, at: i64) {
 	}).collect();
 	for (tag, path) in slots {
 		let (name, label) = (slot(&tag, &path), format!("{tag}{path}"));
-		let (revision, _, mut document) = match running(app).await {Ok(found) => found, Err(error) => {tracing::warn!("transport keys: the node's config could not be read again: {}", error.message); return}};
+		let (revision, _, mut document) = match running(app, LOCAL).await {Ok(found) => found, Err(error) => {tracing::warn!("transport keys: the node's config could not be read again: {}", error.message); return}};
 		let Some(keys) = keys_at(&mut document, &tag, &path).and_then(|keys| keys.as_array().cloned()) else {continue};
 		let settings = app.settings();
 		let public = settings.transport_keys.get(&name).cloned().unwrap_or_default();
@@ -606,12 +606,12 @@ pub async fn rotate_keys(app: &Arc<App>, at: i64) {
 			}).await;
 			if let Err(error) = result {tracing::warn!("transport keys of {label}: the rotation was not started: {error}"); continue}
 			keys_at(&mut document, &tag, &path).map(|list| *list = json!([STANDARD.encode(fresh), keys[0]]));
-			if let Err(error) = apply(app, &ctx, document, &revision, &tag).await {tracing::warn!("transport keys of {label}: the node did not take the new key, so the profiles keep the old one: {}", error.message); failed = true}
+			if let Err(error) = apply(app, LOCAL, &ctx, document, &revision, &tag).await {tracing::warn!("transport keys of {label}: the node did not take the new key, so the profiles keep the old one: {}", error.message); failed = true}
 		}
 		let settings = app.settings();
 		let (public, clock) = (settings.transport_keys.get(&name).cloned().unwrap_or_default(), settings.transport_clocks.get(&name).cloned().unwrap_or_default());
 		if clock.next.is_empty() {continue}
-		let held = running(app).await.ok().and_then(|(_, _, mut found)| keys_at(&mut found, &tag, &path).and_then(|list| list.as_array().cloned()));
+		let held = running(app, LOCAL).await.ok().and_then(|(_, _, mut found)| keys_at(&mut found, &tag, &path).and_then(|list| list.as_array().cloned()));
 		// The node holds the old key second only when it took this rotation, also when its answer to the apply was lost.
 		let taken = clock.next == public || held.as_ref().is_some_and(|keys| keys.len() == 2 && !clock.old_marker.is_empty() && keys[1] == clock.old_marker.as_str());
 		if taken {

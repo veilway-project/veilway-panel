@@ -4,7 +4,7 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::{collections::HashMap, future::Future, net::SocketAddr, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}};
 use tower::ServiceExt;
-use veilway_panel::{admin, app::{bucket, App, Limiter, Signing}, build, config::{Config, TrustedMirror}, crypto, mirrors, openapi, router, upkeep_once, Upkeep};
+use veilway_panel::{admin, app::{bucket, App, Limiter, Signing, LOCAL}, build, config::{Config, TrustedMirror}, crypto, mirrors, openapi, router, upkeep_once, Upkeep};
 use veilway_proto::subscription::{envelope::{self, Kid}, exchange::{self, GatewayKey}, link::Link, payload::{self, Payload, Reason}, sealed_file, BODY_MAX};
 
 const PASSWORD: &str = "correct horse battery";
@@ -710,16 +710,16 @@ async fn node_push_is_retried_after_an_outage() {
 	h.configure(&session, json!({})).await;
 	let (id, link) = h.user(&session, "ann", json!({})).await;
 	assert_eq!(h.call(Method::POST, "/p/api/node/sync", Some(&session), None, "10.0.0.1").await.json()["synced"], false);
-	assert!(h.app.dirty.load(Ordering::Relaxed), "the push failed with the node down");
+	assert!(h.app.node(LOCAL).dirty.load(Ordering::Relaxed), "the push failed with the node down");
 	let mut state = Upkeep::default();
 	upkeep_once(&h.app, &mut state).await;
-	assert!(h.app.dirty.load(Ordering::Relaxed) && state.wait == 5);
+	assert!(h.app.node(LOCAL).dirty.load(Ordering::Relaxed) && state.nodes[&LOCAL.0].wait == 5);
 	let listener = tokio::net::UnixListener::bind(&socket).unwrap();
 	tokio::spawn(async move {axum::serve(listener, node).await.unwrap();});
 	// The retry is due after its wait. Forgetting when it was due stands in for the wait.
-	state.retry_at = 0;
+	state.nodes.get_mut(&LOCAL.0).unwrap().retry_at = 0;
 	upkeep_once(&h.app, &mut state).await;
-	assert!(!h.app.dirty.load(Ordering::Relaxed));
+	assert!(!h.app.node(LOCAL).dirty.load(Ordering::Relaxed));
 	assert_eq!(seen.lock().unwrap().last().unwrap()["users"], json!([]), "ann has no enrolled device yet");
 	let made = h.call(Method::POST, &format!("/p/api/users/{id}/devices"), Some(&session), Some(json!({"name": "phone"})), "10.0.0.1").await.json();
 	assert_eq!(made["device"]["state"], "enrolled");

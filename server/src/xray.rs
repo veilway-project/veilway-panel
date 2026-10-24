@@ -1,5 +1,5 @@
 //! The Xray add-on: its inbounds in the node's config, which the panel makes with a credential per user, and the users' share links. The credentials are sealed in the panel's database, which is what the links are made from, since the node only ever shows its marker.
-use crate::{admin::Done, app::{publish_settings, store_settings, App}, auth::reauthed, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, nodecfg, subs::UserRow, users::{self, name_ok, NodeState}};
+use crate::{admin::Done, app::{publish_settings, store_settings, App, LOCAL}, auth::reauthed, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, nodecfg, subs::UserRow, users::{self, name_ok, NodeState}};
 use axum::{extract::{Path, State}, http::StatusCode, response::Response, Extension};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -24,7 +24,7 @@ fn node_decoy(document: &Value) -> Option<String> {
 
 /// Whether the node has the add-on, and its release. A node that says nothing of add-ons has none.
 async fn addon(app: &App) -> (bool, Option<String>) {
-	let status = match node::request(&app.cfg.node_socket, "GET", "/v1/status", None, None).await {Ok((200, body)) => serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null), _ => Value::Null};
+	let status = match node::request(&app, LOCAL, "GET", "/v1/status", None, None).await {Ok((200, body)) => serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null), _ => Value::Null};
 	let xray = &status["addons"]["xray"];
 	(xray["installed"] == true, xray["release"].as_str().map(str::to_string))
 }
@@ -61,7 +61,7 @@ pub struct XrayInboundOut {
 pub struct XrayOut {pub installed: bool, pub release: Option<String>, pub inbounds: Vec<XrayInboundOut>}
 
 pub async fn get(State(app): State<Arc<App>>) -> Result<Response, Failure> {
-	let ((installed, release), (_, _, document)) = (addon(&app).await, nodecfg::running(&app).await?);
+	let ((installed, release), (_, _, document)) = (addon(&app).await, nodecfg::running(&app, LOCAL).await?);
 	let made = app.db.call(|db| inbound_hosts(db)).await??;
 	let node_host = host_of(&app, &document, "").await;
 	let inbounds = document["xray"]["inbounds"].as_array().into_iter().flatten().map(|inbound| {
@@ -191,8 +191,8 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	let (listen, tls, host) = checked(&input.protocol, input.port, input.listen.as_deref(), &input.cert, &input.key, input.host)?;
 	if app.keys.is_none() {return Err(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))}
 	if !addon(&app).await.0 {return Err(Failure::new(StatusCode::CONFLICT, "addon_missing", "The Xray add-on is not installed on the node. Run sudo bash veilway.sh addon xray install on the server."))}
-	let _turn = app.node_lock.lock().await;
-	let (revision, _, mut document) = nodecfg::running(&app).await?;
+	let _turn = app.turn(LOCAL).await;
+	let (revision, _, mut document) = nodecfg::running(&app, LOCAL).await?;
 	let mut inbounds = document["xray"]["inbounds"].as_array().cloned().unwrap_or_default();
 	if inbounds.len() >= 16 {return Err(Failure::conflict("The node takes at most 16 Xray inbounds."))}
 	if inbounds.iter().any(|inbound| inbound["tag"] == input.tag.as_str()) {return Err(Failure::conflict("An Xray inbound has this tag."))}
@@ -208,7 +208,7 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	let sealed = server_key.as_ref().and_then(|key| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&input.tag), key.as_bytes())));
 	let mut hosts = app.db.call(|db| inbound_hosts(db)).await??;
 	hosts.push((input.tag.clone(), host.clone()));
-	let templates = nodecfg::rated(&app.settings(), &document, &[], None, &hosts, nodecfg::node_pins(&app).await, true).await;
+	let templates = nodecfg::rated(&app.settings(), &document, &[], None, &hosts, nodecfg::node_pins(&app, LOCAL).await, true).await;
 	let shared: Vec<Value> = templates.iter().filter(|template| template["profile"]["rating_cap"] == "detectable").map(|template| template["profile"]["id"].clone()).collect();
 	let derived: Vec<Value> = templates.iter().map(|template| template["profile"]["id"].clone()).collect();
 	let (tag, protocol, cache) = (input.tag.clone(), input.protocol.clone(), app.settings.clone());
@@ -228,7 +228,7 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	}).await?.map_err(Failure::internal)?;
 	let capped: Vec<String> = touched.iter().filter_map(|(id, _)| id.as_str().map(str::to_string)).collect();
 	let detail = if capped.is_empty() {format!("{} on port {}, no profile shares its address", input.protocol, input.port)} else {format!("{} on port {}, profiles capped at detectable: {}", input.protocol, input.port, capped.join(", "))};
-	if let Err(error) = nodecfg::apply(&app, &ctx, document, &revision, &format!("xray:{}", input.tag)).await {
+	if let Err(error) = nodecfg::apply(&app, LOCAL, &ctx, document, &revision, &format!("xray:{}", input.tag)).await {
 		let (tag, cache) = (input.tag.clone(), app.settings.clone());
 		let undone = app.db.call(move |db| -> Result<(), String> {
 			let tx = db.transaction().map_err(|error| error.to_string())?;
@@ -272,8 +272,8 @@ pub async fn edit(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, P
 	if input.new_server_key && protocol != "shadowsocks" {return Err(Failure::bad("Only a shadowsocks inbound has a server key."))}
 	if input.new_server_key && app.keys.is_none() {return Err(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))}
 	if input.new_server_key {reauthed(&app, &ctx).await?}
-	let _turn = app.node_lock.lock().await;
-	let (revision, _, mut document) = nodecfg::running(&app).await?;
+	let _turn = app.turn(LOCAL).await;
+	let (revision, _, mut document) = nodecfg::running(&app, LOCAL).await?;
 	let mut inbounds = document["xray"]["inbounds"].as_array().cloned().unwrap_or_default();
 	let node_default = node_decoy(&document);
 	let Some(inbound) = inbounds.iter_mut().find(|inbound| inbound["tag"] == tag.as_str()) else {return Err(Failure::missing("Xray inbound"))};
@@ -296,7 +296,7 @@ pub async fn edit(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, P
 	if new_key.is_some() {changed.push("new server key".into())}
 	document["xray"]["inbounds"] = Value::Array(inbounds);
 	let sealed = new_key.as_ref().and_then(|key| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&tag), key.as_bytes())));
-	nodecfg::apply(&app, &ctx, document, &revision, &format!("xray:{tag}")).await?;
+	nodecfg::apply(&app, LOCAL, &ctx, document, &revision, &format!("xray:{tag}")).await?;
 	app.db.call({
 		let tag = tag.clone();
 		move |db| -> rusqlite::Result<()> {
@@ -311,15 +311,15 @@ pub async fn edit(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, P
 
 /// Removes the inbound from the node's config and the panel's credentials for it.
 pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(tag): Path<String>) -> Result<Response, Failure> {
-	let _turn = app.node_lock.lock().await;
-	let (revision, _, mut document) = nodecfg::running(&app).await?;
+	let _turn = app.turn(LOCAL).await;
+	let (revision, _, mut document) = nodecfg::running(&app, LOCAL).await?;
 	let mut inbounds = document["xray"]["inbounds"].as_array().cloned().unwrap_or_default();
 	let before = inbounds.len();
 	inbounds.retain(|inbound| inbound["tag"] != tag.as_str());
 	let found = inbounds.len() != before;
 	if found {
 		if inbounds.is_empty() {document.as_object_mut().map(|document| document.remove("xray"));} else {document["xray"]["inbounds"] = Value::Array(inbounds);}
-		nodecfg::apply(&app, &ctx, document, &revision, &format!("xray:{tag}")).await?;
+		nodecfg::apply(&app, LOCAL, &ctx, document, &revision, &format!("xray:{tag}")).await?;
 	}
 	let lookup = tag.clone();
 	if app.db.call(move |db| db.execute("delete from xray_inbounds where tag = ?", [&lookup])).await?? == 0 && !found {return Err(Failure::missing("Xray inbound"))}
@@ -348,7 +348,7 @@ pub async fn links(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 		let held: Vec<(String, String, String, Vec<u8>, Option<Vec<u8>>)> = statement.query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?.collect::<Result<_, _>>()?;
 		Ok((user, held))
 	}).await??;
-	let (_, _, document) = nodecfg::running(&app).await?;
+	let (_, _, document) = nodecfg::running(&app, LOCAL).await?;
 	let provider = app.settings().provider_name;
 	let mut links = Vec::new();
 	for (tag, protocol, own, sealed, server) in held {

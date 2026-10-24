@@ -1,5 +1,5 @@
 //! Admin accounts: setup, login, TOTP, sessions, API tokens, the audit log, settings, signing keys and the node.
-use crate::{app::{bucket, publish_settings, store_settings, App, Settings, SigningEntry}, auth::{Agent, COOKIE_NAME, TOKEN_PREFIX}, crypto::{self, now, Keys}, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
+use crate::{app::{bucket, publish_settings, store_settings, App, Settings, SigningEntry, LOCAL}, auth::{Agent, COOKIE_NAME, TOKEN_PREFIX}, crypto::{self, now, Keys}, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
 use veilway_proto::{control::{display, NOTICES_MAX, NOTICE_MAX}, subscription::{Tag, Url, TRANSLATIONS_MAX, URL_MAX}};
 use argon2::{password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
 use axum::{extract::{Path, Query, State}, http::{header::SET_COOKIE, HeaderName, HeaderValue, StatusCode}, response::Response, Extension};
@@ -586,9 +586,9 @@ pub struct NodeInfo {pub reachable: bool, pub status: Option<Value>, pub last_sy
 	pub clock_synchronized: Option<bool>}
 
 pub async fn node_info(State(app): State<Arc<App>>) -> Result<Response, Failure> {
-	let status = match node::request(&app.cfg.node_socket, "GET", "/v1/status", None, None).await {Ok((200, body)) => serde_json::from_slice(&body).ok(), _ => None};
+	let status = match node::request(&app, LOCAL, "GET", "/v1/status", None, None).await {Ok((200, body)) => serde_json::from_slice(&body).ok(), _ => None};
 	let (gateway_missing, gateway_switch_due) = {let hold = app.gateway.lock().unwrap_or_else(|poisoned| poisoned.into_inner()); (!hold.loaded(), hold.active().is_some_and(|key| now() - key.created > crate::gateway::REMIND_AFTER))};
-	ok(&NodeInfo {reachable: status.is_some(), status, last_sync: app.last_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(), keys_missing: app.keys.is_none(), gateway_missing, gateway_switch_due, clock_synchronized: crate::statics::clock_synchronized()})
+	ok(&NodeInfo {reachable: status.is_some(), status, last_sync: app.node(LOCAL).last_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(), keys_missing: app.keys.is_none(), gateway_missing, gateway_switch_due, clock_synchronized: crate::statics::clock_synchronized()})
 }
 
 pub async fn node_sync(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {

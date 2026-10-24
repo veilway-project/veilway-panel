@@ -6,7 +6,7 @@ use ring::signature::{Ed25519KeyPair, KeyPair};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use std::{collections::{BTreeMap, HashMap, VecDeque}, fs, net::IpAddr, os::unix::fs::PermissionsExt, sync::{atomic::AtomicBool, Arc, Mutex, RwLock}};
 
 /// 365 days, then a retired signing key is destroyed.
@@ -257,6 +257,23 @@ impl Default for Settings {
 	}
 }
 
+/// A node the panel manages, by its id in the `nodes` table. Every call to a node names one, so the calls need no change when more than one exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Node(pub i64);
+
+/// Node 1: the node on the panel's own control socket, which is the whole of the panel's node until more are added.
+pub const LOCAL: Node = Node(1);
+
+/// The memory of one node: its lock, the flag that says its config is behind and the outcome of its last push.
+#[derive(Default)]
+pub struct NodeState {
+	/// One change of the node's config at a time.
+	pub lock: Arc<tokio::sync::Mutex<()>>,
+	pub last_sync: Mutex<Option<String>>,
+	/// Set when the node's config was not brought up to date, and cleared by the next push that works.
+	pub dirty: Arc<AtomicBool>,
+}
+
 pub struct App {
 	pub cfg: Config,
 	pub db: Db,
@@ -275,11 +292,8 @@ pub struct App {
 	/// The limits of the subscription endpoint, apart from `limits`: the keys a flood of requests makes there can fill this one and never lock an admin out.
 	pub sub_limits: Limiter,
 	pub setup_token: Mutex<Option<String>>,
-	/// One change of the node's config at a time.
-	pub node_lock: tokio::sync::Mutex<()>,
-	pub last_sync: Mutex<Option<String>>,
-	/// Set when the node's config was not brought up to date, and cleared by the next push that works.
-	pub dirty: Arc<AtomicBool>,
+	/// What the panel keeps in memory for each node it manages, by node id. Read through `node` and `nodes`.
+	pub node_states: Mutex<HashMap<i64, Arc<NodeState>>>,
 	/// The settings as last stored. Written only inside a database job, together with the table, so the cache and the table move in step.
 	pub settings: Arc<RwLock<Settings>>,
 	/// The settings' answer for unknown paths, kept here so a stranger's request never reads the database.
@@ -304,6 +318,16 @@ pub struct App {
 }
 
 impl App {
+	/// The state of a node, made empty the first time it is asked for.
+	pub fn node(&self, node: Node) -> Arc<NodeState> {self.node_states.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entry(node.0).or_default().clone()}
+	/// The nodes the panel manages, in id order.
+	pub fn nodes(&self) -> Vec<Node> {
+		let mut ids: Vec<i64> = self.node_states.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).keys().copied().collect();
+		ids.sort();
+		ids.into_iter().map(Node).collect()
+	}
+	/// The turn on a node's config: held while the panel reads it, changes it and pushes it.
+	pub async fn turn(&self, node: Node) -> tokio::sync::OwnedMutexGuard<()> {self.node(node).lock.clone().lock_owned().await}
 	pub fn settings(&self) -> Settings {self.settings.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()}
 	pub async fn update_settings(&self, change: impl FnOnce(&mut Settings) + Send + 'static) -> Result<(), String> {
 		let cache = self.settings.clone();
@@ -328,6 +352,8 @@ pub fn store_settings(connection: &Connection, cache: &RwLock<Settings>, change:
 	change(&mut settings);
 	let text = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
 	connection.execute("insert into settings (key, value) values ('settings', ?) on conflict (key) do update set value = excluded.value", [text]).map_err(|error| error.to_string())?;
+	// The pool of node 1 is what addresses are given from, and it is the setting that says so.
+	connection.execute("update nodes set pool_v4 = ? where id = ?", params![settings.pool_v4, LOCAL.0]).map_err(|error| error.to_string())?;
 	Ok(settings)
 }
 

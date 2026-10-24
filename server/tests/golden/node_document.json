@@ -1,0 +1,140 @@
+{
+  "dns": {},
+  "exits": [
+    {
+      "tag": "main"
+    }
+  ],
+  "inbounds": [
+    {
+      "address": [
+        "10.66.0.1/24"
+      ],
+      "private_key": "<redacted>",
+      "tag": "Main",
+      "transports": [
+        {
+          "listen": "0.0.0.0:51820",
+          "type": "udp"
+        },
+        {
+          "listen": "0.0.0.0:51821",
+          "type": "udp-obfs"
+        }
+      ],
+      "type": "veilway"
+    },
+    {
+      "address": [
+        "10.9.0.1/24"
+      ],
+      "private_key": "<redacted>",
+      "tag": "Second",
+      "transports": [
+        {
+          "listen": "0.0.0.0:51822",
+          "type": "udp"
+        }
+      ],
+      "type": "veilway"
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "plain",
+      "type": "direct"
+    }
+  ],
+  "routing": {
+    "default": "main",
+    "rules": []
+  },
+  "users": [
+    {
+      "devices": [
+        {
+          "addresses": [
+            "10.66.0.2",
+            "10.9.0.2"
+          ],
+          "name": "d1",
+          "public_key": "FRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRU=",
+          "transport_secrets": [
+            "PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0="
+          ]
+        },
+        {
+          "addresses": [
+            "10.66.0.5",
+            "10.9.0.5"
+          ],
+          "name": "d2",
+          "public_key": "FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhY=",
+          "transport_secrets": [
+            "Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4="
+          ]
+        }
+      ],
+      "enabled": true,
+      "exit": "main",
+      "exits": "all",
+      "groups": [
+        "office"
+      ],
+      "name": "alice",
+      "proxy_password": "proxy-password-of-alice-1234567890",
+      "quota_bytes": 5000000000,
+      "quota_period": "monthly"
+    },
+    {
+      "devices": [
+        {
+          "addresses": [
+            "10.66.0.3",
+            "10.9.0.3"
+          ],
+          "name": "d3",
+          "public_key": "FxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxc=",
+          "transport_secrets": [
+            "Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8="
+          ]
+        },
+        {
+          "addresses": [
+            "10.66.0.9",
+            "10.9.0.9"
+          ],
+          "name": "d5",
+          "public_key": "GRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRk=",
+          "transport_secrets": [
+            "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+          ]
+        }
+      ],
+      "enabled": true,
+      "exits": "all",
+      "expires_at": "2100-01-01T00:00:00Z",
+      "groups": [],
+      "name": "bob"
+    }
+  ],
+  "version": 1,
+  "xray": {
+    "inbounds": [
+      {
+        "clients": [
+          {
+            "secret": "00000000-0000-4000-8000-000000000001",
+            "user": "alice"
+          },
+          {
+            "secret": "00000000-0000-4000-8000-000000000002",
+            "user": "bob"
+          }
+        ],
+        "protocol": "vless",
+        "tag": "xr"
+      }
+    ]
+  }
+}

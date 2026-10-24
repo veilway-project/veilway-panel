@@ -1,5 +1,5 @@
 //! Pairing two nodes with a link, with the codes and the fingerprint of the protocol's pairing page. Everything pending lives in memory: a restart drops it, and a link is in the node's config only after the operator typed the other side's fingerprint.
-use crate::{app::App, crypto::now, http::{ok, Body, Ctx, Failure}, nodecfg};
+use crate::{app::{App, LOCAL}, crypto::now, http::{ok, Body, Ctx, Failure}, nodecfg};
 use axum::{extract::{Path, State}, http::StatusCode, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use ipnet::IpNet;
@@ -28,7 +28,7 @@ fn key32(text: &str, what: &str) -> Result<[u8; 32], Failure> {STANDARD.decode(t
 fn id_text(id: &[u8; 16]) -> String {URL_SAFE_NO_PAD.encode(id)}
 
 pub async fn list(State(app): State<Arc<App>>) -> Result<Response, Failure> {
-	let (status, body) = crate::node::request(&app.cfg.node_socket, "GET", "/v1/links", None, None).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
+	let (status, body) = crate::node::request(&app, LOCAL, "GET", "/v1/links", None, None).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
 	ok(&json!({"status": status, "links": serde_json::from_slice::<Value>(&body).ok().and_then(|value| value.get("links").cloned()).unwrap_or(Value::Null)}))
 }
 
@@ -48,7 +48,7 @@ pub struct Inbounds {pub inbounds: Vec<Inbound>}
 
 /// The node's inbounds with their public keys, which an offer needs. Only the public keys are read from the node's answer.
 pub async fn inbounds(State(app): State<Arc<App>>) -> Result<Response, Failure> {
-	let (status, body) = crate::node::request(&app.cfg.node_socket, "GET", "/v1/inbounds", None, None).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
+	let (status, body) = crate::node::request(&app, LOCAL, "GET", "/v1/inbounds", None, None).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
 	if status != 200 {return Err(Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", format!("the node answered {status} to the inbounds")))}
 	ok(&serde_json::from_slice::<Inbounds>(&body).map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", format!("the node's inbounds: {error}")))?)
 }
@@ -78,7 +78,7 @@ pub struct OfferIn {
 }
 
 pub async fn offer(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<OfferIn>) -> Result<Response, Failure> {
-	let (_, _, document) = nodecfg::running(&app).await?;
+	let (_, _, document) = nodecfg::running(&app, LOCAL).await?;
 	let found = document["inbounds"].as_array().into_iter().flatten().find(|inbound| inbound["tag"] == input.inbound.as_str());
 	let Some(found) = found.filter(|inbound| inbound["type"] == "veilway") else {return Err(Failure::bad("The node has no veilway inbound with that tag."))};
 	let direction = match input.direction.as_str() {"forward" => Direction::Forward, "reverse" => Direction::Reverse, _ => return Err(Failure::bad("direction is forward or reverse."))};
@@ -138,7 +138,7 @@ fn overlaps(offer: &Offer, document: &Value) -> bool {
 /// Step 2, read only: what an offer pasted here would make this node dial, for the operator to accept or decline.
 pub async fn paste(State(app): State<Arc<App>>, Body(input): Body<CodeIn>) -> Result<Response, Failure> {
 	let offer = Offer::parse(input.code.trim()).map_err(code_error)?;
-	let (_, _, document) = nodecfg::running(&app).await?;
+	let (_, _, document) = nodecfg::running(&app, LOCAL).await?;
 	let reverse = offer.direction == Direction::Reverse;
 	ok(&json!({"id": id_text(&offer.id), "name": offer.name, "direction": offer.direction.word(), "half": if reverse {"exit"} else {"entry"}, "expires_at": offer.expires_at, "expired": offer.expired(now() as u64), "overlaps_pool": overlaps(&offer, &document), "dials": offer.dials().iter().map(|(address, private)| json!({"address": address.to_string(), "private": private})).collect::<Vec<_>>(), "transports": serde_json::from_str::<Value>(&pairing::transports_json(&offer.transports)).unwrap_or_default(), "ws_warning": offer.transports.iter().any(|transport| matches!(transport, veilway_proto::subscription::payload::Transport::Ws(_)))}))
 }
@@ -156,7 +156,7 @@ pub struct PasteIn {
 pub async fn paste_answer(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<PasteIn>) -> Result<Response, Failure> {
 	if !input.accept {return Err(Failure::bad("The offer is answered only after its operator accepted the addresses."))}
 	let offer = Offer::parse(input.code.trim()).map_err(code_error)?;
-	let (_, _, document) = nodecfg::running(&app).await?;
+	let (_, _, document) = nodecfg::running(&app, LOCAL).await?;
 	if overlaps(&offer, &document) {return Err(Failure::conflict("An address of this link lies inside an inbound pool of this node. The other operator has to take the link's addresses from a pool this node does not use."))}
 	if input.tag.is_empty() || input.tag.len() > 64 || document["links"].as_array().into_iter().flatten().any(|link| link["tag"] == input.tag.as_str()) {return Err(Failure::conflict("The link tag is empty, too long, or already in the config."))}
 	let (code, id, shown) = {
@@ -209,8 +209,8 @@ pub async fn confirm(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 	let mut entry = json!({"tag": meta.tag, "id": id_text(&offer.id), "direction": offer.direction.word(), "addresses": {"dialler": texts(&offer.dialler)}, "mtu": offer.mtu, "transport_secret": STANDARD.encode(paired.secret.expose())});
 	if !offer.listener.is_empty() {entry["addresses"]["listener"] = json!(texts(&offer.listener))}
 	let reverse = offer.direction == Direction::Reverse;
-	let _turn = app.node_lock.lock().await;
-	let (_, _, mut document) = nodecfg::running(&app).await?;
+	let _turn = app.turn(LOCAL).await;
+	let (_, _, mut document) = nodecfg::running(&app, LOCAL).await?;
 	if let Some(inbound) = &meta.inbound {(entry["inbound"], entry["public_key"]) = (json!(inbound), json!(STANDARD.encode(paired.public_key)));}
 	if let Some(private) = &paired.private_key {
 		let mut peer = json!({"inbound_public_key": STANDARD.encode(offer.inbound_public_key), "transports": serde_json::from_str::<Value>(&pairing::transports_json(&offer.transports)).unwrap_or_default()});
@@ -221,7 +221,7 @@ pub async fn confirm(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 	if meta.listener != reverse {entry["exits"] = json!([document["routing"]["default"]])}
 	let links = document.as_object_mut().map(|document| document.entry("links").or_insert_with(|| json!([])));
 	if let Some(Value::Array(links)) = links {links.push(entry)}
-	let applied = nodecfg::apply(&app, &ctx, document, &input.revision, &meta.tag).await?;
+	let applied = nodecfg::apply(&app, LOCAL, &ctx, document, &input.revision, &meta.tag).await?;
 	app.db.audit(&ctx.actor, &ctx.source, "link.paired", &meta.tag, "").await;
 	ok(&json!({"tag": meta.tag, "applied": applied}))
 }

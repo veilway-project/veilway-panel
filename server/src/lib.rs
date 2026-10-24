@@ -27,7 +27,7 @@ pub mod via;
 pub mod web;
 pub mod xray;
 
-use app::{App, Limiter, Settings, Signing};
+use app::{App, Limiter, NodeState, Settings, Signing, LOCAL};
 use axum::{extract::{Request, State}, http::{StatusCode, header::{CACHE_CONTROL, CONTENT_SECURITY_POLICY, REFERRER_POLICY, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS}, HeaderName, HeaderValue, Method}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{any, get}, Router};
 use auth::{Access, Guard};
 use config::Config;
@@ -84,16 +84,21 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 		app::load_lookups(connection, &table);
 		keys
 	}).map_err(|error| error.to_string())?;
+	let nodes: Vec<i64> = db.blocking(|connection| connection.prepare("select id from nodes order by id").and_then(|mut statement| statement.query_map([], |row| row.get(0))?.collect())).map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 	let token = setup_needed.then(|| base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<20>()));
 	if let Some(token) = &token {println!("Setup token (one time): {token}\nPOST it with a username and password to {}/api/setup", cfg.prefix);}
-	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), gateway: Mutex::new(gateway), lookups, refusals: Mutex::new(HashMap::new()), names: Default::default(), limits: Limiter::default(), sub_limits: Limiter::default(), setup_token: Mutex::new(token), node_lock: tokio::sync::Mutex::new(()), last_sync: Mutex::new(None), dirty: Arc::new(AtomicBool::new(true)), settings: Arc::new(RwLock::new(settings)), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), previews: Mutex::new(upstreams::Previews::default()), mirrors_seen: Default::default(), publishing: tokio::sync::Mutex::new(())}))
+	Ok(Arc::new(App {cfg, db, keys, signing: Mutex::new(signing), gateway: Mutex::new(gateway), lookups, refusals: Mutex::new(HashMap::new()), names: Default::default(), limits: Limiter::default(), sub_limits: Limiter::default(), setup_token: Mutex::new(token), node_states: Mutex::new(nodes.into_iter().map(|id| (id, Arc::new(NodeState {dirty: Arc::new(AtomicBool::new(true)), ..Default::default()}))).collect()), settings: Arc::new(RwLock::new(settings)), not_found_page: Mutex::new(not_found), live: Mutex::new(None), restart: tokio::sync::Notify::new(), restoring: AtomicBool::new(false), start_id: base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, crypto::random::<8>()), update: Mutex::new(Default::default()), pairing: Mutex::new(links::Pairing::default()), previews: Mutex::new(upstreams::Previews::default()), mirrors_seen: Default::default(), publishing: tokio::sync::Mutex::new(())}))
 }
 
 /// What the upkeep loop remembers between passes.
 #[derive(Default)]
-pub struct Upkeep {pub cleaned_at: i64, pub retry_at: i64, pub wait: i64, pub polled_at: i64}
+pub struct Upkeep {pub cleaned_at: i64, pub polled_at: i64, pub nodes: HashMap<i64, Retry>}
 
-/// Runs upkeep every few seconds. The clean-up is hourly; a failed node push is retried, waiting twice as long each time up to ten minutes.
+/// When a node whose push failed is tried again, and how long the wait before it was.
+#[derive(Default)]
+pub struct Retry {pub retry_at: i64, pub wait: i64}
+
+/// Runs upkeep every few seconds. The clean-up is hourly; a failed node push is retried, waiting twice as long each time up to ten minutes, for each node on its own.
 pub fn spawn_upkeep(app: Arc<App>) {
 	tokio::spawn(async move {
 		let mut state = Upkeep::default();
@@ -119,7 +124,7 @@ pub async fn upkeep_once(app: &Arc<App>, state: &mut Upkeep) {
 		}).await {
 			Ok(Ok(gone)) if gone > 0 => {
 				tracing::info!("{gone} devices that had not refreshed for {idle} days were removed");
-				app.dirty.store(true, Ordering::Relaxed);
+				for node in app.nodes() {app.node(node).dirty.store(true, Ordering::Relaxed);}
 			}
 			Ok(Err(error)) => tracing::warn!("idle devices could not be removed: {error}"),
 			Ok(_) => {}
@@ -146,14 +151,17 @@ pub async fn upkeep_once(app: &Arc<App>, state: &mut Upkeep) {
 	}
 	if at - state.polled_at >= stats::POLL {
 		state.polled_at = at;
-		stats::poll(app).await;
+		stats::poll(app, LOCAL).await;
 	}
 	if statics::due(app, at).await {
 		if let Err(error) = statics::round(app, at).await {tracing::warn!("static mirrors: no round was published: {error}")}
 	}
-	if app.dirty.load(Ordering::Relaxed) && at >= state.retry_at {
-		state.wait = if node::sync(app).await.is_ok() {0} else {(state.wait * 2).clamp(5, 600)};
-		state.retry_at = at + state.wait;
+	for node in app.nodes() {
+		let retry = state.nodes.entry(node.0).or_default();
+		if app.node(node).dirty.load(Ordering::Relaxed) && at >= retry.retry_at {
+			retry.wait = if node::sync(app, node).await.is_ok() {0} else {(retry.wait * 2).clamp(5, 600)};
+			retry.retry_at = at + retry.wait;
+		}
 	}
 }
 

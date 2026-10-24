@@ -1,0 +1,424 @@
+[
+  {
+    "device": 1,
+    "payload": {
+      "devices": [
+        {
+          "enrolled_at": 1700000201,
+          "name": "device 1",
+          "pending": false,
+          "this": true
+        },
+        {
+          "enrolled_at": 1700000202,
+          "name": "device 2",
+          "pending": false,
+          "this": false
+        }
+      ],
+      "expires_at": 0,
+      "issued_at": 0,
+      "profiles": [
+        {
+          "device": {
+            "addresses": [
+              "10.66.0.2"
+            ],
+            "public_key": "FRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRU=",
+            "transport_secrets": [
+              "PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0="
+            ]
+          },
+          "gateways": [
+            "10.66.0.1"
+          ],
+          "id": "main",
+          "inbound_public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+          "mtu": 1420,
+          "name": "Main",
+          "transports": [
+            {
+              "endpoints": [
+                "192.0.2.10:51820"
+              ],
+              "type": "udp"
+            },
+            {
+              "endpoints": [
+                "192.0.2.10:51821"
+              ],
+              "type": "udp-obfs"
+            }
+          ],
+          "type": "veilway"
+        },
+        {
+          "device": {
+            "addresses": [
+              "10.9.0.2"
+            ],
+            "public_key": "FRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRU=",
+            "transport_secrets": [
+              "PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0="
+            ]
+          },
+          "gateways": [
+            "10.9.0.1"
+          ],
+          "id": "second",
+          "inbound_public_key": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=",
+          "mtu": 1420,
+          "name": "Second",
+          "transports": [
+            {
+              "endpoints": [
+                "192.0.2.10:51822"
+              ],
+              "type": "udp"
+            }
+          ],
+          "type": "veilway"
+        }
+      ],
+      "provider": {
+        "name": "Golden Net"
+      },
+      "serial": 0,
+      "signing_keys": [
+        "/RckOFqgx1tk+3jNYC+h2ZH96/drE8WO1wLqyDXp9hg="
+      ],
+      "subscription_id": "sub-alice",
+      "update_interval": 3600,
+      "usage": {
+        "device_limit": 3,
+        "expires_at": 0,
+        "period": "monthly",
+        "period_start": 0,
+        "quota_bytes": 5000000000,
+        "used_bytes": 1234
+      },
+      "v": 1
+    },
+    "user": "alice"
+  },
+  {
+    "device": 2,
+    "payload": {
+      "devices": [
+        {
+          "enrolled_at": 1700000201,
+          "name": "device 1",
+          "pending": false,
+          "this": false
+        },
+        {
+          "enrolled_at": 1700000202,
+          "name": "device 2",
+          "pending": false,
+          "this": true
+        }
+      ],
+      "expires_at": 0,
+      "issued_at": 0,
+      "profiles": [
+        {
+          "device": {
+            "addresses": [
+              "10.66.0.5"
+            ],
+            "private_key": "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio=",
+            "public_key": "FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhY=",
+            "transport_secrets": [
+              "Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4="
+            ]
+          },
+          "gateways": [
+            "10.66.0.1"
+          ],
+          "id": "main",
+          "inbound_public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+          "mtu": 1420,
+          "name": "Main",
+          "transports": [
+            {
+              "endpoints": [
+                "192.0.2.10:51820"
+              ],
+              "type": "udp"
+            },
+            {
+              "endpoints": [
+                "192.0.2.10:51821"
+              ],
+              "type": "udp-obfs"
+            }
+          ],
+          "type": "veilway"
+        },
+        {
+          "device": {
+            "addresses": [
+              "10.9.0.5"
+            ],
+            "private_key": "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio=",
+            "public_key": "FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhY=",
+            "transport_secrets": [
+              "Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4+Pj4="
+            ]
+          },
+          "gateways": [
+            "10.9.0.1"
+          ],
+          "id": "second",
+          "inbound_public_key": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=",
+          "mtu": 1420,
+          "name": "Second",
+          "transports": [
+            {
+              "endpoints": [
+                "192.0.2.10:51822"
+              ],
+              "type": "udp"
+            }
+          ],
+          "type": "veilway"
+        }
+      ],
+      "provider": {
+        "name": "Golden Net"
+      },
+      "serial": 0,
+      "signing_keys": [
+        "/RckOFqgx1tk+3jNYC+h2ZH96/drE8WO1wLqyDXp9hg="
+      ],
+      "subscription_id": "sub-alice",
+      "update_interval": 3600,
+      "usage": {
+        "device_limit": 3,
+        "expires_at": 0,
+        "period": "monthly",
+        "period_start": 0,
+        "quota_bytes": 5000000000,
+        "used_bytes": 1234
+      },
+      "v": 1
+    },
+    "user": "alice"
+  },
+  {
+    "device": 3,
+    "payload": {
+      "devices": [
+        {
+          "enrolled_at": 1700000203,
+          "name": "device 3",
+          "pending": false,
+          "this": true
+        },
+        {
+          "enrolled_at": 4102444800,
+          "name": "device 4",
+          "pending": true,
+          "this": false
+        },
+        {
+          "enrolled_at": 1700000205,
+          "name": "device 5",
+          "pending": false,
+          "this": false
+        }
+      ],
+      "expires_at": 0,
+      "issued_at": 0,
+      "profiles": [
+        {
+          "device": {
+            "addresses": [
+              "10.66.0.3"
+            ],
+            "public_key": "FxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxc=",
+            "transport_secrets": [
+              "Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8="
+            ]
+          },
+          "gateways": [
+            "10.66.0.1"
+          ],
+          "id": "main",
+          "inbound_public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+          "mtu": 1420,
+          "name": "Main",
+          "transports": [
+            {
+              "endpoints": [
+                "192.0.2.10:51820"
+              ],
+              "type": "udp"
+            },
+            {
+              "endpoints": [
+                "192.0.2.10:51821"
+              ],
+              "type": "udp-obfs"
+            }
+          ],
+          "type": "veilway"
+        },
+        {
+          "device": {
+            "addresses": [
+              "10.9.0.3"
+            ],
+            "public_key": "FxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxc=",
+            "transport_secrets": [
+              "Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8/Pz8="
+            ]
+          },
+          "gateways": [
+            "10.9.0.1"
+          ],
+          "id": "second",
+          "inbound_public_key": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=",
+          "mtu": 1420,
+          "name": "Second",
+          "transports": [
+            {
+              "endpoints": [
+                "192.0.2.10:51822"
+              ],
+              "type": "udp"
+            }
+          ],
+          "type": "veilway"
+        }
+      ],
+      "provider": {
+        "name": "Golden Net"
+      },
+      "serial": 0,
+      "signing_keys": [
+        "/RckOFqgx1tk+3jNYC+h2ZH96/drE8WO1wLqyDXp9hg="
+      ],
+      "subscription_id": "sub-bob",
+      "update_interval": 3600,
+      "usage": {
+        "device_limit": 3,
+        "expires_at": 4102444800,
+        "period": "none",
+        "period_start": 0,
+        "quota_bytes": 0,
+        "used_bytes": 1234
+      },
+      "v": 1
+    },
+    "user": "bob"
+  },
+  {
+    "device": 5,
+    "payload": {
+      "devices": [
+        {
+          "enrolled_at": 1700000203,
+          "name": "device 3",
+          "pending": false,
+          "this": false
+        },
+        {
+          "enrolled_at": 4102444800,
+          "name": "device 4",
+          "pending": true,
+          "this": false
+        },
+        {
+          "enrolled_at": 1700000205,
+          "name": "device 5",
+          "pending": false,
+          "this": true
+        }
+      ],
+      "expires_at": 0,
+      "issued_at": 0,
+      "profiles": [
+        {
+          "device": {
+            "addresses": [
+              "10.66.0.9"
+            ],
+            "public_key": "GRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRk=",
+            "transport_secrets": [
+              "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+            ]
+          },
+          "gateways": [
+            "10.66.0.1"
+          ],
+          "id": "main",
+          "inbound_public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+          "mtu": 1420,
+          "name": "Main",
+          "transports": [
+            {
+              "endpoints": [
+                "192.0.2.10:51820"
+              ],
+              "type": "udp"
+            },
+            {
+              "endpoints": [
+                "192.0.2.10:51821"
+              ],
+              "type": "udp-obfs"
+            }
+          ],
+          "type": "veilway"
+        },
+        {
+          "device": {
+            "addresses": [
+              "10.9.0.9"
+            ],
+            "public_key": "GRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRk=",
+            "transport_secrets": [
+              "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+            ]
+          },
+          "gateways": [
+            "10.9.0.1"
+          ],
+          "id": "second",
+          "inbound_public_key": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg=",
+          "mtu": 1420,
+          "name": "Second",
+          "transports": [
+            {
+              "endpoints": [
+                "192.0.2.10:51822"
+              ],
+              "type": "udp"
+            }
+          ],
+          "type": "veilway"
+        }
+      ],
+      "provider": {
+        "name": "Golden Net"
+      },
+      "serial": 0,
+      "signing_keys": [
+        "/RckOFqgx1tk+3jNYC+h2ZH96/drE8WO1wLqyDXp9hg="
+      ],
+      "subscription_id": "sub-bob",
+      "update_interval": 3600,
+      "usage": {
+        "device_limit": 3,
+        "expires_at": 4102444800,
+        "period": "none",
+        "period_start": 0,
+        "quota_bytes": 0,
+        "used_bytes": 1234
+      },
+      "v": 1
+    },
+    "user": "bob"
+  }
+]

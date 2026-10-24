@@ -13,16 +13,30 @@ create table settings (key text primary key, value text not null);
 create table users (id integer primary key, name text not null unique, enabled integer not null default 1, groups text not null default '[]', exits text not null default '\"all\"', default_exit text, quota_bytes integer, quota_period text, expires_at integer, device_limit integer not null, note text not null default '', created integer not null, record_id blob not null, sub_id text not null unique, token_lookup blob not null unique, token_copy blob, token_gen integer not null default 1, token_created integer not null, endpoint text, proxy_password blob);
 create table usage_buckets (res integer not null, at integer not null, kind text not null, name text not null, up integer not null default 0, down integer not null default 0, peak_up integer not null default 0, peak_down integer not null default 0, primary key (res, at, kind, name)) without rowid;
 create table counters (kind text not null, name text not null, up integer not null, down integer not null, primary key (kind, name)) without rowid;
-create table devices (id integer primary key, user_id integer not null references users(id) on delete cascade, name text not null, public_key text not null, secret_hash blob not null, address text not null unique, transport_secret blob not null, private_key blob, state text not null, token_gen integer not null, created integer not null, confirmed_at integer, last_seen integer, mirror_name blob, mirror_key blob, mirror_gen integer, last_serial integer not null default 0);
+create table devices (id integer primary key, user_id integer not null references users(id) on delete cascade, name text not null, public_key text not null, secret_hash blob not null, transport_secret blob not null, private_key blob, state text not null, token_gen integer not null, created integer not null, confirmed_at integer, last_seen integer, mirror_name blob, mirror_key blob, mirror_gen integer, last_serial integer not null default 0);
 create unique index devices_public_key on devices (public_key);
+create table nodes (id integer primary key, uid blob not null unique, name text not null unique, slug text not null unique, link_id text, place integer not null default 0, pool_v4 text not null, settings text not null default '{}', wanted_rev integer not null default 0, applied_rev integer not null default 0, config_rev text, last_seen integer, last_error text, version text, counted integer not null default 1, max_rate integer, created integer not null);
+create table device_addresses (node_id integer not null references nodes(id) on delete cascade, device_id integer not null references devices(id) on delete cascade, address text not null, added_rev integer not null default 0, primary key (node_id, device_id), unique (node_id, address)) without rowid;
 create table xray_inbounds (tag text primary key, protocol text not null, host text not null default '', created integer not null, server_key blob);
 create table xray_clients (tag text not null references xray_inbounds(tag) on delete cascade, user_id integer not null references users(id) on delete cascade, secret blob not null, primary key (tag, user_id)) without rowid;
 create table gateway_use (key_id integer not null, user_id integer not null references users(id) on delete cascade, first_at integer not null, last_at integer not null, primary key (key_id, user_id)) without rowid;
 create table endpoint_use (endpoint text not null, user_id integer not null references users(id) on delete cascade, last_at integer not null, primary key (endpoint, user_id)) without rowid;
+insert into nodes (id, uid, name, slug, pool_v4, created) values (1, randomblob(16), 'Node 1', 'node-1', '10.66.0.0/16', cast(strftime('%s', 'now') as integer));
 ";
 
 /// Steps from one version to the next, applied in order to a file older than the code. Entry `n` takes a file from version `n + 1` to `n + 2`. To add one, append its SQL here, update `SCHEMA` to the new layout (a fresh file gets `SCHEMA` directly) and never edit a step that has shipped. Each step runs in its own transaction together with its version bump.
-pub const MIGRATIONS: &[&str] = &["alter table users add column proxy_password blob"];
+/// Entry 1 makes node 1, the node on the panel's own socket, out of today's single node: its pool is the setting `pool_v4`, and every device keeps its address as the address it has at node 1. `devices` is rebuilt without `address`. The step is one transaction, so a failure leaves the file as it was.
+pub const MIGRATIONS: &[&str] = &["alter table users add column proxy_password blob", NODES];
+
+const NODES: &str = "create table if not exists nodes (id integer primary key, uid blob not null unique, name text not null unique, slug text not null unique, link_id text, place integer not null default 0, pool_v4 text not null, settings text not null default '{}', wanted_rev integer not null default 0, applied_rev integer not null default 0, config_rev text, last_seen integer, last_error text, version text, counted integer not null default 1, max_rate integer, created integer not null);
+insert or ignore into nodes (id, uid, name, slug, pool_v4, created) values (1, randomblob(16), 'Node 1', 'node-1', coalesce((select json_extract(value, '$.pool_v4') from settings where key = 'settings'), '10.66.0.0/16'), cast(strftime('%s', 'now') as integer));
+create table if not exists device_addresses (node_id integer not null references nodes(id) on delete cascade, device_id integer not null references devices(id) on delete cascade, address text not null, added_rev integer not null default 0, primary key (node_id, device_id), unique (node_id, address)) without rowid;
+insert or ignore into device_addresses (node_id, device_id, address) select 1, id, address from devices;
+create table devices_next (id integer primary key, user_id integer not null references users(id) on delete cascade, name text not null, public_key text not null, secret_hash blob not null, transport_secret blob not null, private_key blob, state text not null, token_gen integer not null, created integer not null, confirmed_at integer, last_seen integer, mirror_name blob, mirror_key blob, mirror_gen integer, last_serial integer not null default 0);
+insert into devices_next select id, user_id, name, public_key, secret_hash, transport_secret, private_key, state, token_gen, created, confirmed_at, last_seen, mirror_name, mirror_key, mirror_gen, last_serial from devices;
+drop table devices;
+alter table devices_next rename to devices;
+create unique index devices_public_key on devices (public_key);";
 /// The version this code writes, kept in the file's `user_version`. A file with a higher number was made by a newer panel and is refused, at start-up and in a restore.
 pub const SCHEMA_VERSION: i64 = 1 + MIGRATIONS.len() as i64;
 /// Calls waiting for the database thread. A call past this is refused at once, so a burst cannot grow the queue without bound.
@@ -120,6 +134,9 @@ mod tests {
 	use super::*;
 	use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 
+	/// The layout of version 2, the last one with a single node.
+	const SCHEMA_V2: &str = include_str!("../tests/golden/schema_v2.sql");
+
 	fn version(connection: &Connection) -> i64 {connection.query_row("pragma user_version", [], |row| row.get(0)).unwrap()}
 
 	fn memory() -> Connection {Connection::open_in_memory().unwrap()}
@@ -135,20 +152,52 @@ mod tests {
 	fn a_fresh_database_gets_the_schema_and_version_1() {
 		let mut connection = memory();
 		migrate(&mut connection, MIGRATIONS).unwrap();
-		assert_eq!(SCHEMA_VERSION, 2);
-		assert_eq!(version(&connection), 2);
-		assert_eq!(connection.query_row("select count(*) from sqlite_master where type = 'table'", [], |row| row.get::<_, i64>(0)).unwrap(), 13);
+		assert_eq!(SCHEMA_VERSION, 3);
+		assert_eq!(version(&connection), 3);
+		assert_eq!(connection.query_row("select count(*) from sqlite_master where type = 'table'", [], |row| row.get::<_, i64>(0)).unwrap(), 15);
+		assert_eq!(connection.query_row("select id, name, pool_v4 from nodes", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).unwrap(), (1, "Node 1".into(), "10.66.0.0/16".into()));
 	}
 
 	#[test]
 	fn a_migrated_file_has_the_schema_of_a_fresh_one() {
 		let (mut fresh, mut migrated) = (memory(), memory());
 		migrate(&mut fresh, MIGRATIONS).unwrap();
-		migrated.execute_batch(&SCHEMA.replace(", proxy_password blob", "")).unwrap();
+		migrated.execute_batch(&SCHEMA_V2.replace(", proxy_password blob", "")).unwrap();
 		migrated.pragma_update(None, "user_version", 1).unwrap();
 		migrate(&mut migrated, MIGRATIONS).unwrap();
-		let dump = |connection: &Connection| connection.prepare("select sql from sqlite_master where sql is not null order by name").unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+		// A renamed table is stored with its name in quotes.
+		let dump = |connection: &Connection| connection.prepare("select sql from sqlite_master where sql is not null order by name").unwrap().query_map([], |row| row.get::<_, String>(0).map(|sql| sql.replace('"', ""))).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
 		assert_eq!(dump(&migrated), dump(&fresh));
+	}
+
+	#[test]
+	fn the_move_to_nodes_makes_node_1_of_the_one_node_and_keeps_every_address() {
+		let mut connection = memory();
+		connection.execute_batch(SCHEMA_V2).unwrap();
+		connection.pragma_update(None, "user_version", 2).unwrap();
+		connection.execute("insert into settings (key, value) values ('settings', '{\"pool_v4\": \"10.7.0.0/24\"}')", []).unwrap();
+		connection.execute("insert into users (id, name, device_limit, created, record_id, sub_id, token_lookup, token_created) values (1, 'a', 3, 1, x'00', 's', x'01', 1)", []).unwrap();
+		for (id, address) in [(1, "10.7.0.2"), (2, "10.7.0.9")] {connection.execute("insert into devices (id, user_id, name, public_key, secret_hash, address, transport_secret, state, token_gen, created) values (?, 1, 'd', ?, x'00', ?, x'00', 'enrolled', 1, 1)", params![id, format!("key{id}"), address]).unwrap();}
+		migrate(&mut connection, MIGRATIONS).unwrap();
+		assert_eq!(version(&connection), 3);
+		assert_eq!(connection.query_row("select id, pool_v4, link_id, place, counted from nodes", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?))).unwrap(), (1, "10.7.0.0/24".into(), None, 0, 1));
+		let addresses: Vec<(i64, i64, String)> = connection.prepare("select node_id, device_id, address from device_addresses order by device_id").unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap().collect::<Result<_, _>>().unwrap();
+		assert_eq!(addresses, vec![(1, 1, "10.7.0.2".to_string()), (1, 2, "10.7.0.9".to_string())]);
+		assert_eq!(connection.query_row("select count(*) from pragma_table_info('devices') where name = 'address'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+		assert_eq!(connection.query_row("select count(*), min(public_key) from devices", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))).unwrap(), (2, "key1".into()));
+		connection.execute("delete from devices where id = 1", []).unwrap();
+		assert_eq!(connection.query_row("select count(*) from device_addresses", [], |row| row.get::<_, i64>(0)).unwrap(), 1, "an address goes with its device");
+		migrate(&mut connection, MIGRATIONS).unwrap();
+		assert_eq!(connection.query_row("select count(*) from nodes", [], |row| row.get::<_, i64>(0)).unwrap(), 1, "a second run changes nothing");
+	}
+
+	#[test]
+	fn a_file_without_settings_gets_the_default_pool_at_node_1() {
+		let mut connection = memory();
+		connection.execute_batch(SCHEMA_V2).unwrap();
+		connection.pragma_update(None, "user_version", 2).unwrap();
+		migrate(&mut connection, MIGRATIONS).unwrap();
+		assert_eq!(connection.query_row("select pool_v4 from nodes where id = 1", [], |row| row.get::<_, String>(0)).unwrap(), "10.66.0.0/16");
 	}
 
 	#[test]

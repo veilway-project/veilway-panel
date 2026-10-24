@@ -1,0 +1,70 @@
+{
+  "revision": "rev1",
+  "templates": [
+    {
+      "inbound": "Main",
+      "missing": [
+        "inbound_public_key"
+      ],
+      "overridden": [],
+      "pin": null,
+      "profile": {
+        "gateways": [
+          "10.66.0.1"
+        ],
+        "id": "main",
+        "mtu": 1390,
+        "name": "Main",
+        "rating_cap": "detectable",
+        "transports": [
+          {
+            "endpoints": [
+              "192.0.2.10:51820",
+              "198.51.100.7:51820"
+            ],
+            "type": "udp"
+          },
+          {
+            "endpoints": [
+              "192.0.2.10:51821",
+              "198.51.100.7:51821"
+            ],
+            "type": "udp-obfs"
+          }
+        ],
+        "type": "veilway"
+      },
+      "refused": [],
+      "trimmed": []
+    },
+    {
+      "inbound": "Second",
+      "missing": [
+        "inbound_public_key"
+      ],
+      "overridden": [],
+      "pin": null,
+      "profile": {
+        "gateways": [
+          "10.9.0.1"
+        ],
+        "id": "second",
+        "mtu": 1420,
+        "name": "Second",
+        "rating_cap": "detectable",
+        "transports": [
+          {
+            "endpoints": [
+              "192.0.2.10:51822",
+              "198.51.100.7:51822"
+            ],
+            "type": "udp"
+          }
+        ],
+        "type": "veilway"
+      },
+      "refused": [],
+      "trimmed": []
+    }
+  ]
+}

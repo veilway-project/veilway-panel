@@ -1,0 +1,77 @@
+{
+  "users": [
+    {
+      "created": 1700000001,
+      "device_limit": 3,
+      "devices": 2,
+      "enabled": true,
+      "endpoint": null,
+      "exit": "main",
+      "exits": "all",
+      "expires_at": null,
+      "groups": [
+        "office"
+      ],
+      "id": 1,
+      "name": "alice",
+      "node": {
+        "down_bytes": 1034,
+        "name": "alice",
+        "quota_bytes": 5000000000,
+        "up_bytes": 200,
+        "used_bytes": 1234
+      },
+      "note": "",
+      "pending_devices": 0,
+      "proxy_login": true,
+      "quota_bytes": 5000000000,
+      "quota_period": "monthly",
+      "subscription_id": "sub-alice"
+    },
+    {
+      "created": 1700000002,
+      "device_limit": 3,
+      "devices": 3,
+      "enabled": true,
+      "endpoint": null,
+      "exit": null,
+      "exits": "all",
+      "expires_at": 4102444800,
+      "groups": [],
+      "id": 2,
+      "name": "bob",
+      "node": {
+        "down_bytes": 4,
+        "name": "bob",
+        "up_bytes": 3,
+        "used_bytes": 7
+      },
+      "note": "",
+      "pending_devices": 1,
+      "proxy_login": false,
+      "quota_bytes": null,
+      "quota_period": null,
+      "subscription_id": "sub-bob"
+    },
+    {
+      "created": 1700000003,
+      "device_limit": 3,
+      "devices": 0,
+      "enabled": false,
+      "endpoint": null,
+      "exit": null,
+      "exits": "all",
+      "expires_at": null,
+      "groups": [],
+      "id": 3,
+      "name": "carol",
+      "node": null,
+      "note": "",
+      "pending_devices": 0,
+      "proxy_login": false,
+      "quota_bytes": null,
+      "quota_period": null,
+      "subscription_id": "sub-carol"
+    }
+  ]
+}

@@ -1,0 +1,152 @@
+[
+  {
+    "devices": {
+      "devices": [
+        {
+          "address": "10.66.0.2",
+          "confirmed_at": 1700000201,
+          "created": 1700000101,
+          "id": 1,
+          "key_origin": "device",
+          "last_seen": 1700000300,
+          "name": "device 1",
+          "public_key": "FRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRUVFRU=",
+          "state": "enrolled",
+          "token_gen": 1
+        },
+        {
+          "address": "10.66.0.5",
+          "confirmed_at": 1700000202,
+          "created": 1700000102,
+          "id": 2,
+          "key_origin": "panel",
+          "last_seen": null,
+          "name": "device 2",
+          "public_key": "FhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhY=",
+          "state": "enrolled",
+          "token_gen": 1
+        }
+      ]
+    },
+    "user": {
+      "created": 1700000001,
+      "device_limit": 3,
+      "devices": 2,
+      "enabled": true,
+      "endpoint": null,
+      "exit": "main",
+      "exits": "all",
+      "expires_at": null,
+      "groups": [
+        "office"
+      ],
+      "id": 1,
+      "name": "alice",
+      "node": {
+        "down_bytes": 1034,
+        "name": "alice",
+        "quota_bytes": 5000000000,
+        "up_bytes": 200,
+        "used_bytes": 1234
+      },
+      "note": "",
+      "pending_devices": 0,
+      "proxy_login": true,
+      "quota_bytes": 5000000000,
+      "quota_period": "monthly",
+      "subscription_id": "sub-alice"
+    }
+  },
+  {
+    "devices": {
+      "devices": [
+        {
+          "address": "10.66.0.3",
+          "confirmed_at": 1700000203,
+          "created": 1700000103,
+          "id": 3,
+          "key_origin": "device",
+          "last_seen": null,
+          "name": "device 3",
+          "public_key": "FxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxc=",
+          "state": "enrolled",
+          "token_gen": 1
+        },
+        {
+          "address": "10.66.0.4",
+          "confirmed_at": null,
+          "created": 4102444800,
+          "id": 4,
+          "key_origin": "device",
+          "last_seen": null,
+          "name": "device 4",
+          "public_key": "GBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBg=",
+          "state": "pending",
+          "token_gen": 1
+        },
+        {
+          "address": "10.66.0.9",
+          "confirmed_at": 1700000205,
+          "created": 1700000105,
+          "id": 5,
+          "key_origin": "device",
+          "last_seen": null,
+          "name": "device 5",
+          "public_key": "GRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRk=",
+          "state": "enrolled",
+          "token_gen": 1
+        }
+      ]
+    },
+    "user": {
+      "created": 1700000002,
+      "device_limit": 3,
+      "devices": 3,
+      "enabled": true,
+      "endpoint": null,
+      "exit": null,
+      "exits": "all",
+      "expires_at": 4102444800,
+      "groups": [],
+      "id": 2,
+      "name": "bob",
+      "node": {
+        "down_bytes": 4,
+        "name": "bob",
+        "up_bytes": 3,
+        "used_bytes": 7
+      },
+      "note": "",
+      "pending_devices": 1,
+      "proxy_login": false,
+      "quota_bytes": null,
+      "quota_period": null,
+      "subscription_id": "sub-bob"
+    }
+  },
+  {
+    "devices": {
+      "devices": []
+    },
+    "user": {
+      "created": 1700000003,
+      "device_limit": 3,
+      "devices": 0,
+      "enabled": false,
+      "endpoint": null,
+      "exit": null,
+      "exits": "all",
+      "expires_at": null,
+      "groups": [],
+      "id": 3,
+      "name": "carol",
+      "node": null,
+      "note": "",
+      "pending_devices": 0,
+      "proxy_login": false,
+      "quota_bytes": null,
+      "quota_period": null,
+      "subscription_id": "sub-carol"
+    }
+  }
+]
