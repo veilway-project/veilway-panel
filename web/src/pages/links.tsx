@@ -6,7 +6,7 @@ import {SectionReview, useRunning} from "./apply.tsx";
 import {loadRunning, viaProblem} from "./config.tsx";
 import {TunnelCards, TunnelPreset} from "./tunnels.tsx";
 
-type Compare = {id: string, fingerprint: string, name: string};
+export type Compare = {id: string, fingerprint: string, name: string};
 type Side = "entry" | "exit";
 // A link as the config holds it. Keys, secrets and transports are the pairing's and are kept as they are.
 type LinkConfig = {tag: string, direction: string, inbound?: string, peer?: unknown, enabled?: boolean, exit?: string, exits?: string[], allow_private?: boolean, max_flows?: number, quota_bytes?: number, quota_period?: string, expires_at?: string, mtu?: number, [key: string]: unknown};
@@ -155,10 +155,10 @@ type Picked = {type?: string, path?: string, endpoints?: string[], candidates?: 
 const linkRefusal = (transport: Picked): "links.pick.refusedType" | "links.pick.refusedEch" | "links.pick.refusedSelfSigned" | null => !LINK_TYPES.includes(transport.type ?? "") ? "links.pick.refusedType" : (transport.candidates ?? []).some(candidate => candidate.ech) ? "links.pick.refusedEch" : (transport.candidates ?? []).some(candidate => candidate.self_signed) ? "links.pick.refusedSelfSigned" : null;
 
 // Step 1 on the node that offers: the terms the other node will see, made into a code that holds no secret.
-function OfferFlow({onCompare, onClose, fixed}: {onCompare: (pairing: Compare) => void, onClose: () => void, fixed?: string}) {
+export function OfferFlow({onCompare, onClose, fixed, managed: managedStart}: {onCompare: (pairing: Compare) => void, onClose: () => void, fixed?: string, managed?: boolean}) {
 	const {t, time} = useP(), guard = useGuard(), running = useLoad(loadRunning, []), derived = useLoad(() => api("get", "/profiles/derived") as Promise<{templates: Template[]}>, []), nodeInbounds = useLoad(() => api("get", "/links/inbounds") as Promise<{inbounds: {tag: string, public_key: string, transport_public_key: string | null}[]}>, []);
 	const inbounds = ((running.data?.document.inbounds ?? []) as {tag: string, type: string}[]).filter(inbound => inbound.type === "veilway").map(inbound => inbound.tag);
-	const [inbound, setInbound] = useState(""), [tag, setTag] = useState(""), [name, setName] = useState(""), [direction, setDirection] = useState(fixed ?? "forward"), [key, setKey] = useState(""), [transportKey, setTransportKey] = useState(""), [dialler, setDialler] = useState(""), [listener, setListener] = useState(""), [transports, setTransports] = useState(""), [minutes, setMinutes] = useState<number | "">(10);
+	const [inbound, setInbound] = useState(""), [tag, setTag] = useState(""), [name, setName] = useState(""), [direction, setDirection] = useState(fixed ?? "forward"), [key, setKey] = useState(""), [transportKey, setTransportKey] = useState(""), [dialler, setDialler] = useState(""), [listener, setListener] = useState(""), [transports, setTransports] = useState(""), [minutes, setMinutes] = useState<number | "">(10), [managed, setManaged] = useState(managedStart ?? false);
 	const [offered, setOffered] = useState<Picked[]>([]), [off, setOff] = useState<number[]>([]), [manual, setManual] = useState(false), [showJson, setShowJson] = useState(false);
 	const [made, setMade] = useState<{id: string, code: string, expires_at: number} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const reportedOf = (tagOf: string) => nodeInbounds.data?.inbounds.find(found => found.tag === tagOf);
@@ -171,7 +171,7 @@ function OfferFlow({onCompare, onClose, fixed}: {onCompare: (pairing: Compare) =
 		try { parsed = JSON.parse(transports || "[]"); } catch (failure) { return setError(new Error(t("error.json", {message: (failure as Error).message}))); }
 		setBusy(true);
 		try {
-			setMade(await guard(() => api("post", "/links/offers", {body: {tag: tag.trim(), inbound, direction, name: name.trim(), inbound_public_key: key.trim(), transport_public_key: transportKey.trim() || null, dialler: lines(dialler), listener: direction === "reverse" ? lines(listener) : [], transports: parsed, lifetime: minutes === "" ? null : minutes * 60}})) as typeof made);
+			setMade(await guard(() => api("post", "/links/offers", {body: {tag: tag.trim(), inbound, direction, name: name.trim(), inbound_public_key: key.trim(), transport_public_key: transportKey.trim() || null, dialler: lines(dialler), listener: direction === "reverse" || managed ? lines(listener) : [], managed, transports: parsed, lifetime: minutes === "" ? null : minutes * 60}})) as typeof made);
 		} catch (failure) {
 			setError(failure);
 		} finally {
@@ -196,7 +196,7 @@ function OfferFlow({onCompare, onClose, fixed}: {onCompare: (pairing: Compare) =
 			<TextField label={t("profiles.inboundKey")} hint={t("profiles.inboundKeyHint")} value={key} onChange={setKey} readOnly={Boolean(reportedOf(inbound)?.public_key)} technical required/>
 			<TextField label={t("links.transportKey")} hint={t("links.transportKeyHint")} value={transportKey} onChange={setTransportKey} readOnly={Boolean(reportedOf(inbound)?.transport_public_key)} technical optional/>
 			<LinesField label={t("links.dialler")} hint={t("links.diallerHint")} value={dialler} onChange={setDialler} rows={2}/>
-			{direction === "reverse" && <LinesField label={t("links.listener")} hint={t("links.listenerHint")} value={listener} onChange={setListener} rows={2}/>}
+			{(direction === "reverse" || managed) && <LinesField label={t("links.listener")} hint={t("links.listenerHint")} value={listener} onChange={setListener} rows={2}/>}
 			{offered.length > 0 && <Field label={t("links.transports")} hint={t("links.pick.hint")}>{ids => <div {...ids} role="group" className="p-offer-pick">
 				{offered.map((transport, k) => { const refusal = linkRefusal(transport), type = transport.type ?? "", list: (string | NonNullable<Picked["candidates"]>[number])[] = transport.endpoints ?? transport.candidates ?? [], first = list[0], address = typeof first === "string" ? first : first?.address ?? "", note = refusal ? t(refusal) : type in TYPE_NOTE ? t(TYPE_NOTE[type as keyof typeof TYPE_NOTE]) : "";
 					return <div key={k} className="p-offer-row" data-refused={refusal ? "" : undefined}>
@@ -210,9 +210,11 @@ function OfferFlow({onCompare, onClose, fixed}: {onCompare: (pairing: Compare) =
 			</div>}</Field>}
 			{offered.length > 0 && <Switch label={t("links.pick.json")} checked={showJson} onChange={setShowJson}/>}
 			{(offered.length === 0 || showJson) && <Field label={offered.length ? t("links.pick.jsonLabel") : t("links.transports")} hint={t("links.transportsHint")}>{ids => <textarea {...ids} className="vw-input vw-code p-textarea" dir="ltr" spellCheck={false} rows={6} value={transports} onChange={event => { setTransports(event.target.value); setManual(true); }}/>}</Field>}
+			<Switch label={t("links.managed")} hint={t("links.managedHint")} checked={managed} onChange={setManaged}/>
+			{managed && <Banner tone="warning" title={t("links.managedWarn")}>{t("links.managedWarnBody")}</Banner>}
 			<NumberField label={t("links.lifetime")} unit={t("subs.minutesUnit")} min={1} max={60} value={minutes} onChange={setMinutes}/>
 			<ErrorNote error={error}/>
-			<div className="p-cluster"><Button type="submit" variant="primary" disabled={busy || !inbound || (!manual && offered.length > 0 && kept === 0)}>{t("links.makeOffer")}</Button><Button variant="quiet" onClick={onClose}>{t("action.cancel")}</Button></div>
+			<div className="p-cluster"><Button type="submit" variant="primary" disabled={busy || !inbound || (managed && !lines(listener).length) || (!manual && offered.length > 0 && kept === 0)}>{t("links.makeOffer")}</Button><Button variant="quiet" onClick={onClose}>{t("action.cancel")}</Button></div>
 		</form>
 	</Glass>;
 }
@@ -231,11 +233,11 @@ function AnswerStep({id, onCompare, onClose, inline}: {id: string, onCompare: (p
 }
 
 // Step 2 on the node that was offered a link: first what it would dial, then the answer code once the operator agreed.
-function PasteFlow({onCompare, onClose, half}: {onCompare: (pairing: Compare) => void, onClose: () => void, half?: Side}) {
+export function PasteFlow({onCompare, onClose, half}: {onCompare: (pairing: Compare) => void, onClose: () => void, half?: Side}) {
 	const {t, date} = useP(), guard = useGuard(), [code, setCode] = useState(""), [seen, setSeen] = useState<Pasted | null>(null), [tag, setTag] = useState(""), [accept, setAccept] = useState(false);
 	const [answer, setAnswer] = useState<{id: string, answer: string, fingerprint: string} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const read = () => { setBusy(true); setError(null); void api("post", "/links/paste", {body: {code: code.trim()}}).then(found => setSeen(found as Pasted), setError).finally(() => setBusy(false)); };
-	const reply = () => { setBusy(true); setError(null); void guard(() => api("post", "/links/paste/answer", {body: {code: code.trim(), tag: tag.trim(), accept}})).then(found => setAnswer(found as typeof answer), setError).finally(() => setBusy(false)); };
+	const reply = () => { setBusy(true); setError(null); void guard(() => api("post", "/links/paste/answer", {body: {code: code.trim(), tag: tag.trim(), accept, managed: seen?.manage === "this_node"}})).then(found => setAnswer(found as typeof answer), setError).finally(() => setBusy(false)); };
 	if (answer) return <Glass className="p-panel p-form">
 		<h2 className="vw-h2">{t("links.answerMade")}</h2>
 		<Banner tone="warning" title={t("links.answerOnce")}/>
@@ -259,17 +261,19 @@ function PasteFlow({onCompare, onClose, half}: {onCompare: (pairing: Compare) =>
 				<ul className="p-transports">{seen.dials.map(d => <li key={d.address}><span className="vw-code">{d.address}</span>{d.private && <Mark tone="warning">{t("links.private")}</Mark>}</li>)}</ul>
 				<p className="vw-muted vw-small">{t("links.dialsBody", {types: seen.transports.map(tr => tr.type).join(", ")})}</p>
 			</div>
+			{seen.manage === "this_node" && <Banner tone="warning" title={t("links.pasteManages")}>{t("links.pasteManagesBody")}</Banner>}
+			{seen.manage === "other_node" && <Banner tone="danger" title={t("links.pasteManaged")}>{t("links.pasteManagedBody")}</Banner>}
 			{seen.ws_warning && <Banner tone="info" title={t("links.wsWarning")}>{t("links.wsWarningBody")}</Banner>}
 			<TextField label={t("links.tag")} hint={t("links.tagHint")} value={tag} onChange={value => setTag(value.toLowerCase())} technical required/>
 			<Checkbox label={t("links.accept")} checked={accept} onChange={setAccept}/>
 			<ErrorNote error={error}/>
-			<div className="p-cluster"><Button type="submit" variant="primary" disabled={busy || !accept || !tag.trim() || seen.expired || seen.overlaps_pool || (half !== undefined && seen.half !== half)}>{t("links.answer")}</Button><Button variant="quiet" onClick={onClose}>{t("action.cancel")}</Button></div>
+			<div className="p-cluster"><Button type="submit" variant="primary" disabled={busy || !accept || !tag.trim() || seen.expired || seen.overlaps_pool || seen.manage === "other_node" || (half !== undefined && seen.half !== half)}>{t("links.answer")}</Button><Button variant="quiet" onClick={onClose}>{t("action.cancel")}</Button></div>
 		</form>}
 	</Glass>;
 }
 
 // The last step on both nodes. Each operator reads their own eight groups aloud and types the other side's: a code changed on its way gives two fingerprints that do not match. The groups are hexadecimal and read left to right in both languages.
-function Fingerprints({pairing, onClose}: {pairing: Compare, onClose: (tag?: string) => void}) {
+export function Fingerprints({pairing, onClose}: {pairing: Compare, onClose: (tag?: string) => void}) {
 	const {t, number} = useP(), guard = useGuard(), toast = useToast(), say = useSay(), mine = pairing.fingerprint.split(" "), [typed, setTyped] = useState<string[]>(Array(8).fill("")), boxes = useRef<(HTMLInputElement | null)[]>([]);
 	const [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const full = typed.every(group => /^[0-9a-f]{4}$/.test(group)), own = full && typed.join(" ") === pairing.fingerprint;

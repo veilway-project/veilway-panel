@@ -1,7 +1,8 @@
-import {Banner, Button, Checkbox, ConfirmDialog, DataTable, Dialog, Glass, Icon, IconButton, SecretField, StatRow, StatTile, StateBlock, TextField, useToast} from "@veilway/ui";
+import {Banner, Button, Checkbox, ConfirmDialog, DataTable, Dialog, Glass, Icon, IconButton, RadioGroup, SecretField, StatRow, StatTile, StateBlock, TextField, useToast} from "@veilway/ui";
 import {useEffect, useState} from "react";
 import {api, type Device, type LinkView, type NodeState, type NodeUser, type UserPatch, type WireguardConfig, type XrayLink} from "../api.ts";
 import {Copyable, ErrorNote, Mark, NodeNote, Qr, useCopy, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {offline, useServers} from "../servers.tsx";
 import {useSettings} from "../settings.ts";
 import {EndpointPick, PlainNote} from "./endpoints.tsx";
 import {ProxyLogin} from "./proxy.tsx";
@@ -9,7 +10,7 @@ import {ExitPicker, type Exits, handoff, keptExits, keptFallback, useExits, useE
 import {XrayLinksDialog} from "./xray.tsx";
 
 export function UserPage({id}: {id: number}) {
-	const {t, date, time, bytes, number, percent} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings(), copy = useCopy();
+	const {t, date, time, bytes, number, percent} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings(), copy = useCopy(), {nodes} = useServers();
 	const page = useLoad(() => Promise.all([api("get", "/users/{id}", {params: {id}}), api("get", "/users/{id}/devices", {params: {id}}), api("get", "/users/{id}/subscription", {params: {id}}), api("get", "/users/{id}/endpoint", {params: {id}})]), [id]);
 	const [editing, setEditing] = useState(false), [dialog, setDialog] = useState<"delete" | "usage" | "link" | "device" | "xray" | "sealed" | null>(null), [removing, setRemoving] = useState<Device | null>(null);
 	const [totals, setTotals] = useState(false), [removeOld, setRemoveOld] = useState(false), [deviceName, setDeviceName] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [linkError, setLinkError] = useState<unknown>(null), [sealPass, setSealPass] = useState(""), [sealAgain, setSealAgain] = useState(""), [sealTried, setSealTried] = useState(false);
@@ -17,6 +18,7 @@ export function UserPage({id}: {id: number}) {
 	const [shown, setShown] = useState<{link: LinkView, once: boolean, fresh: boolean} | null>(() => { const made = handoff.current?.id === id ? handoff.current : null; handoff.current = null; return made && {link: made.link, once: settings?.show_links_once ?? false, fresh: true}; });
 	const [exported, setExported] = useState<{name: string, file: string, link?: string | null} | null>(null), [wireguard, setWireguard] = useState<{name: string, configs: WireguardConfig[]} | null>(null), [node, setNode] = useState<NodeState | null>(null), [xray, setXray] = useState<XrayLink[] | null>(null);
 	const nodeExits = useExits(), [exits, setExits] = useState<Exits | null>(null), [exitsTried, setExitsTried] = useState(false), [exitsBusy, setExitsBusy] = useState(false), [exitsError, setExitsError] = useState<unknown>(null), [fallback, setFallback] = useState<string | null | undefined>(undefined), [ownEndpoint, setOwnEndpoint] = useState<string | undefined>(undefined), [endpointBusy, setEndpointBusy] = useState(false), [endpointError, setEndpointError] = useState<unknown>(null);
+	const [servers, setServers] = useState<number[] | null | undefined>(undefined), [serversBusy, setServersBusy] = useState(false), [serversError, setServersError] = useState<unknown>(null);
 	useEffect(() => { if (shown) document.getElementById("link-title")?.scrollIntoView({block: "nearest"}); }, [shown]);
 	if (page.error && !page.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={page.reload}>{t("action.retry")}</Button>}>{say(page.error)}</StateBlock>;
 	if (!page.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
@@ -92,7 +94,22 @@ export function UserPage({id}: {id: number}) {
 			setEndpointBusy(false);
 		}
 	};
-	const total = usage?.traffic ? (usage.traffic.up_bytes ?? 0) + (usage.traffic.down_bytes ?? 0) : null, amount = usage?.used_bytes === undefined ? null : bytes(usage.used_bytes);
+	const total = usage?.traffic ? (usage.traffic.up_bytes ?? 0) + (usage.traffic.down_bytes ?? 0) : null, across = nodes.length > 1 ? user.usage ?? null : null, used = across ? across.total_bytes : usage?.used_bytes, amount = used === undefined ? null : bytes(used);
+	const mayUse = servers === undefined ? user.nodes ?? null : servers, mayChanged = JSON.stringify(mayUse && [...mayUse].sort()) !== JSON.stringify(user.nodes ? [...user.nodes].sort() : null), mayProblem = mayUse !== null && mayUse.length === 0 ? t("user.serversPick") : undefined;
+	const saveServers = async () => {
+		setServersBusy(true);
+		setServersError(null);
+		try {
+			setNode((await guard(() => api("patch", "/users/{id}", {params: {id}, body: {nodes: mayUse} as UserPatch}))).node);
+			setServers(undefined);
+			toast({tone: "success", title: t("user.serversSaved")});
+			page.reload();
+		} catch (failure) {
+			setServersError(failure);
+		} finally {
+			setServersBusy(false);
+		}
+	};
 	return <>
 		<header className="p-head">
 			<div>
@@ -114,9 +131,10 @@ export function UserPage({id}: {id: number}) {
 			<div className="p-stack">
 				<Glass className="p-panel">
 					<div className="p-sheet-head"><div><h2 className="vw-h2">{t("user.usage")}</h2><p>{usage?.period_start ? t("user.usageSince", {date: date(new Date(usage.period_start * 1000))}) : t("user.usageLabel")}</p></div></div>
+					{across?.cut && <Banner tone="danger" title={t("user.cut")}>{t("user.cutBody")}</Banner>}
 					{amount === null ? <p className="vw-muted">{t("users.usageUnknown")}</p> : <div className="p-big-usage">
-						<div><span className="vw-figure p-figure-big">{amount.value}</span><span className="vw-muted">{user.quota_bytes ? t("user.ofQuota", {unit: amount.unit, total: bytes(user.quota_bytes).text, percent: percent(usage!.used_bytes! / user.quota_bytes)}) : amount.unit + ". " + t("users.noLimit")}</span></div>
-						{user.quota_bytes ? <div className="vw-usage" data-level={usage!.used_bytes! >= user.quota_bytes ? "over" : usage!.used_bytes! / user.quota_bytes >= 0.8 ? "near" : "ok"}><div className="vw-meter" role="meter" aria-label={t("user.usageLabel")} aria-valuemin={0} aria-valuemax={user.quota_bytes} aria-valuenow={usage!.used_bytes}><span style={{inlineSize: Math.min(100, usage!.used_bytes! / user.quota_bytes * 100) + "%"}}/></div></div> : null}
+						<div><span className="vw-figure p-figure-big">{amount.value}</span><span className="vw-muted">{user.quota_bytes ? t("user.ofQuota", {unit: amount.unit, total: bytes(user.quota_bytes).text, percent: percent(used! / user.quota_bytes)}) : amount.unit + ". " + t("users.noLimit")}</span></div>
+						{user.quota_bytes ? <div className="vw-usage" data-level={used! >= user.quota_bytes ? "over" : used! / user.quota_bytes >= 0.8 ? "near" : "ok"}><div className="vw-meter" role="meter" aria-label={t("user.usageLabel")} aria-valuemin={0} aria-valuemax={user.quota_bytes} aria-valuenow={used}><span style={{inlineSize: Math.min(100, used! / user.quota_bytes * 100) + "%"}}/></div></div> : null}
 					</div>}
 					<div className="p-stat-sm"><StatRow>
 						<StatTile label={t("form.period")} value={t(`form.period.${(user.quota_period ?? "none") as "none"}`)}/>
@@ -124,6 +142,12 @@ export function UserPage({id}: {id: number}) {
 						{total !== null && <StatTile label={t("user.totalLabel")} value={bytes(total).text}/>}
 						<StatTile label={t("users.col.groups")} value={user.groups.length ? user.groups.join(", ") : t("common.none")}/>
 					</StatRow></div>
+					{across && <DataTable caption={t("user.perServer")} rows={across.nodes} rowKey={row => String(row.node)} columns={[
+						{id: "server", header: t("user.col.server"), cell: row => { const server = nodes.find(found => found.id === row.node); return <span className="p-user"><span>{row.node === 1 ? t("servers.this") : server?.name ?? "#" + row.node}</span>{server && offline(server) && <span>{t("servers.offline")}</span>}</span>; }},
+						{id: "used", header: t("user.col.used"), cell: row => <span className="vw-num">{bytes(row.used_bytes).text}</span>},
+						{id: "counted", header: t("user.col.counted"), cell: row => row.counted ? <Mark tone="success">{t("user.counted")}</Mark> : <Mark tone="muted" title={t("user.notCountedHint")}>{t("user.notCounted")}</Mark>}
+					]}/>}
+					{across && <p className="vw-small vw-muted">{t("user.totalNote", {count: across.nodes.filter(row => row.counted).length})}</p>}
 				</Glass>
 				<Glass className="p-panel">
 					<div className="p-sheet-head">
@@ -178,6 +202,14 @@ export function UserPage({id}: {id: number}) {
 					<div className="p-form-foot"><p>{t("user.resetNote")}</p><Button variant="danger" onClick={() => { setRemoveOld(false); open("link"); }}>{t("user.resetLink")}</Button></div>
 				</Glass>}
 				{shown && <ErrorNote error={linkError}/>}
+				{nodes.length > 1 && <Glass className="p-panel">
+					<div className="p-sheet-head"><div><h2 className="vw-h2">{t("user.servers")}</h2><p>{t("user.serversLead")}</p></div></div>
+					<RadioGroup label={t("user.servers")} value={mayUse === null ? "all" : "some"} onChange={value => setServers(value === "all" ? null : user.nodes ?? nodes.map(row => row.id))} options={[{value: "all", label: t("user.serversAll"), detail: t("user.serversAllDetail")}, {value: "some", label: t("user.serversSome"), detail: t("user.serversSomeDetail")}]}/>
+					{mayUse !== null && <ul className="p-row-list p-exit-list">{nodes.map(row => <li key={row.id}><label className="p-exit"><input type="checkbox" className="p-check" checked={mayUse.includes(row.id)} onChange={event => setServers(event.target.checked ? [...mayUse, row.id] : mayUse.filter(held => held !== row.id))}/><span className="p-row-text"><strong>{row.id === 1 ? t("servers.this") : row.name}</strong></span><span/></label></li>)}</ul>}
+					{mayProblem && <p className="p-exit-problem vw-small" role="alert">{mayProblem}</p>}
+					<ErrorNote error={serversError}/>
+					{mayChanged && <div className="p-form-foot"><Button variant="quiet" onClick={() => { setServers(undefined); setServersError(null); }}>{t("action.cancel")}</Button><Button variant="primary" disabled={serversBusy || mayProblem !== undefined} onClick={() => void saveServers()}>{t("user.serversSave")}</Button></div>}
+				</Glass>}
 				<Glass className="p-panel">
 					<div className="p-sheet-head"><div><h2 className="vw-h2">{t("exits.title")}</h2><p>{t("exits.lead")}</p></div></div>
 					<ExitPicker value={held} onChange={setExits} exits={nodeExits} problem={exitsTried ? exitsProblem : undefined} fallback={fallback === undefined ? user.exit : fallback} onFallback={setFallback}/>

@@ -4,6 +4,7 @@ import {api, ApiError, type Diff, type Report, type Running} from "../api.ts";
 import {check, type Issue, type Schema} from "../check.ts";
 import {Copyable, dnsName, ErrorNote, Issues, lines, LinesField, Mark, moved, PageHead, RowSwitch, useGuard, useLoad, useP, useReorder, useSay} from "../kit.tsx";
 import type {PanelKey} from "../locales/en.ts";
+import {ServerPicker, useServers} from "../servers.tsx";
 import {drawPreset, presetOf, ShapeFields, shapeProblems} from "../shape.tsx";
 import {type Access, PROXY_TYPES, ProxyFields, proxyProblems} from "./proxy.tsx";
 import {UpstreamsTab} from "./upstreams.tsx";
@@ -41,7 +42,8 @@ let schemaCache: Promise<Schema> | null = null;
 
 // The schema does not change while the panel runs, so every editor shares one copy.
 export const loadSchema = () => schemaCache ??= api("get", "/config/schema").then(schema => schema as Schema, error => { schemaCache = null; throw error; });
-export const loadRunning = () => api("get", "/config") as Promise<Running>;
+// Node 1 is read on the panel's own socket, any other server through its link.
+export const loadRunning = (server = 1) => (server === 1 ? api("get", "/config") : api("get", "/nodes/{id}/config", {params: {id: server}})) as Promise<Running>;
 const str = (value: unknown) => typeof value === "string" ? value : "";
 const list = (value: unknown) => Array.isArray(value) ? value as Item[] : [];
 // The reason a Through choice cannot be saved, read from the outbounds as they would be saved. `from` is the outbound that goes through, or empty for a link, which nothing can go back to. Mirrors `server/src/via.rs`.
@@ -72,13 +74,18 @@ export function useIssueText() {
 
 // Where devices connect: the node's own inbounds and the Xray add-on's, in one list. Each row says its type (what apps speak) apart from its transports (how the bytes travel).
 export function InboundsPage() {
-	const {t, number, bytes} = useP(), say = useSay(), toast = useToast(), config = useLoad(loadRunning, []), schema = useLoad(loadSchema, []), xray = useLoad(() => api("get", "/xray"), []), live = useLoad(() => api("get", "/stats/now"), []);
-	const counted = ((live.data as {proxies?: ProxyCounters[] | null} | null)?.proxies ?? []) as ProxyCounters[];
+	const {selected} = useServers();
+	return <Inbounds key={selected} server={selected}/>;
+}
+
+function Inbounds({server}: {server: number}) {
+	const {t, number, bytes} = useP(), say = useSay(), toast = useToast(), config = useLoad(() => loadRunning(server), []), schema = useLoad(loadSchema, []), xray = useLoad(() => server === 1 ? api("get", "/xray") : Promise.resolve(null), []), live = useLoad(() => api("get", "/stats/now"), []);
+	const counted = (server === 1 ? (live.data as {proxies?: ProxyCounters[] | null} | null)?.proxies ?? [] : []) as ProxyCounters[];
 	useEffect(() => { const timer = setInterval(live.reload, 10000); return () => clearInterval(timer); }, [live.reload]);
 	const [kind, setKind] = useState("all"), [json, setJson] = useState(false), [proposed, setProposed] = useState<unknown>(undefined), [editing, setEditing] = useState<{index: number | null} | null>(null), [adding, setAdding] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [moves, setMoves] = useState<string[]>([]), [remind, setRemind] = useState(false);
 	useEffect(() => { if (adding) document.getElementById("xray-form-title")?.scrollIntoView({block: "nearest"}); }, [adding]);
-	if (config.error && !config.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={config.reload}>{t("action.retry")}</Button>}>{say(config.error)}</StateBlock>;
-	if (!config.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
+	if (config.error && !config.data) return <><PageHead title={t("nav.inbounds")} lead={t("inbounds.lead")}/><ServerPicker/><StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={config.reload}>{t("action.retry")}</Button>}>{say(config.error)}</StateBlock></>;
+	if (!config.data) return <><PageHead title={t("nav.inbounds")} lead={t("inbounds.lead")}/><ServerPicker/><StateBlock kind="loading" title={t("common.loading")}/></>;
 	const running = config.data, items = list(running.document.inbounds), outbounds = list(running.document.outbounds).map(item => str(item.tag)).filter(Boolean);
 	const rows: Listed[] = [...items.map((item, index) => ({kind: item.type === "wireguard" ? "wireguard" as const : PROXY_TYPES.includes(str(item.type)) ? "proxy" as const : "veilway" as const, tag: str(item.tag), index, item})), ...(xray.data?.inbounds ?? []).map((row, index) => ({kind: "xray" as const, tag: row.tag, index, xray: row as XrayRow}))];
 	const shown = kind === "all" ? rows : rows.filter(row => row.kind === kind), count = (of: string) => rows.filter(row => row.kind === of).length;
@@ -90,6 +97,7 @@ export function InboundsPage() {
 			<Button onClick={() => setJson(!json)}>{t(json ? "inbounds.asList" : "inbounds.asJson")}</Button>
 			<Button variant="primary" icon="plus" onClick={() => setEditing({index: null})}>{t("config.add.inbounds")}</Button>
 		</PageHead>
+		<ServerPicker/>
 		<div className={adding ? "p-grid-main" : "p-stack"}>
 			<div className="p-stack">
 				{json ? <JsonEditor key={running.revision} section="inbounds" value={running.document.inbounds ?? []} schema={schema.data} onReview={propose}/> : <Glass className="p-panel">
@@ -107,12 +115,12 @@ export function InboundsPage() {
 				</Glass>}
 				{(remind || items.some(item => item.enabled === false || list(item.transports).some(tr => tr.enabled === false))) && <div className="vw-well p-note"><Icon name="info"/><p className="vw-small">{t("inbounds.publishNote")} <Button size="sm" variant="quiet" onClick={() => { location.hash = "#/profiles"; }}>{t("nav.profiles")}</Button></p></div>}
 				<p className="vw-muted vw-small">{t("config.reviewNote")}</p>
-				{xray.data && <XraySheet xray={xray.data} onAdd={() => setAdding(true)} onChanged={xray.reload}/>}
+				{server === 1 && xray.data && <XraySheet xray={xray.data} onAdd={() => setAdding(true)} onChanged={xray.reload}/>}
 			</div>
 			{adding && <XrayForm onClose={() => setAdding(false)} onDone={() => { setAdding(false); xray.reload(); }}/>}
 		</div>
 		{editing && <ItemForm section="inbounds" xray={xray.data?.installed === true} onXray={() => { setEditing(null); setAdding(true); }} hidden={proposed !== undefined} item={editing.index === null ? null : items[editing.index]!} taken={[...items.filter((_, i) => i !== editing.index).map(item => str(item.tag)), ...(xray.data?.inbounds ?? []).map(row => row.tag)]} outbounds={outbounds} kinds={Object.fromEntries(list(running.document.outbounds).map(item => [str(item.tag), str(item.type)]))} schema={schema.data} onSave={(item, notes) => propose(editing.index === null ? [...items, item] : items.map((old, i) => i === editing.index ? item : old), notes)} onClose={() => setEditing(null)}/>}
-		{proposed !== undefined && <Review section="inbounds" running={running} value={proposed} moves={moves} show={{kind: "inbounds", count: items.length, go: index => { setJson(false); setKind("all"); setProposed(undefined); requestAnimationFrame(() => { const row = document.querySelectorAll<HTMLElement>(".p-panel tbody tr")[index]; row?.scrollIntoView({block: "center"}); row?.querySelector<HTMLElement>("td:last-child button")?.focus(); }); }}} onClose={() => setProposed(undefined)} onDone={() => { setProposed(undefined); setEditing(null); setRemind(true); config.reload(); }}/>}
+		{proposed !== undefined && <Review server={server} section="inbounds" running={running} value={proposed} moves={moves} show={{kind: "inbounds", count: items.length, go: index => { setJson(false); setKind("all"); setProposed(undefined); requestAnimationFrame(() => { const row = document.querySelectorAll<HTMLElement>(".p-panel tbody tr")[index]; row?.scrollIntoView({block: "center"}); row?.querySelector<HTMLElement>("td:last-child button")?.focus(); }); }}} onClose={() => setProposed(undefined)} onDone={() => { setProposed(undefined); setEditing(null); setRemind(true); config.reload(); }}/>}
 	</>;
 }
 
@@ -128,10 +136,15 @@ export function RoutingPage({tab}: {tab: string}) {
 }
 
 function SectionTab({section}: {section: Exclude<Section, "inbounds">}) {
-	const {t} = useP(), say = useSay(), config = useLoad(loadRunning, []), schema = useLoad(loadSchema, []), xray = useLoad(() => section === "outbounds" ? api("get", "/xray") : Promise.resolve(null), [section]), live = useLoad(() => api("get", "/stats/now"), []), [json, setJson] = useState(false), [proposed, setProposed] = useState<unknown>(undefined), [editing, setEditing] = useState<{index: number | null} | null>(null), [moves, setMoves] = useState<string[]>([]);
+	const {selected} = useServers();
+	return <SectionBody key={selected} server={selected} section={section}/>;
+}
+
+function SectionBody({server, section}: {server: number, section: Exclude<Section, "inbounds">}) {
+	const {t} = useP(), say = useSay(), config = useLoad(() => loadRunning(server), []), schema = useLoad(loadSchema, []), xray = useLoad(() => section === "outbounds" && server === 1 ? api("get", "/xray") : Promise.resolve(null), [section]), live = useLoad(() => api("get", "/stats/now"), []), [json, setJson] = useState(false), [proposed, setProposed] = useState<unknown>(undefined), [editing, setEditing] = useState<{index: number | null} | null>(null), [moves, setMoves] = useState<string[]>([]);
 	useEffect(() => { const timer = setInterval(live.reload, 10000); return () => clearInterval(timer); }, [live.reload]);
-	if (config.error && !config.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={config.reload}>{t("action.retry")}</Button>}>{say(config.error)}</StateBlock>;
-	if (!config.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
+	if (config.error && !config.data) return <><ServerPicker/><StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={config.reload}>{t("action.retry")}</Button>}>{say(config.error)}</StateBlock></>;
+	if (!config.data) return <><ServerPicker/><StateBlock kind="loading" title={t("common.loading")}/></>;
 	const states = ((live.data as {rates?: {outbounds?: {name: string, down_reason?: string | null}[] | null}} | null)?.rates?.outbounds ?? []) as {name: string, down_reason?: string | null}[];
 	const running = config.data, value = running.document[section] ?? (section === "routing" ? {default: ""} : []), items = list(value), document = running.document;
 	const tags = (name: string) => list(document[name]).map(item => str(item.tag)).filter(Boolean);
@@ -140,6 +153,7 @@ function SectionTab({section}: {section: Exclude<Section, "inbounds">}) {
 	const remove = (index: number) => propose(items.filter((_, i) => i !== index));
 	const edit = (index: number | null) => setEditing({index});
 	return <div className="p-stack">
+		<ServerPicker/>
 		<div className="p-row"><p className="vw-muted p-lead">{t(`config.lead.${section}`)}</p><Segmented label={t("config.view")} value={json ? "json" : "list"} onChange={view => setJson(view === "json")} options={[{value: "list", label: t("config.view.list")}, {value: "json", label: t("config.view.json")}]}/></div>
 		{json ? <JsonEditor key={running.revision} section={section} value={value} schema={schema.data} onReview={propose}/>
 		: section === "routing" ? <Routing key={running.revision} reviewing={proposed !== undefined} routing={value as Item} exits={list(document.exits).filter(item => str(item.tag))} inbounds={tags("inbounds")} transports={RULE_TRANSPORTS.filter(kind => list(document.inbounds).some(inbound => PROXY_TYPES.includes(str(inbound.type)) ? ["socks5", "http"].includes(kind) && (inbound.type === "mixed" || inbound.type === kind) : list(inbound.transports).some(transport => transport.type === kind)))} links={tags("links")} onPropose={propose}/>
@@ -158,7 +172,7 @@ function SectionTab({section}: {section: Exclude<Section, "inbounds">}) {
 		</Glass>}
 		{section !== "routing" && <p className="vw-muted vw-small">{t("config.reviewNote")}</p>}
 		{editing && section !== "routing" && <ItemForm section={section} xray={xray.data?.installed !== false} hidden={proposed !== undefined} socks={list(document.outbounds).filter(item => item.type === "socks5").map(item => str(item.tag))} exits={list(document.exits)} chain={list(document.outbounds)} chained={viaChained(document)} item={editing.index === null ? null : items[editing.index]!} taken={items.filter((_, i) => i !== editing.index).map(item => str(item.tag))} outbounds={tags("outbounds")} schema={schema.data} onSave={item => propose(editing.index === null ? [...items, item] : items.map((old, i) => i === editing.index ? item : old))} onClose={() => setEditing(null)}/>}
-		{proposed !== undefined && <Review section={section} running={running} value={proposed} moves={moves} show={{kind: section === "routing" ? "rules" : section, count: section === "routing" ? list((value as Item).rules).length : items.length, go: index => { setJson(false); setProposed(undefined); requestAnimationFrame(() => { const row = window.document.querySelectorAll<HTMLElement>(".p-panel tbody tr")[index]; row?.scrollIntoView({block: "center"}); row?.querySelector<HTMLElement>("td:last-child button:last-child")?.focus(); }); }}} onClose={() => setProposed(undefined)} onDone={() => { setProposed(undefined); setEditing(null); config.reload(); }}/>}
+		{proposed !== undefined && <Review server={server} section={section} running={running} value={proposed} moves={moves} show={{kind: section === "routing" ? "rules" : section, count: section === "routing" ? list((value as Item).rules).length : items.length, go: index => { setJson(false); setProposed(undefined); requestAnimationFrame(() => { const row = window.document.querySelectorAll<HTMLElement>(".p-panel tbody tr")[index]; row?.scrollIntoView({block: "center"}); row?.querySelector<HTMLElement>("td:last-child button:last-child")?.focus(); }); }}} onClose={() => setProposed(undefined)} onDone={() => { setProposed(undefined); setEditing(null); config.reload(); }}/>}
 	</div>;
 }
 
@@ -177,14 +191,15 @@ function JsonEditor({section, value, schema, onReview}: {section: Section, value
 }
 
 // A dry run on the node first, then the apply on the revision this page read. A revision that moved means another admin or the node's file changed it in between.
-function Review({section, running, value, moves, show, onClose, onDone}: {section: Section, running: Running, value: unknown, moves: string[], show?: {kind: string, count: number, go: (index: number) => void}, onClose: () => void, onDone: () => void}) {
+function Review({server, section, running, value, moves, show, onClose, onDone}: {server: number, section: Section, running: Running, value: unknown, moves: string[], show?: {kind: string, count: number, go: (index: number) => void}, onClose: () => void, onDone: () => void}) {
 	const {t, number} = useP(), guard = useGuard(), toast = useToast(), [answer, setAnswer] = useState<{valid: boolean, report: Report, diff: Diff | null} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [stale, setStale] = useState(false), [refused, setRefused] = useState<Report | null>(null);
-	useEffect(() => { api("post", "/config/diff", {body: {document: {...running.document, [section]: value}}}).then(found => setAnswer(found as typeof answer), setError); }, []);
+	// Only node 1 can dry-run a change; another server checks it when it is applied and refuses what it cannot take.
+	useEffect(() => { if (server !== 1) return setAnswer({valid: true, report: {errors: [], warnings: [], more_errors: 0, more_warnings: 0}, diff: null}); api("post", "/config/diff", {body: {document: {...running.document, [section]: value}}}).then(found => setAnswer(found as typeof answer), setError); }, []);
 	const apply = async () => {
 		setBusy(true);
 		setError(null);
 		try {
-			const done = await guard(() => api("put", "/config/{section}", {params: {section}, body: {revision: running.revision, value}})) as {generation?: number};
+			const done = await guard(() => server === 1 ? api("put", "/config/{section}", {params: {section}, body: {revision: running.revision, value}}) : api("put", "/nodes/{id}/config/{section}", {params: {id: server, section}, body: {revision: running.revision, value}})) as {generation?: number};
 			toast({tone: "success", title: t("config.applied", {generation: done.generation ?? running.generation + 1})});
 			onDone();
 		} catch (failure) {
@@ -213,6 +228,7 @@ function Review({section, running, value, moves, show, onClose, onDone}: {sectio
 			{stale && <Banner tone="warning" title={t("review.stale")} action={<Button size="sm" icon="refresh" onClick={onDone}>{t("review.reload")}</Button>}>{t("review.staleBody")}</Banner>}
 			{report && report.errors.length > 0 && <><Banner tone="danger" title={t("review.invalid")}>{t("review.invalidBody")}</Banner><Issues issues={report.errors.map(word)}/></>}
 			{answer?.valid && !refused && <>
+				{server !== 1 && <Banner tone="info" title={t("servers.noDryRun")}>{t("servers.noDryRunBody")}</Banner>}
 				{changes.length || diff?.routing_default || diff?.rules_reordered || moves.length ? <ul className="p-changes">
 					{changes.map(change => <li key={change.kind + change.verb}><Mark tone={change.verb === "removed" ? "danger" : change.verb === "added" ? "success" : "info"}>{t(`review.${change.verb}`)}</Mark><span>{t(`review.kind.${change.kind}`)}</span><span className="vw-code">{change.names.join(", ")}</span></li>)}
 					{diff?.routing_default && <li><Mark tone="info">{t("review.changed")}</Mark><span>{t("review.default")}</span></li>}

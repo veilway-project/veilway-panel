@@ -1,6 +1,6 @@
 import {Backdrop, Banner, Button, DEFAULT_SETTINGS, Glass, Icon, IconButton, PRODUCT, Segmented, StateBlock, ToastProvider, UiProvider, useToast, type IconName} from "@veilway/ui";
 import {useEffect, useMemo, useRef, useState, type ReactNode} from "react";
-import {api, flags, session, type NodeLink, type Part, type Settings} from "./api.ts";
+import {api, flags, session, type NodeLink, type NodeRow, type Part, type Settings} from "./api.ts";
 import {en, type PanelKey} from "./locales/en.ts";
 import {fa} from "./locales/fa.ts";
 import {ago, ErrorNote, GuardProvider, useGuard, useLoad, useP, useSay} from "./kit.tsx";
@@ -11,11 +11,13 @@ import {DashboardPage} from "./pages/dashboard.tsx";
 import {DnsPage} from "./pages/dns.tsx";
 import {NodesPage} from "./pages/links.tsx";
 import {ProfilesPage} from "./pages/profiles.tsx";
+import {ServersPage} from "./pages/servers.tsx";
 import {SettingsPage} from "./pages/subscriptions.tsx";
 import {TokensPage} from "./pages/tokens.tsx";
 import {TrafficPage} from "./pages/traffic.tsx";
 import {UserPage} from "./pages/user.tsx";
 import {UsersPage} from "./pages/users.tsx";
+import {offline, ServersContext} from "./servers.tsx";
 import {SettingsContext} from "./settings.ts";
 
 const PACKS = {en, fa};
@@ -25,7 +27,7 @@ const SIDEBAR = "veilway-panel-sidebar";
 const MOVED: Record<string, string> = {"": "dashboard", node: "inbounds", "node/inbounds": "inbounds", "node/xray": "inbounds", "node/outbounds": "routing/outbounds", "node/exits": "routing/exits", "node/routing": "routing/routing", "node/profiles": "profiles", "node/links": "nodes", subscriptions: "settings", more: "dashboard"};
 type NodeStatus = {version?: string, generation?: number, uptime_secs?: number, public_addresses?: string[]};
 type Entry = {id: string, icon: IconName, count?: number, warn?: boolean};
-const PAGES = ["dashboard", "traffic", "users", "inbounds", "routing", "dns", "profiles", "nodes", "tokens", "settings", "account"];
+const PAGES = ["dashboard", "traffic", "users", "inbounds", "routing", "dns", "profiles", "servers", "nodes", "tokens", "settings", "account"];
 
 export function App() {
 	const [prefs, setPrefs] = useState<Prefs>(() => {
@@ -91,10 +93,10 @@ function Root({prefs, onPrefs}: {prefs: Prefs, onPrefs: (prefs: Prefs) => void})
 function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: {hash: string, username: string, httpBanner: ReactNode, twoStep: boolean, prefs: Prefs, onPrefs: (prefs: Prefs) => void, onLogout: () => void}) {
 	const {t, number} = useP(), path = hash.replace(/^#\/?/, ""), parts = path.split("/"), page = PAGES.includes(parts[0]!) ? parts[0]! : "dashboard", sub = parts[1] ?? "";
 	const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem(SIDEBAR) === "collapsed"; } catch { return false; } }), [open, setOpen] = useState(false), menu = useRef<HTMLButtonElement>(null), side = useRef<HTMLElement>(null);
-	const node = useLoad(() => api("get", "/node"), []), live = useLoad(() => api("get", "/stats/now"), []), links = useLoad(() => api("get", "/links") as Promise<{links: NodeLink[] | null}>, []);
+	const node = useLoad(() => api("get", "/node"), []), live = useLoad(() => api("get", "/stats/now"), []), links = useLoad(() => api("get", "/links") as Promise<{links: NodeLink[] | null}>, []), servers = useLoad(() => api("get", "/nodes").then(answer => answer.nodes, () => [] as NodeRow[]), []), [picked, setPicked] = useState(1);
 	const counts = useLoad(() => Promise.allSettled([api("get", "/users"), loadRunning(), api("get", "/xray")]).then(([users, running, xray]) => ({users: users.status === "fulfilled" ? users.value.users.length : undefined, inbounds: running.status === "fulfilled" ? ((running.value.document.inbounds as unknown[] | undefined)?.length ?? 0) + (xray.status === "fulfilled" ? xray.value.inbounds.length : 0) : undefined})), []);
 	useEffect(() => { const moved = MOVED[path] ?? MOVED[parts[0]!]; if (moved) location.replace("#/" + moved); }, [path]);
-	useEffect(() => { const timer = setInterval(() => { node.reload(); live.reload(); links.reload(); counts.reload(); }, 30000); return () => clearInterval(timer); }, [node.reload, live.reload, links.reload, counts.reload]);
+	useEffect(() => { const timer = setInterval(() => { node.reload(); live.reload(); links.reload(); counts.reload(); servers.reload(); }, 30000); return () => clearInterval(timer); }, [node.reload, live.reload, links.reload, counts.reload, servers.reload]);
 	useEffect(() => setOpen(false), [hash]);
 	// Newer browsers answer scrollTo with a promise, which an effect must not return.
 	useEffect(() => { scrollTo({top: 0}); }, [page, page === "users" ? sub : ""]);
@@ -113,11 +115,11 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 	const groups: {label?: PanelKey, items: Entry[]}[] = [
 		{items: [{id: "dashboard", icon: "overview"}, {id: "traffic", icon: "chart"}]},
 		{label: "nav.group.people", items: [{id: "users", icon: "users", count: counts.data?.users}]},
-		{label: "nav.group.network", items: [{id: "nodes", icon: "device", count: list.length - up || undefined, warn: true}, {id: "inbounds", icon: "inbox", count: counts.data?.inbounds}, {id: "routing", icon: "upload"}, {id: "dns", icon: "globe"}, {id: "profiles", icon: "components"}]},
+		{label: "nav.group.network", items: [{id: "servers", icon: "device", count: (servers.data ?? []).filter(offline).length || undefined, warn: true}, {id: "nodes", icon: "activity", count: list.length - up || undefined, warn: true}, {id: "inbounds", icon: "inbox", count: counts.data?.inbounds}, {id: "routing", icon: "upload"}, {id: "dns", icon: "globe"}, {id: "profiles", icon: "components"}]},
 		{label: "nav.group.panel", items: [{id: "tokens", icon: "lock"}, {id: "settings", icon: "settings"}]}
 	];
 	const initials = username.split(/[-._]/).filter(Boolean).map(part => part[0]).join("").slice(0, 2).toUpperCase() || username.slice(0, 2).toUpperCase();
-	return <Backdrop fixed className="p-app">
+	return <ServersContext.Provider value={{nodes: servers.data ?? [], selected: (servers.data ?? []).some(row => row.id === picked) ? picked : 1, select: setPicked, reload: servers.reload}}><Backdrop fixed className="p-app">
 		<header className="vw-glass p-phone-bar" data-layer="chrome" inert={open}>
 			<button ref={menu} type="button" className="vw-icon-button" aria-label={t("side.open")} aria-expanded={open} onClick={() => setOpen(true)}><svg className="vw-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5.5h14M3 10h14M3 14.5h14"/></svg></button>
 			<strong>{t(`nav.${page}` as PanelKey)}</strong>
@@ -170,6 +172,7 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 					{page === "routing" && <RoutingPage tab={sub}/>}
 					{page === "dns" && <DnsPage/>}
 					{page === "profiles" && <ProfilesPage/>}
+					{page === "servers" && <ServersPage/>}
 					{page === "nodes" && <NodesPage status={status} reachable={node.data?.reachable ?? false} online={online}/>}
 					{page === "tokens" && <TokensPage/>}
 					{page === "settings" && <SettingsPage at={sub}/>}
@@ -177,7 +180,7 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 				</div>
 			</main>
 		</div>
-	</Backdrop>;
+	</Backdrop></ServersContext.Provider>;
 }
 
 // Newer releases of the panel and the node, each with its notes and the action that asks the host to install it. The host answers the request itself: the panel goes away and comes back as the new version, and the node restarts, which drops its live tunnels for a moment.

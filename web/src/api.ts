@@ -30,6 +30,9 @@ export type GatewayKeys = Schemas["GatewayOut"];
 export type Switched = Schemas["Switched"];
 export type ResetOut = Schemas["Reset"];
 export type Part = Schemas["Part"];
+export type NodeRow = Schemas["NodeOut"];
+export type NodePatch = Schemas["NodePatch"];
+export type Across = Schemas["Across"];
 export type Upstream = Schemas["Upstream"];
 export type Review = Schemas["Review"];
 export type Inspected = Schemas["Inspected"];
@@ -42,7 +45,7 @@ export type Running = {revision: string, generation: number, document: Record<st
 export type Template = {inbound: string, profile: Record<string, unknown>, missing: string[], overridden: string[], pin?: {source: "node" | "override" | null, pins: string[], published: string[], stale: boolean} | null, trimmed?: {transport: string, relay: string}[], kind?: "faketls", refused?: {transport: string, code: string, reason: string}[]};
 export type Pairings = {offers: {id: string, name: string, direction: string, expires_at: number}[], answered: {id: string, name: string, direction: string, expires_at: number, fingerprint: string, tries: number, role: string}[]};
 export type NodeLink = {tag: string, id: string, half: string, role: string, state: string, state_secs: number, flows: number, traffic: {up_bytes: number, down_bytes: number}};
-export type Pasted = {id: string, name: string, direction: string, half: string, expires_at: number, expired: boolean, overlaps_pool: boolean, dials: {address: string, private: boolean}[], transports: {type: string}[], ws_warning: boolean};
+export type Pasted = {id: string, name: string, direction: string, half: string, expires_at: number, expired: boolean, overlaps_pool: boolean, dials: {address: string, private: boolean}[], transports: {type: string}[], ws_warning: boolean, manage?: "this_node" | "other_node" | null};
 /** What the node reports for a user. The schema leaves it open, so only the fields the panel reads are named. */
 export type NodeUser = {used_bytes?: number, period_start?: number, denied?: "disabled" | "expired" | "quota" | null, traffic?: {up_bytes?: number, down_bytes?: number}, devices?: {public_key?: string, handshake_age_secs?: number | null}[]};
 

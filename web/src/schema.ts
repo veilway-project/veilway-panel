@@ -568,6 +568,93 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/nodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The nodes the panel manages: node 1 on the panel's own socket and the others through managed links of node 1, each with the state of its link, its pool, its revisions and whether it is behind. */
+        get: operations["listNodes"];
+        put?: never;
+        /** Adds a remote node bound to a link of node 1 that node 1 manages. Devices get an address in its pool and its users are pushed at once. Needs a recent re-authentication. */
+        post: operations["addNode"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/nodes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Removes a remote node: it is asked to empty itself and drop the managing link (unless `taken=true`), then the link leaves node 1's config and the node's addresses and counts go. Needs a recent re-authentication. */
+        delete: operations["removeNode"];
+        options?: never;
+        head?: never;
+        /** Changes a node's name, place, pool (a remote node with no device at it), whether it counts toward the users' totals and the most its counters may grow. */
+        patch: operations["updateNode"];
+        trace?: never;
+    };
+    "/nodes/{id}/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The config a node runs without its users, and its revision. A remote node is read through its link. */
+        get: operations["getNodeConfig"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/nodes/{id}/config/{section}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Replaces one section of a node's config like putConfigSection does for node 1. Refused with node_offline while the node's link is not up. */
+        put: operations["putNodeConfigSection"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/nodes/{id}/sync": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Pushes the panel's users to one node now. */
+        post: operations["syncOneNode"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/openapi.json": {
         parameters: {
             query?: never;
@@ -1515,6 +1602,16 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        Across: {
+            /** @description Whether every node cuts the user now, because the total reached the quota. */
+            cut: boolean;
+            nodes: components["schemas"]["NodeUsage"][];
+            /**
+             * Format: int64
+             * @description The sum over the counted nodes, in the user's current period.
+             */
+            total_bytes: number;
+        };
         AddIn: {
             /**
              * @description The classes besides `cover` that the operator allows: no_cover, exposed, plain.
@@ -2043,6 +2140,16 @@ export interface components {
             /** @description The file of the next key's private half is still on this host. Whoever takes the active key from the host takes the next one with it: move the file away. */
             on_host: boolean;
         };
+        NodeIn: {
+            /** @description The tag of a link of node 1 that node 1 manages (`manage: "peer"`), made by the link pairing. A link already bound to a node is refused. */
+            link: string;
+            /** @description 1 to 32 characters, without spaces around it. */
+            name: string;
+            /** Format: int64 */
+            place?: number | null;
+            /** @description The IPv4 range devices get their address at this node from. */
+            pool_v4: string;
+        };
         NodeInfo: {
             /** @description Whether the system reports its clock as synchronized, null when it cannot tell. A panel whose clock is off by more than a day writes static mirror names that no client asks for. */
             clock_synchronized?: boolean | null;
@@ -2055,10 +2162,95 @@ export interface components {
             reachable: boolean;
             status?: unknown;
         };
+        NodeOut: {
+            /** Format: int64 */
+            applied_rev: number;
+            /** @description Whether its users are still to be pushed. */
+            behind: boolean;
+            /** @description Whether what the node counts adds to the users' totals. */
+            counted: boolean;
+            /**
+             * Format: int64
+             * @description The devices that have an address in its pool.
+             */
+            devices: number;
+            /**
+             * Format: int64
+             * @description Since when the link has not been up, Unix seconds, null while it is.
+             */
+            down_since?: number | null;
+            /** Format: int64 */
+            id: number;
+            last_error?: string | null;
+            /** Format: int64 */
+            last_seen?: number | null;
+            /** @description The tag of the link of node 1 that reaches the node. Null for node 1. */
+            link?: string | null;
+            /** @description The state of that link as node 1 reports it, null for node 1 or when node 1 cannot say. */
+            link_state?: string | null;
+            /**
+             * Format: int64
+             * @description The most the node's counters may grow, in bytes per second. Null is the default of 1.25 GB/s.
+             */
+            max_rate?: number | null;
+            name: string;
+            /** Format: int64 */
+            place: number;
+            /** @description The address pool devices get their address at this node from. */
+            pool_v4: string;
+            /** @description Short and lowercase, put in front of this node's profile ids. */
+            slug: string;
+            version?: string | null;
+            /**
+             * Format: int64
+             * @description The revision of what the panel wants the node to have, and the last one the node took. A node whose applied revision is lower is behind.
+             */
+            wanted_rev: number;
+        };
+        NodePatch: {
+            /** @description False stops its usage from adding to the users' totals, for a node that reports false usage. Its users stay on it. */
+            counted?: boolean | null;
+            /**
+             * Format: int64
+             * @description The most its counters may grow, in bytes per second, or null for the default.
+             * @default null
+             */
+            max_rate: number | null;
+            name?: string | null;
+            /** Format: int64 */
+            place?: number | null;
+            /** @description Only for a remote node that no device has an address at yet: node 1's pool is the `pool_v4` setting. */
+            pool_v4?: string | null;
+        };
         /** @description Whether the node took the change. The panel's database is changed either way and the next successful push brings the node up to date. */
         NodeState: {
             error?: string | null;
             synced: boolean;
+        };
+        NodeUsage: {
+            /** Format: int64 */
+            banked_bytes: number;
+            /** @description Whether it counts toward the user's total. An admin can stop counting a node. */
+            counted: boolean;
+            /** Format: int64 */
+            down_bytes: number;
+            /** Format: int64 */
+            node: number;
+            /**
+             * Format: int64
+             * @description When the panel last read it. Unix seconds.
+             */
+            reported_at: number;
+            /** Format: int64 */
+            up_bytes: number;
+            /**
+             * Format: int64
+             * @description What the node counts now in the user's period, and what it counted before it restarted.
+             */
+            used_bytes: number;
+        };
+        NodesOut: {
+            nodes: components["schemas"]["NodeOut"][];
         };
         /** @description What the endpoint (and every path the panel does not serve) answers to a request it will not take. The operator copies it from the web server in front, see "The endpoint" on the subscription format page. */
         NotFound: {
@@ -2086,10 +2278,15 @@ export interface components {
              */
             lifetime?: number | null;
             /**
-             * @description A reverse link only.
+             * @description A reverse link and a managed link: this node's link address, one for each family of `dialler`.
              * @default []
              */
             listener: string[];
+            /**
+             * @description This node manages the other node through the link. The other node is told so before it agrees, and `listener` is then required.
+             * @default false
+             */
+            managed: boolean;
             /** Format: uint16 */
             mtu?: number | null;
             name: string;
@@ -2115,6 +2312,11 @@ export interface components {
             /** @description Must be true: the operator has seen where this node would dial and agrees. */
             accept: boolean;
             code: string;
+            /**
+             * @description True when the offer makes this node the one that manages the other node. It must say what the offer says.
+             * @default false
+             */
+            managed: boolean;
             /** @description The tag the link gets in this node's config. */
             tag: string;
         };
@@ -2245,6 +2447,9 @@ export interface components {
             users: number[];
         };
         Removed: {
+            removed: boolean;
+        };
+        Removed2: {
             /** @description Whether the provider took the word that the device left. False: its place stays until the provider removes it. Null: the node never ran this upstream, so there was nothing to tell. */
             confirmed?: boolean | null;
             tag: string;
@@ -2661,6 +2866,10 @@ export interface components {
             command: string;
             tool: string;
         };
+        Synced: {
+            error?: string | null;
+            synced: boolean;
+        };
         TokenCreated: {
             /** Format: int64 */
             id: number;
@@ -2827,6 +3036,8 @@ export interface components {
             expires_at?: number | null;
             groups?: string[] | null;
             name: string;
+            /** @description The ids of the nodes the user may use, at least one. Left out or null: every node. */
+            nodes?: number[] | null;
             note?: string | null;
             /** Format: uint64 */
             quota_bytes?: number | null;
@@ -2858,6 +3069,8 @@ export interface components {
             name: string;
             /** @description The node's own record of the user: usage, denial and traffic. Null when the node cannot be reached. */
             node?: unknown;
+            /** @description The ids of the nodes the user may use. Left out when every node is allowed. */
+            nodes?: number[] | null;
             note: string;
             /** Format: int64 */
             pending_devices: number;
@@ -2867,6 +3080,8 @@ export interface components {
             quota_bytes?: number | null;
             quota_period?: string | null;
             subscription_id: string;
+            /** @description What the nodes counted together, in a panel with more than one node. Only on one user's answer. */
+            usage?: components["schemas"]["Across"] | null;
         };
         UserPatch: {
             /** Format: uint16 */
@@ -2890,6 +3105,11 @@ export interface components {
             expires_at: number | null;
             groups?: string[] | null;
             name?: string | null;
+            /**
+             * @description The ids of the nodes the user may use, at least one, or null for every node. A node taken out frees the addresses of the user's devices in its pool.
+             * @default null
+             */
+            nodes: number[] | null;
             note?: string | null;
             /**
              * Format: uint64
@@ -5075,6 +5295,421 @@ export interface operations {
             };
         };
     };
+    listNodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodesOut"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    addNode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NodeIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeOut"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    removeNode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Removed"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    updateNode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NodePatch"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NodeOut"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getNodeConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    putNodeConfigSection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+                section: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SectionIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    syncOneNode: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Synced"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     openapi: {
         parameters: {
             query?: never;
@@ -7058,7 +7693,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Removed"];
+                    "application/json": components["schemas"]["Removed2"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */
