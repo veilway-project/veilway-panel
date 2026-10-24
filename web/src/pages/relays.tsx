@@ -36,11 +36,12 @@ function AccountSearch({label, exclude, onPick}: {label: string, exclude: number
 	</div>;
 }
 
-// The relays save with the rest of the settings. The preview asks the server what every profile would carry with the relays as they are on screen, so it shows the effect before anything is saved.
-export function RelaysEditor({value, onChange}: {value: Relay[], onChange: (relays: Relay[]) => void}) {
-	const {t} = useP(), derived = useLoad(() => api("get", "/profiles/derived") as Promise<{templates: Template[]}>, []), groupRows = useLoad(() => api("get", "/endpoints"), []), [preview, setPreview] = useState<Template[] | null>(null), [error, setError] = useState<unknown>(null), [previewFor, setPreviewFor] = useState<Account | null>(null), [scoped, setScoped] = useState<number[]>([]);
-	const tags = derived.data?.templates.map(template => template.inbound) ?? [], held: Record<string, string[]> = Object.fromEntries((derived.data?.templates ?? []).filter(template => template.kind !== "faketls").map(template => [template.inbound, ((template.profile.transports ?? []) as {type?: string}[]).map(transport => transport.type ?? "")])), groups = groupRows.data?.groups ?? [], ready = value.filter(relay => relay.name.trim() && relay.address.trim()), key = JSON.stringify([ready, previewFor?.id ?? null]);
+// The relays save with the rest of the settings, or with a remote server's own dialog when `node` is set. The preview asks the server what every profile of node 1 would carry with the relays as they are on screen, so it shows the effect before anything is saved. A remote server has no such preview.
+export function RelaysEditor({value, onChange, node}: {value: Relay[], onChange: (relays: Relay[]) => void, node?: number}) {
+	const {t} = useP(), scope = useLoad(() => node === undefined ? (api("get", "/profiles/derived") as Promise<{templates: Template[]}>).then(({templates}) => ({tags: templates.map(template => template.inbound), held: Object.fromEntries(templates.filter(template => template.kind !== "faketls").map(template => [template.inbound, ((template.profile.transports ?? []) as {type?: string}[]).map(transport => transport.type ?? "")]))})) : (api("get", "/nodes/{id}/config", {params: {id: node}}) as Promise<{document: {inbounds?: {tag?: string, type?: string, transports?: {type?: string}[]}[]}}>).then(answer => { const inbounds = (answer.document.inbounds ?? []).filter(inbound => inbound.type === "veilway" && inbound.tag); return {tags: inbounds.map(inbound => inbound.tag ?? ""), held: Object.fromEntries(inbounds.map(inbound => [inbound.tag ?? "", (inbound.transports ?? []).map(transport => transport.type ?? "")]))}; }), [node]), groupRows = useLoad(() => api("get", "/endpoints"), []), [preview, setPreview] = useState<Template[] | null>(null), [error, setError] = useState<unknown>(null), [previewFor, setPreviewFor] = useState<Account | null>(null), [scoped, setScoped] = useState<number[]>([]);
+	const tags = scope.data?.tags ?? [], held: Record<string, string[]> = scope.data?.held ?? {}, groups = groupRows.data?.groups ?? [], ready = value.filter(relay => relay.name.trim() && relay.address.trim()), key = JSON.stringify([ready, previewFor?.id ?? null]);
 	useEffect(() => {
+		if (node !== undefined) return;
 		let current = true;
 		const timer = setTimeout(() => void (api("post", "/profiles/preview", {body: {relays: ready, user: previewFor?.id ?? null}}) as Promise<{templates: Template[]}>).then(answer => { if (current) { setPreview(answer.templates); setError(null); } }, failure => { if (current) setError(failure); }), 400);
 		return () => { current = false; clearTimeout(timer); };
@@ -102,7 +103,7 @@ export function RelaysEditor({value, onChange}: {value: Relay[], onChange: (rela
 			</fieldset>;
 		})}
 		{value.length < MOST && <div><Button size="sm" icon="plus" onClick={() => onChange([...value, {name: "", address: "", inbounds: [], transports: [], ports: {}, inbound_ports: {}, prefer: false, enabled: true, groups: [], users: []}])}>{t("relays.add")}</Button></div>}
-		<div className="p-relay-preview">
+		{node === undefined && <div className="p-relay-preview">
 			<div><h3 className="vw-label">{t("relays.preview")}</h3><p className="vw-small vw-muted">{t("relays.previewLead")} <a className="p-link" href="#/profiles">{t("relays.publish")}</a></p></div>
 			<AccountSearch label={t("relays.previewFor")} exclude={[]} onPick={setPreviewFor}/>
 			<p className="vw-small vw-muted">{previewFor ? t("relays.previewingFor", {name: previewFor.name}) : t("relays.previewNone")} {previewFor && <Button size="sm" variant="quiet" onClick={() => setPreviewFor(null)}>{t("relays.previewClear")}</Button>}</p>
@@ -114,6 +115,6 @@ export function RelaysEditor({value, onChange}: {value: Relay[], onChange: (rela
 					<ol dir="ltr">{(transport.endpoints ?? transport.candidates ?? []).map((entry, k) => { const address = typeof entry === "string" ? entry : entry.address ?? "", by = owner(address); return <li key={k} data-relay={by ? "" : undefined}><span className="vw-code">{address}</span><span className="vw-small" dir="auto">{by ?? t("relays.own")}</span></li>; })}</ol>
 				</div>)}
 			</div>)}
-		</div>
+		</div>}
 	</div>;
 }

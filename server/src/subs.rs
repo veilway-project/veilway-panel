@@ -161,11 +161,11 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 	let (pool, stored) = (pooled.parse::<Ipv4Net>().ok(), this.address.parse::<Ipv4Addr>().ok());
 	let device_id = this.id;
 	let (total, remote_nodes) = app.db.call(move |db| -> rusqlite::Result<_> {
-		let rows = db.prepare("select nodes.id, nodes.name, nodes.slug, nodes.uid, nodes.pool_v4, device_addresses.address, nodes.settings from nodes join device_addresses on device_addresses.node_id = nodes.id and device_addresses.device_id = ? where nodes.id != ? and nodes.applied_rev >= device_addresses.added_rev order by nodes.id")?.query_map(params![device_id, LOCAL.0], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+		let rows = db.prepare("select nodes.id, nodes.name, nodes.slug, nodes.uid, nodes.pool_v4, device_addresses.address, nodes.settings, nodes.relays from nodes join device_addresses on device_addresses.node_id = nodes.id and device_addresses.device_id = ? where nodes.id != ? and nodes.applied_rev >= device_addresses.added_rev order by nodes.id")?.query_map(params![device_id, LOCAL.0], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
 		let mut nodes = Vec::new();
-		for (id, name, slug, uid, pool, address, cache) in rows {
+		for (id, name, slug, uid, pool, address, cache, relays) in rows {
 			let taken: HashSet<String> = db.prepare("select address from device_addresses where node_id = ?")?.query_map([id], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
-			nodes.push((id, name, slug, uid, pool, address, cache, taken));
+			nodes.push((id, name, slug, uid, pool, address, cache, serde_json::from_str::<Vec<crate::nodecfg::Relay>>(&relays).unwrap_or_default(), taken));
 		}
 		Ok((usage::across(db, user_id, now())?, nodes))
 	}).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
@@ -182,9 +182,11 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 		Some(profile)
 	}).collect();
 	let mut remote: Vec<Value> = Vec::new();
-	for (_, node_name, slug, uid, pool, address, cache, taken) in remote_nodes.into_iter().filter(|row| allowed(&user.nodes, Node(row.0))) {
+	for (_, node_name, slug, uid, pool, address, cache, relays, taken) in remote_nodes.into_iter().filter(|row| allowed(&user.nodes, Node(row.0))) {
 		let (Ok(pool), Ok(stored)) = (pool.parse::<Ipv4Net>(), address.parse::<Ipv4Addr>()) else {continue};
 		let transport = STANDARD.encode(crypto::node_secret(crypto::NODE_TRANSPORT_SALT, &uid, &secret));
+		// A remote node's relays reach its own profiles for the accounts they name, as node 1's reach its profiles: the node's cache holds the profiles without them.
+		let reaching = crate::nodecfg::reaching(&relays, Some((user.id, groups.as_slice())));
 		for entry in serde_json::from_str::<Value>(&cache).ok().and_then(|cache| cache["profiles"].as_array().cloned()).unwrap_or_default() {
 			let mut own = device.clone();
 			own["addresses"] = json!([stored.to_string()]);
@@ -194,6 +196,7 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 				own["addresses"] = json!([found.to_string()]);
 			}
 			let mut profile = entry["profile"].clone();
+			crate::nodecfg::carry(&mut profile, entry["inbound"].as_str().unwrap_or_default(), &reaching, false);
 			profile["id"] = json!(format!("{slug}-{}", profile["id"].as_str().unwrap_or_default()));
 			profile["name"] = json!(format!("{node_name} · {}", profile["name"].as_str().unwrap_or_default()));
 			profile["device"] = own;

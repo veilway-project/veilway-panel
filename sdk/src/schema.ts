@@ -600,7 +600,7 @@ export interface paths {
         delete: operations["removeNode"];
         options?: never;
         head?: never;
-        /** Changes a node's name, place, pool (a remote node with no device at it), whether it counts toward the users' totals and the most its counters may grow. */
+        /** Changes a node's name, place, pool (a remote node with no device at it), whether it counts toward the users' totals, the most its counters may grow and, for a remote node, its relays (the rules of node 1's relays, which apply to its own profiles in each subscription). */
         patch: operations["updateNode"];
         trace?: never;
     };
@@ -2334,6 +2334,8 @@ export interface components {
             place: number;
             /** @description The address pool devices get their address at this node from. */
             pool_v4: string;
+            /** @description The relays of this node, with the rules of node 1's. Each subscription carries them on this node's profiles for the accounts they reach, as node 1's are carried on its own. */
+            relays: components["schemas"]["Relay"][];
             /** @description Short and lowercase, put in front of this node's profile ids. */
             slug: string;
             version?: string | null;
@@ -2357,6 +2359,8 @@ export interface components {
             place?: number | null;
             /** @description Only for a remote node that no device has an address at yet: node 1's pool is the `pool_v4` setting. */
             pool_v4?: string | null;
+            /** @description The relays of this remote node, which node 1's own rules check. Each one's addresses reach the profiles of this node for the accounts it names, by id or by group, or for everyone when it names neither. Node 1's relays are set in the settings. */
+            relays?: components["schemas"]["Relay"][] | null;
         };
         /** @description Whether the node took the change. The panel's database is changed either way and the next successful push brings the node up to date. */
         NodeState: {

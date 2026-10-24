@@ -69,13 +69,15 @@ pub struct NodeOut {
 	pub version: Option<String>,
 	/// The devices that have an address in its pool.
 	pub devices: i64,
+	/// The relays of this node, with the rules of node 1's. Each subscription carries them on this node's profiles for the accounts they reach, as node 1's are carried on its own.
+	pub relays: Vec<nodecfg::Relay>,
 }
 
 #[derive(Serialize, JsonSchema)]
 pub struct NodesOut {pub nodes: Vec<NodeOut>}
 
 fn read(db: &Connection, app: &App, states: &HashMap<String, (String, String)>) -> rusqlite::Result<Vec<NodeOut>> {
-	let rows = db.prepare("select id, name, slug, place, link_tag, pool_v4, counted, max_rate, wanted_rev, applied_rev, last_seen, last_error, version, (select count(*) from device_addresses where node_id = nodes.id) from nodes order by id")?.query_map([], |row| Ok(NodeOut {id: row.get(0)?, name: row.get(1)?, slug: row.get(2)?, place: row.get(3)?, link: row.get(4)?, link_state: None, down_since: None, pool_v4: row.get(5)?, counted: row.get(6)?, max_rate: row.get(7)?, wanted_rev: row.get(8)?, applied_rev: row.get(9)?, behind: false, last_seen: row.get(10)?, last_error: row.get(11)?, version: row.get(12)?, devices: row.get(13)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
+	let rows = db.prepare("select id, name, slug, place, link_tag, pool_v4, counted, max_rate, wanted_rev, applied_rev, last_seen, last_error, version, (select count(*) from device_addresses where node_id = nodes.id), relays from nodes order by id")?.query_map([], |row| Ok(NodeOut {id: row.get(0)?, name: row.get(1)?, slug: row.get(2)?, place: row.get(3)?, link: row.get(4)?, link_state: None, down_since: None, pool_v4: row.get(5)?, counted: row.get(6)?, max_rate: row.get(7)?, wanted_rev: row.get(8)?, applied_rev: row.get(9)?, behind: false, last_seen: row.get(10)?, last_error: row.get(11)?, version: row.get(12)?, devices: row.get(13)?, relays: serde_json::from_str(&row.get::<_, String>(14)?).unwrap_or_default()}))?.collect::<rusqlite::Result<Vec<_>>>()?;
 	Ok(rows.into_iter().map(|mut node| {
 		let state = app.node(Node(node.id));
 		node.link_state = node.link.as_ref().and_then(|tag| states.get(tag)).map(|(state, _)| state.clone());
@@ -176,12 +178,15 @@ pub struct NodePatch {
 	pub counted: Option<bool>,
 	/// The most its counters may grow, in bytes per second, or null for the default.
 	#[serde(default, deserialize_with = "double")] pub max_rate: Option<Option<i64>>,
+	/// The relays of this remote node, which node 1's own rules check. Each one's addresses reach the profiles of this node for the accounts it names, by id or by group, or for everyone when it names neither. Node 1's relays are set in the settings.
+	pub relays: Option<Vec<nodecfg::Relay>>,
 }
 
 pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>, Body(input): Body<NodePatch>) -> Result<Response, Failure> {
 	if input.name.as_deref().is_some_and(|name| !name_ok(name)) {return Err(Failure::bad("name is 1 to 32 characters, without spaces around it."))}
 	if input.max_rate.is_some_and(|rate| rate.is_some_and(|rate| rate < 1)) {return Err(Failure::bad("max_rate is a number of bytes per second, 1 or more, or null."))}
 	if let Some(pool) = &input.pool_v4 {if pool.parse::<Ipv4Net>().map_or(true, |pool| pool.prefix_len() > 29) {return Err(Failure::bad("pool_v4 is an IPv4 range of a /29 or larger."))}}
+	if let Some(relays) = &input.relays {nodecfg::check_relays(relays).map_err(Failure::bad)?}
 	let dirty = app.node(Node(id)).dirty.clone();
 	app.db.call(move |db| -> Result<(), Failure> {
 		let tx = db.transaction()?;
@@ -195,7 +200,13 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 		if let Some(place) = input.place {tx.execute("update nodes set place = ? where id = ?", params![place, id])?;}
 		if let Some(counted) = input.counted {tx.execute("update nodes set counted = ? where id = ?", params![counted, id])?;}
 		if let Some(rate) = input.max_rate {tx.execute("update nodes set max_rate = ? where id = ?", params![rate, id])?;}
-		crate::db::audit(&tx, &ctx.actor, &ctx.source, "node.update", &format!("node:{id}"), &format!("{}{}", if input.counted == Some(false) {"counting stopped"} else if input.counted == Some(true) {"counting started"} else {"edited"}, if input.pool_v4.is_some() {", pool changed"} else {""}));
+		if let Some(relays) = &input.relays {
+			if id == LOCAL.0 {return Err(Failure::bad("The relays of node 1 are set in Settings."))}
+			let known: Vec<i64> = tx.prepare("select id from users")?.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+			if let Some(user) = relays.iter().flat_map(|relay| relay.users.iter().copied()).find(|user| !known.contains(user)) {return Err(Failure::bad(format!("A relay names the account {user}, which does not exist. Take it off the relay first.")))}
+			tx.execute("update nodes set relays = ? where id = ?", params![serde_json::to_string(relays).map_err(Failure::internal)?, id])?;
+		}
+		crate::db::audit(&tx, &ctx.actor, &ctx.source, "node.update", &format!("node:{id}"), &format!("{}{}{}", if input.counted == Some(false) {"counting stopped"} else if input.counted == Some(true) {"counting started"} else {"edited"}, if input.pool_v4.is_some() {", pool changed"} else {""}, if input.relays.is_some() {", relays changed"} else {""}));
 		tx.commit()?;
 		Ok(())
 	}).await??;

@@ -1,10 +1,11 @@
 import {Banner, Button, Dialog, Glass, Icon, NumberField, RadioGroup, SelectField, Segmented, StateBlock, Switch, TextField, useToast} from "@veilway/ui";
 import {useState} from "react";
-import {api, type NodePatch, type NodeRow} from "../api.ts";
+import {api, type NodePatch, type NodeRow, type Relay} from "../api.ts";
 import {ago, ErrorNote, Mark, PageHead, useGuard, useP, useSay} from "../kit.tsx";
 import {offline, useServers} from "../servers.tsx";
 import {useRunning} from "./apply.tsx";
 import {type Compare, Fingerprints, OfferFlow, PasteFlow} from "./links.tsx";
+import {RelaysEditor} from "./relays.tsx";
 
 const STATE_TONE: Record<string, "success" | "warning" | "danger" | undefined> = {up: "success", connecting: "warning", unreachable: "danger", refused: "danger"};
 const RATE = 1_000_000;
@@ -47,12 +48,12 @@ export function ServersPage() {
 
 // The pool changes only while no device holds an address in it, and never for server 1, whose pool is a panel setting.
 function EditServer({node, onClose, onSaved}: {node: NodeRow, onClose: () => void, onSaved: () => void}) {
-	const {t} = useP(), guard = useGuard(), toast = useToast(), [name, setName] = useState(node.name), [place, setPlace] = useState<number | "">(node.place), [pool, setPool] = useState(node.pool_v4), [rate, setRate] = useState<number | "">(node.max_rate ? node.max_rate / RATE : ""), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
+	const {t} = useP(), guard = useGuard(), toast = useToast(), [name, setName] = useState(node.name), [place, setPlace] = useState<number | "">(node.place), [pool, setPool] = useState(node.pool_v4), [rate, setRate] = useState<number | "">(node.max_rate ? node.max_rate / RATE : ""), [relays, setRelays] = useState<Relay[]>(node.relays), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const locked = node.id === 1 || node.devices > 0, save = async () => {
 		setBusy(true);
 		setError(null);
 		try {
-			await guard(() => api("patch", "/nodes/{id}", {params: {id: node.id}, body: {name: name.trim(), place: place === "" ? undefined : place, pool_v4: locked ? undefined : pool.trim(), max_rate: rate === "" ? null : Math.round(rate * RATE)} as NodePatch}));
+			await guard(() => api("patch", "/nodes/{id}", {params: {id: node.id}, body: {name: name.trim(), place: place === "" ? undefined : place, pool_v4: locked ? undefined : pool.trim(), max_rate: rate === "" ? null : Math.round(rate * RATE), relays: node.id === 1 ? undefined : relays} as NodePatch}));
 			toast({tone: "success", title: t("servers.saved", {name: name.trim()})});
 			onSaved();
 		} catch (failure) {
@@ -67,6 +68,10 @@ function EditServer({node, onClose, onSaved}: {node: NodeRow, onClose: () => voi
 			<NumberField label={t("servers.place")} hint={t("servers.placeHint")} unit={t("servers.unitPlace")} min={0} value={place} onChange={setPlace} optional/>
 			<TextField label={t("servers.poolLabel")} hint={t(node.id === 1 ? "servers.poolHere" : locked ? "servers.poolLocked" : "servers.poolHint")} value={pool} onChange={setPool} disabled={locked} technical/>
 			<NumberField label={t("servers.rate")} hint={t("servers.rateHint")} unit={t("servers.unitRate")} min={1} value={rate} onChange={setRate} optional/>
+			{node.id !== 1 && <>
+				<div><h3 className="vw-h3">{t("servers.relays")}</h3><p className="vw-muted">{t("servers.relaysLead")}</p></div>
+				<RelaysEditor value={relays} onChange={setRelays} node={node.id}/>
+			</>}
 			<ErrorNote error={error}/>
 			<div className="vw-dialog-foot"><Button onClick={onClose}>{t("action.cancel")}</Button><Button type="submit" variant="primary" disabled={busy || !name.trim()}>{t("common.save")}</Button></div>
 		</form>

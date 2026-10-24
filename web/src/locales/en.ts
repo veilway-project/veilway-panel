@@ -2300,6 +2300,8 @@ export const en = {
 	"servers.unitPlace": "in the list",
 	"servers.poolLabel": "Address pool",
 	"servers.poolHere": "The pool of this server is a panel setting.",
+	"servers.relays": "Relays",
+	"servers.relaysLead": "Other addresses apps can reach this server through. Each one reaches the accounts it names, or everyone when it names none.",
 	"servers.poolLocked": "Devices already have addresses in this pool. Remove them from this server first to change it.",
 	"servers.poolHint": "Devices get their address at this server from this IPv4 range.",
 	"servers.poolNew": "An IPv4 range for the devices that connect to this server, a /29 or larger. It must not overlap the ranges in use: {used}.",

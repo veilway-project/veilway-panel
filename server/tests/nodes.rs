@@ -5,21 +5,28 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, time::{Duration, Instant}};
 use tower::ServiceExt;
-use veilway_panel::{app::{App, Node, LOCAL}, build, config::Config, crypto, node, router, subs::{self, DeviceRow, Form, UserRow}, upkeep_once, usage, Upkeep};
+use veilway_panel::{app::{App, Node, LOCAL}, build, config::{Config, Confirm}, crypto, node, router, subs::{self, DeviceRow, Form, UserRow}, upkeep_once, usage, Upkeep};
 use veilway_proto::{pairing::{self, Direction, Manage, Offer, Offers, Pastes, Terms}, subscription::{envelope::{self, SigningKey}, BODY_MAX}};
 
 const PASSWORD: &str = "correct horse battery";
+/// The time a node takes a request as the confirmation of a config pushed through its link, and the time it keeps the config on trial before it puts the one before back. The panel asks at `SETTLE` and gives up well before `TRIAL`.
+const SETTLE: Duration = Duration::from_millis(300);
+const TRIAL: Duration = Duration::from_secs(5);
 
-/// One fake node: the document it runs, how often it was pushed to, what its users counted and which usage resets reached it. `reset_missing` makes it lack the usage reset route and `refuse` makes it refuse every config.
-struct Fake {document: Mutex<Value>, generation: Mutex<u64>, applied: Mutex<Vec<Value>>, users: Mutex<Vec<Value>>, resets: Mutex<Vec<(String, Value)>>, up: AtomicBool, reset_missing: AtomicBool, refuse: AtomicBool, calls: Mutex<Vec<String>>}
+/// One fake node: the document it runs, how often it was pushed to, what its users counted and which usage resets reached it. `reset_missing` makes it lack the usage reset route and `refuse` makes it refuse every config. The config on trial is the one pushed and not confirmed yet: `confirmed` and `early` count the requests that confirmed it and the ones answered before the settle time without doing so. `hold` cuts the status answers of its link, so nothing is confirmed, and `cut` cuts the answer to the next push once it is applied.
+struct Fake {document: Mutex<Value>, generation: Mutex<u64>, applied: Mutex<Vec<Value>>, users: Mutex<Vec<Value>>, resets: Mutex<Vec<(String, Value)>>, up: AtomicBool, reset_missing: AtomicBool, refuse: AtomicBool, calls: Mutex<Vec<String>>, trial: Mutex<Option<(Instant, Value)>>, confirmed: Mutex<u64>, early: Mutex<u64>, hold: AtomicBool, cut: AtomicBool}
 
 impl Fake {
-	fn new(document: Value) -> Arc<Self> {Arc::new(Self {document: Mutex::new(document), generation: Mutex::new(1), applied: Mutex::new(Vec::new()), users: Mutex::new(Vec::new()), resets: Mutex::new(Vec::new()), up: AtomicBool::new(true), reset_missing: AtomicBool::new(false), refuse: AtomicBool::new(false), calls: Mutex::new(Vec::new())})}
+	fn new(document: Value) -> Arc<Self> {Arc::new(Self {document: Mutex::new(document), generation: Mutex::new(1), applied: Mutex::new(Vec::new()), users: Mutex::new(Vec::new()), resets: Mutex::new(Vec::new()), up: AtomicBool::new(true), reset_missing: AtomicBool::new(false), refuse: AtomicBool::new(false), calls: Mutex::new(Vec::new()), trial: Mutex::new(None), confirmed: Mutex::new(0), early: Mutex::new(0), hold: AtomicBool::new(false), cut: AtomicBool::new(false)})}
 	fn last(&self) -> Value {self.applied.lock().unwrap().last().cloned().unwrap_or(Value::Null)}
 	fn user_names(&self) -> Vec<String> {self.document.lock().unwrap()["users"].as_array().into_iter().flatten().map(|user| user["name"].as_str().unwrap().to_string()).collect()}
 	fn user(&self, name: &str) -> Value {self.document.lock().unwrap()["users"].as_array().into_iter().flatten().find(|user| user["name"] == name).cloned().unwrap_or(Value::Null)}
 	fn serve(&self, method: &Method, path: &str, if_match: Option<String>, body: Value) -> (u16, Value) {
 		self.calls.lock().unwrap().push(format!("{} {path}", method.as_str()));
+		if let Some((_, previous)) = self.trial.lock().unwrap().take_if(|(at, _)| at.elapsed() >= TRIAL) {
+			*self.document.lock().unwrap() = previous;
+			*self.generation.lock().unwrap() += 1;
+		}
 		match (method.as_str(), path) {
 			("GET", "/v1/config") => {let generation = *self.generation.lock().unwrap(); (200, json!({"revision": format!("rev{generation}"), "generation": generation, "document": self.document.lock().unwrap().clone()}))}
 			("PUT", "/v1/config") => {
@@ -28,11 +35,22 @@ impl Fake {
 				if if_match.as_deref() != Some(&format!("\"rev{generation}\"")) {return (409, json!({"error": {"code": "stale", "message": "stale"}}))}
 				*generation += 1;
 				self.applied.lock().unwrap().push(body.clone());
-				*self.document.lock().unwrap() = body;
+				let previous = std::mem::replace(&mut *self.document.lock().unwrap(), body);
+				*self.trial.lock().unwrap() = Some((Instant::now(), previous));
 				(200, json!({"revision": format!("rev{generation}"), "generation": *generation, "saved": true, "diff": {}, "report": {}}))
 			}
 			("POST", "/v1/config/validate") => (200, json!({"valid": true, "report": {"errors": [], "warnings": []}})),
-			("GET", "/v1/status") => (200, json!({"version": "0.3.0", "uptime_secs": 5, "generation": *self.generation.lock().unwrap()})),
+			("GET", "/v1/status") => {
+				// Only a request from the settle time after the push confirms the config on trial: an earlier one is answered and confirms nothing.
+				let settled = self.trial.lock().unwrap().as_ref().map(|(at, _)| at.elapsed() >= SETTLE);
+				match settled {
+					Some(true) => {self.trial.lock().unwrap().take(); *self.confirmed.lock().unwrap() += 1}
+					Some(false) => *self.early.lock().unwrap() += 1,
+					None => {}
+				}
+				let generation = *self.generation.lock().unwrap();
+				(200, json!({"version": "0.3.0", "uptime_secs": 5, "generation": generation, "revision": format!("rev{generation}")}))
+			}
 			("GET", "/v1/users") => (200, json!({"users": self.users.lock().unwrap().clone()})),
 			("GET", "/v1/inbounds") => {let document = self.document.lock().unwrap().clone(); (200, json!({"inbounds": document["inbounds"].as_array().into_iter().flatten().map(|inbound| json!({"tag": inbound["tag"], "kind": inbound["type"], "enabled": true, "public_key": STANDARD.encode([9u8; 32]), "transport_public_key": null, "transports": []})).collect::<Vec<_>>(), "public_addresses": document["public_addresses"].clone()}))}
 			("GET", "/v1/exits") => (200, json!({"exits": []})),
@@ -65,8 +83,11 @@ async fn relay(State(world): State<Arc<World>>, request: Request<Body>) -> Respo
 	if let Some(rest) = path.strip_prefix("/v1/links/") {
 		let (tag, rest) = rest.split_once("/api").unwrap_or((rest, ""));
 		let Some(remote) = world.remotes.lock().unwrap().get(tag).cloned() else {return fail(404, "no_such_link")};
-		if !remote.up.load(Ordering::Relaxed) || world.states.lock().unwrap().get(tag) != Some(&"up") {return fail(503, "link_down")}
-		return answer(remote.serve(&parts.method, rest, if_match, body));
+		if !remote.up.load(Ordering::Relaxed) || world.states.lock().unwrap().get(tag) != Some(&"up") || (rest == "/v1/status" && remote.hold.load(Ordering::Relaxed)) {return fail(503, "link_down")}
+		let cut = parts.method == Method::PUT && remote.cut.swap(false, Ordering::Relaxed);
+		let served = remote.serve(&parts.method, rest, if_match, body);
+		if cut {return fail(502, "bad_answer")}
+		return answer(served);
 	}
 	if path == "/v1/links" {
 		let states = world.states.lock().unwrap().clone();
@@ -90,7 +111,7 @@ impl Panel {
 		let listener = tokio::net::UnixListener::bind(&socket).unwrap();
 		let served = Router::new().fallback(relay).with_state(world.clone());
 		tokio::spawn(async move {axum::serve(listener, served).await.unwrap();});
-		let cfg = Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), gateway: dir.join("gateway.keys"), gateway_next: dir.join("gateway.next"), node_socket: socket, two_step: "off".into(), ..Config::default()};
+		let cfg = Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), gateway: dir.join("gateway.keys"), gateway_next: dir.join("gateway.next"), node_socket: socket, two_step: "off".into(), confirm: Confirm {settle: SETTLE, every: Duration::from_millis(100), within: Duration::from_secs(2)}, ..Config::default()};
 		let app = build(cfg).unwrap();
 		let mut panel = Self {router: router(app.clone()), app, cookie: String::new(), csrf: String::new(), dir, world};
 		let token = panel.app.setup_token.lock().unwrap().clone().unwrap();
@@ -845,4 +866,112 @@ async fn an_upstream_change_on_an_offline_server_is_refused_as_offline_and_sends
 	let (status, body) = panel.refused(Method::POST, &format!("/p/api/nodes/{two}/upstreams/edge/retry"), None).await;
 	assert_eq!((status, body["error"]["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("node_offline")));
 	assert!(remote.calls.lock().unwrap().iter().all(|call| !call.contains("/retry")), "nothing is sent to an offline server");
+}
+
+#[tokio::test]
+async fn a_config_pushed_through_a_link_counts_once_a_request_confirms_it_after_the_settle_time() {
+	let panel = Panel::start().await;
+	let (_, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	let alice = panel.user("alice", json!({})).await;
+	panel.settle().await;
+	let (applied, confirmed) = (remote.applied.lock().unwrap().len(), *remote.confirmed.lock().unwrap());
+	let started = Instant::now();
+	panel.device(alice).await;
+	panel.settle().await;
+	assert!(started.elapsed() >= SETTLE, "the panel asks no sooner than the settle time after the push");
+	assert_eq!(remote.applied.lock().unwrap().len(), applied + 1);
+	assert_eq!((*remote.confirmed.lock().unwrap(), *remote.early.lock().unwrap()), (confirmed + 1, 0), "the node confirmed the push, and no request came before the settle time");
+	let listed = panel.call(Method::GET, "/p/api/nodes", None).await;
+	assert_eq!((listed["nodes"][1]["behind"].as_bool(), listed["nodes"][1]["last_error"].is_null()), (Some(false), true), "{listed}");
+}
+
+#[tokio::test]
+async fn a_config_pushed_through_a_link_that_is_never_confirmed_stays_behind_and_is_pushed_again() {
+	let panel = Panel::start().await;
+	let (_, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	let alice = panel.user("alice", json!({})).await;
+	panel.settle().await;
+	let applied = remote.applied.lock().unwrap().len();
+	remote.hold.store(true, Ordering::Relaxed);
+	panel.device(alice).await;
+	panel.settle().await;
+	assert!(remote.applied.lock().unwrap().len() > applied, "the node took the push");
+	let listed = panel.call(Method::GET, "/p/api/nodes", None).await;
+	assert_eq!(listed["nodes"][1]["behind"], true, "{listed}");
+	assert!(listed["nodes"][1]["last_error"].as_str().unwrap().contains("did not confirm"), "{listed}");
+	remote.hold.store(false, Ordering::Relaxed);
+	panel.settle().await;
+	let listed = panel.call(Method::GET, "/p/api/nodes", None).await;
+	assert_eq!((listed["nodes"][1]["behind"].as_bool(), listed["nodes"][1]["last_error"].is_null()), (Some(false), true), "{listed}");
+}
+
+#[tokio::test]
+async fn a_push_whose_answer_is_cut_counts_when_the_node_runs_it() {
+	let panel = Panel::start().await;
+	let (_, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	let alice = panel.user("alice", json!({})).await;
+	panel.settle().await;
+	let applied = remote.applied.lock().unwrap().len();
+	remote.cut.store(true, Ordering::Relaxed);
+	let started = Instant::now();
+	panel.device(alice).await;
+	panel.settle().await;
+	assert!(started.elapsed() >= SETTLE, "the revision is read only after the settle time");
+	assert_eq!(remote.applied.lock().unwrap().len(), applied + 1, "the node took one push, and none was sent again");
+	let listed = panel.call(Method::GET, "/p/api/nodes", None).await;
+	assert_eq!((listed["nodes"][1]["behind"].as_bool(), listed["nodes"][1]["last_error"].is_null()), (Some(false), true), "{listed}");
+}
+
+#[tokio::test]
+async fn a_remote_nodes_relays_reach_its_own_profiles_in_a_subscription_and_no_other_nodes() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	let (three, other) = panel.add_node("n3", "Oslo", "10.68.0.0/24").await;
+	remote.document.lock().unwrap()["public_addresses"] = json!(["192.0.2.20"]);
+	other.document.lock().unwrap()["public_addresses"] = json!(["192.0.2.30"]);
+	let relay = |name: &str, address: &str| json!({"name": name, "address": address, "enabled": true});
+	panel.app.update_settings(|settings| {
+		settings.profiles = vec![profile("main", "192.0.2.10")];
+		settings.relay_profiles.insert("main".into(), "Main".into());
+		settings.published_relays = vec![serde_json::from_value(json!({"name": "home", "address": "198.51.100.1", "enabled": true})).unwrap()];
+	}).await.unwrap();
+	let alice = panel.user("alice", json!({})).await;
+	let made = panel.device(alice).await;
+	panel.call(Method::PATCH, &format!("/p/api/nodes/{two}"), Some(json!({"relays": [relay("cdn2", "203.0.113.5"), {"name": "mine2", "address": "203.0.113.8", "enabled": true, "users": [alice]}]}))).await;
+	panel.call(Method::PATCH, &format!("/p/api/nodes/{three}"), Some(json!({"relays": [relay("cdn3", "203.0.113.7")]}))).await;
+	panel.settle().await;
+	let payload = signed_payload(&panel, alice, made["id"].as_i64().unwrap()).await;
+	let profiles = payload["profiles"].as_array().unwrap();
+	let endpoints = |id: &str| profiles.iter().find(|profile| profile["id"] == id).map(|profile| profile["transports"][0]["endpoints"].clone()).unwrap_or(Value::Null);
+	assert_eq!(endpoints("main"), json!(["192.0.2.10:51820", "198.51.100.1:51820"]), "node 1's relay reaches node 1's profile only");
+	assert_eq!(endpoints("frankfurt-main"), json!(["192.0.2.20:51820", "203.0.113.8:51820", "203.0.113.5:51820"]), "the account's own relay comes before the one for everyone");
+	assert_eq!(endpoints("oslo-main"), json!(["192.0.2.30:51820", "203.0.113.7:51820"]), "node 2's relays do not reach node 3");
+	let shown = panel.call(Method::GET, "/p/api/nodes", None).await["nodes"][1].clone();
+	assert_eq!((shown["relays"][0]["name"].as_str(), shown["relays"][1]["users"].clone()), (Some("cdn2"), json!([alice])));
+	let (_, error) = panel.refused(Method::PATCH, &format!("/p/api/nodes/{two}"), Some(json!({"relays": [relay("local", "127.0.0.1")]}))).await;
+	assert!(error["error"]["message"].as_str().unwrap().contains("not a loopback"), "{error}");
+	let (_, error) = panel.refused(Method::PATCH, &format!("/p/api/nodes/{two}"), Some(json!({"relays": [{"name": "ghost", "address": "203.0.113.9", "enabled": true, "users": [999]}]}))).await;
+	assert!(error["error"]["message"].as_str().unwrap().contains("which does not exist"), "{error}");
+	let (_, error) = panel.refused(Method::PATCH, &format!("/p/api/nodes/{}", LOCAL.0), Some(json!({"relays": []}))).await;
+	assert!(error["error"]["message"].as_str().unwrap().contains("set in Settings"), "{error}");
+	panel.call(Method::DELETE, &format!("/p/api/users/{alice}"), None).await;
+	let shown = panel.call(Method::GET, "/p/api/nodes", None).await["nodes"][1].clone();
+	assert_eq!(shown["relays"][1]["users"], json!([]), "a deleted account leaves the relays of every node, so its id can be given to a new account");
+}
+
+#[tokio::test]
+async fn a_section_change_whose_answer_is_cut_is_confirmed_by_the_sync_that_follows() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	panel.settle().await;
+	let confirmed = *remote.confirmed.lock().unwrap();
+	remote.cut.store(true, Ordering::Relaxed);
+	let revision = format!("rev{}", *remote.generation.lock().unwrap());
+	panel.refused(Method::PUT, &format!("/p/api/nodes/{two}/config/exits"), Some(json!({"revision": revision, "value": [{"tag": "exit2"}, {"tag": "extra"}]}))).await;
+	assert_eq!(remote.document.lock().unwrap()["exits"].as_array().unwrap().len(), 2, "the node took the change");
+	panel.settle().await;
+	assert_eq!(*remote.confirmed.lock().unwrap(), confirmed + 1, "the next push confirms the change the node was sent");
+	let listed = panel.call(Method::GET, "/p/api/nodes", None).await;
+	assert_eq!((listed["nodes"][1]["behind"].as_bool(), listed["nodes"][1]["last_error"].is_null()), (Some(false), true), "{listed}");
+	assert_eq!(remote.document.lock().unwrap()["exits"].as_array().unwrap().len(), 2, "the change stays in force");
 }

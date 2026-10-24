@@ -2,7 +2,7 @@
 use schemars::JsonSchema;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, fs, net::SocketAddr, path::PathBuf};
+use std::{collections::HashSet, fs, net::SocketAddr, path::PathBuf, time::Duration};
 
 /// What the endpoint (and every path the panel does not serve) answers to a request it will not take. The operator copies it from the web server in front, see "The endpoint" on the subscription format page.
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug)]
@@ -25,6 +25,18 @@ impl Default for NotFound {
 pub struct TrustedMirror {
 	pub name: String,
 	pub secret: String,
+}
+
+/// When the panel asks a node to confirm a config pushed through its link, see `node::sync`. A node keeps such a config on trial for 120 s and takes a request as the confirmation from 10 s after the push, so the defaults ask 12 s after the push, every 5 s, and give up at 100 s.
+#[derive(Clone, Debug)]
+pub struct Confirm {
+	pub settle: Duration,
+	pub every: Duration,
+	pub within: Duration,
+}
+
+impl Default for Confirm {
+	fn default() -> Self {Self {settle: Duration::from_secs(12), every: Duration::from_secs(5), within: Duration::from_secs(100)}}
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -62,11 +74,14 @@ pub struct Config {
 	pub update_request: PathBuf,
 	/// "off" turns the authenticator code off everywhere: sign-in, setup, adding an admin and re-authentication ask for the password only. Any other value, and the default, keeps it on. This is for tutorials and demos and is dangerous: anyone with a password gets in. It is read from this file only and no panel page or API route can change it, because whoever can write this file already owns the panel.
 	pub two_step: String,
+	/// Not read from the file: the timing of a node's confirmation, which the tests shorten.
+	#[serde(skip)]
+	pub confirm: Confirm,
 }
 
 impl Default for Config {
 	fn default() -> Self {
-		Self {listen: "127.0.0.1:8480".parse().unwrap(), prefix: "/panel".into(), sub_path: "/sub".into(), database: "panel.db".into(), keys: "panel.keys".into(), signing: "signing.keys".into(), gateway: "gateway.keys".into(), gateway_next: "gateway.next".into(), node_socket: "/run/veilway/control.sock".into(), allowed_hosts: Vec::new(), trusted_proxies: Vec::new(), not_found: NotFound::default(), trusted_mirrors: Vec::new(), secure_cookies: true, direct: false, update_check: true, update_request: "/var/lib/veilway-panel-update/request".into(), two_step: "on".into()}
+		Self {listen: "127.0.0.1:8480".parse().unwrap(), prefix: "/panel".into(), sub_path: "/sub".into(), database: "panel.db".into(), keys: "panel.keys".into(), signing: "signing.keys".into(), gateway: "gateway.keys".into(), gateway_next: "gateway.next".into(), node_socket: "/run/veilway/control.sock".into(), allowed_hosts: Vec::new(), trusted_proxies: Vec::new(), not_found: NotFound::default(), trusted_mirrors: Vec::new(), secure_cookies: true, direct: false, update_check: true, update_request: "/var/lib/veilway-panel-update/request".into(), two_step: "on".into(), confirm: Confirm::default()}
 	}
 }
 

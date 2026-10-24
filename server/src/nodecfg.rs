@@ -2,7 +2,7 @@
 use crate::{app::{store_settings, App, Node, Settings, TransportClock, LOCAL}, auth::reauthed, crypto::{now, random}, http::{json, ok, Body, Ctx, Failure}, node, subs::{self, UserRow}, users::name_ok, xray::{self, addresses, Exposure}};
 use axum::{extract::{Path, State}, http::{header::CONTENT_TYPE, HeaderValue, StatusCode}, response::{IntoResponse, Response}, Extension};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
@@ -59,7 +59,13 @@ pub struct Relay {
 /// Reads `relays` and refuses what could not become a candidate, so a saved list is always one the profiles can carry.
 pub fn checked_relays<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Relay>, D::Error> {
 	let relays = Vec::<Relay>::deserialize(deserializer)?;
-	let fail = |text: String| Err(serde::de::Error::custom(text));
+	check_relays(&relays).map_err(<D::Error as serde::de::Error>::custom)?;
+	Ok(relays)
+}
+
+/// The rules of a list of relays, for node 1's saved list and for each remote node's: at most `RELAYS_MAX`, each with its own name, a reachable address, and transports, ports, inbounds and audiences the profiles can carry.
+pub fn check_relays(relays: &[Relay]) -> Result<(), String> {
+	let fail = |text: String| Err(text);
 	if relays.len() > RELAYS_MAX {return fail(format!("relays: at most {RELAYS_MAX}, so every transport keeps a candidate of its own within the {CANDIDATES_MAX} a profile may list."))}
 	for (index, relay) in relays.iter().enumerate() {
 		let name = relay.name.trim();
@@ -69,7 +75,7 @@ pub fn checked_relays<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<
 		if relay.inbounds.len() > 16 || relay.inbounds.iter().enumerate().any(|(i, tag)| tag.is_empty() || tag.len() > 64 || relay.inbounds[..i].contains(tag)) {return fail(format!("relay {name}: inbounds is at most 16 different tags of 1 to 64 characters."))}
 		if relay.groups.len() > 64 || relay.groups.iter().any(|group| !name_ok(group, true)) || relay.users.len() > 1000 {return fail(format!("relay {name}: groups is at most 64 group names and users at most 1000 account ids."))}
 	}
-	Ok(relays)
+	Ok(())
 }
 
 pub async fn schema() -> Response {(StatusCode::OK, [(CONTENT_TYPE, HeaderValue::from_static("application/json"))], SCHEMA).into_response()}
@@ -138,7 +144,10 @@ pub(crate) async fn apply(app: &Arc<App>, node: Node, ctx: &Ctx, document: Value
 	if !found.is_empty() {return Err(invalid(&found))}
 	let (status, checked) = call(app, node, "POST", "/v1/config/validate", None, Some(&document)).await?;
 	if status != 200 || checked.get("valid") != Some(&Value::Bool(true)) {return Err(Failure::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", checked.to_string().chars().take(4000).collect::<String>()))}
-	let (status, applied) = call(app, node, "PUT", "/v1/config", Some(revision), Some(&document)).await?;
+	let answer = call(app, node, "PUT", "/v1/config", Some(revision), Some(&document)).await;
+	// A remote node's answer cut short may be a config that landed: the next sync reads it back and confirms it.
+	if node != LOCAL && answer.is_err() {app.node(node).dirty.store(true, Ordering::Relaxed)}
+	let (status, applied) = answer?;
 	match status {
 		200 => {
 			if node == LOCAL {node::clear_defaults(app, &document).await}
@@ -516,6 +525,12 @@ pub async fn preview_profiles(State(app): State<Arc<App>>, Body(input): Body<Pre
 
 /// Takes a deleted account out of the audiences of the saved and the published relays, in the transaction that deletes it. SQLite gives a new account the id of the last one deleted, so no relay may keep it.
 pub fn forget_user(connection: &Connection, cache: &RwLock<Settings>, id: i64) -> Result<Settings, String> {
+	let nodes: Vec<(i64, String)> = connection.prepare("select id, relays from nodes where relays != '[]'").and_then(|mut statement| statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect()).map_err(|error| error.to_string())?;
+	for (node, relays) in nodes {
+		let mut relays: Vec<Relay> = serde_json::from_str(&relays).unwrap_or_default();
+		for relay in &mut relays {relay.users.retain(|held| *held != id)}
+		connection.execute("update nodes set relays = ? where id = ?", params![serde_json::to_string(&relays).map_err(|error| error.to_string())?, node]).map_err(|error| error.to_string())?;
+	}
 	store_settings(connection, cache, |settings| for relay in settings.relays.iter_mut().chain(settings.published_relays.iter_mut()) {relay.users.retain(|held| *held != id)})
 }
 

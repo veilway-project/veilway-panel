@@ -7,7 +7,7 @@ use hyper::{body::Bytes, Request};
 use hyper_util::rt::TokioIo;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
-use std::{collections::{HashMap, HashSet}, sync::{atomic::Ordering, Arc}, time::Duration};
+use std::{collections::{HashMap, HashSet}, sync::{atomic::Ordering, Arc}, time::{Duration, Instant}};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use tokio::net::UnixStream;
 
@@ -203,7 +203,7 @@ async fn flush_resets(app: &Arc<App>, node: Node) -> Result<(), String> {
 	Ok(())
 }
 
-/// Puts the panel's users into the node's running config. A stale revision is read again once. A remote node is asked for its status afterwards, which is what confirms a pushed config to the node, and then receives the usage resets that wait for it.
+/// Puts the panel's users into the node's running config. A stale revision is read again once. A remote node's push counts only once its node confirms it (see `Confirm`), and then the usage resets that wait for the node are sent.
 pub async fn sync(app: &Arc<App>, node: Node) -> Result<(), String> {
 	let _turn = app.turn(node).await;
 	let state = app.node(node);
@@ -221,19 +221,45 @@ pub async fn sync(app: &Arc<App>, node: Node) -> Result<(), String> {
 			let running: Value = serde_json::from_slice(&body).map_err(|error| error.to_string())?;
 			let (Some(revision), Some(mut document)) = (running.get("revision").and_then(Value::as_str).map(str::to_string), running.get("document").cloned()) else {return Err("the node's config answer has no revision or document".into())};
 			fill(app, node, &mut document).await?;
-			let (status, body) = request(app, node, "PUT", "/v1/config", Some(&revision), Some(&document)).await?;
+			// A cut answer of a remote node may still be a push that landed: the revision the node runs decides it below.
+			let (status, body) = match request(app, node, "PUT", "/v1/config", Some(&revision), Some(&document)).await {
+				Err(error) if node != LOCAL && (error.ends_with("(bad_answer)") || error.ends_with("(peer_silent)")) => (200, Vec::new()),
+				answer => answer?,
+			};
 			match status {
 				200 => {
-					// Defaults are the user's, and are judged against the document of node 1 alone.
-					if node == LOCAL {clear_defaults(app, &document).await}
-					pushed = serde_json::from_slice::<Value>(&body).ok().and_then(|answer| answer["revision"].as_str().map(str::to_string));
-					if node != LOCAL {
-						let (status, body) = request(app, node, "GET", "/v1/status", None, None).await?;
-						if status != 200 {return Err(format!("the node answered {status} to the status after the push"))}
-						version = serde_json::from_slice::<Value>(&body).ok().and_then(|answer| answer["version"].as_str().map(str::to_string));
-						profiles = Some(crate::nodecfg::remote_profiles(app, node, &document).await?);
-						flush_resets(app, node).await?;
+					let landed = serde_json::from_slice::<Value>(&body).ok().and_then(|answer| answer["revision"].as_str().map(str::to_string));
+					if node == LOCAL {
+						// Defaults are the user's, and are judged against the document of node 1 alone.
+						clear_defaults(app, &document).await;
+						pushed = landed;
+						return Ok(())
 					}
+					// The node keeps a config pushed through its link only if a request comes through the link at least `settle` after the push, over a session the link made after it. The link is made again soon after the push, so a request may fail until then and is asked again.
+					let started = Instant::now();
+					tokio::time::sleep(app.cfg.confirm.settle).await;
+					let confirmed = loop {
+						match request(app, node, "GET", "/v1/status", None, None).await {
+							Ok((200, body)) => {
+								let shown: Value = serde_json::from_slice(&body).unwrap_or_default();
+								if shown["revision"].as_str().is_some_and(|seen| landed.as_deref().map_or(seen != revision, |landed| seen == landed)) {break Ok(shown)}
+								break Err(format!("the node runs revision {} and not the one pushed", shown["revision"].as_str().unwrap_or("none")))
+							}
+							_ if started.elapsed() >= app.cfg.confirm.within => break Err(format!("the node did not confirm the config within {} s", app.cfg.confirm.within.as_secs())),
+							_ => tokio::time::sleep(app.cfg.confirm.every).await,
+						}
+					};
+					let confirmed = match confirmed {
+						Ok(shown) => shown,
+						Err(error) => {
+							tracing::info!("node {}: {error}, so the config pushed through its link is not applied and the node rolls it back", node.0);
+							return Err(format!("{error}, so it is not applied"))
+						}
+					};
+					pushed = confirmed["revision"].as_str().map(str::to_string);
+					version = confirmed["version"].as_str().map(str::to_string);
+					profiles = Some(crate::nodecfg::remote_profiles(app, node, &document).await?);
+					flush_resets(app, node).await?;
 					return Ok(())
 				}
 				409 => continue,

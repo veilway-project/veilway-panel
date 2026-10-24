@@ -1,7 +1,7 @@
 //! The SQLite file: schema, migrations, the thread that owns the connection and the audit log.
 use crate::crypto::now;
 use rusqlite::{params, Connection};
-use std::{fmt, panic::{catch_unwind, AssertUnwindSafe}, path::Path, sync::mpsc, thread};
+use std::{fmt, fs, os::unix::fs::OpenOptionsExt, panic::{catch_unwind, AssertUnwindSafe}, path::{Path, PathBuf}, sync::mpsc, thread};
 
 /// The layout of a fresh file, which is the layout of `SCHEMA_VERSION`. Keep it in step with `MIGRATIONS`.
 const SCHEMA: &str = "
@@ -15,7 +15,7 @@ create table usage_buckets (res integer not null, at integer not null, kind text
 create table counters (kind text not null, name text not null, up integer not null, down integer not null, primary key (kind, name)) without rowid;
 create table devices (id integer primary key, user_id integer not null references users(id) on delete cascade, name text not null, public_key text not null, secret_hash blob not null, transport_secret blob not null, private_key blob, state text not null, token_gen integer not null, created integer not null, confirmed_at integer, last_seen integer, mirror_name blob, mirror_key blob, mirror_gen integer, last_serial integer not null default 0);
 create unique index devices_public_key on devices (public_key);
-create table nodes (id integer primary key, uid blob not null unique, name text not null unique, slug text not null unique, link_id text, place integer not null default 0, pool_v4 text not null, settings text not null default '{}', wanted_rev integer not null default 0, applied_rev integer not null default 0, config_rev text, last_seen integer, last_error text, version text, counted integer not null default 1, max_rate integer, created integer not null, link_tag text, emptied integer not null default 0);
+create table nodes (id integer primary key, uid blob not null unique, name text not null unique, slug text not null unique, link_id text, place integer not null default 0, pool_v4 text not null, settings text not null default '{}', wanted_rev integer not null default 0, applied_rev integer not null default 0, config_rev text, last_seen integer, last_error text, version text, counted integer not null default 1, max_rate integer, created integer not null, link_tag text, emptied integer not null default 0, relays text not null default '[]');
 create table device_addresses (node_id integer not null references nodes(id) on delete cascade, device_id integer not null references devices(id) on delete cascade, address text not null, added_rev integer not null default 0, primary key (node_id, device_id), unique (node_id, address)) without rowid;
 create table node_usage (node_id integer not null references nodes(id) on delete cascade, user_id integer not null references users(id) on delete cascade, period_start integer not null, used_bytes integer not null, up_bytes integer not null default 0, down_bytes integer not null default 0, banked_bytes integer not null default 0, reported_at integer not null, primary key (node_id, user_id)) without rowid;
 create table node_resets (node_id integer not null references nodes(id) on delete cascade, user_id integer not null references users(id) on delete cascade, totals integer not null default 0, wanted_at integer not null, primary key (node_id, user_id)) without rowid;
@@ -28,8 +28,9 @@ insert into nodes (id, uid, name, slug, pool_v4, created) values (1, randomblob(
 
 /// Steps from one version to the next, applied in order to a file older than the code. Entry `n` takes a file from version `n + 1` to `n + 2`. To add one, append its SQL here, update `SCHEMA` to the new layout (a fresh file gets `SCHEMA` directly) and never edit a step that has shipped. Each step runs in its own transaction together with its version bump.
 /// Entry 1 makes node 1, the node on the panel's own socket, out of today's single node: its pool is the setting `pool_v4`, and every device keeps its address as the address it has at node 1. `devices` is rebuilt without `address`. The step is one transaction, so a failure leaves the file as it was.
-/// The last entry records in `nodes.emptied` that a remote node was emptied before its link was taken out of node 1, so a removal that failed there is retried without asking the node again.
-pub const MIGRATIONS: &[&str] = &["alter table users add column proxy_password blob", NODES, SEVERAL, "alter table nodes add column emptied integer not null default 0"];
+/// Entry 3 records in `nodes.emptied` that a remote node was emptied before its link was taken out of node 1, so a removal that failed there is retried without asking the node again.
+/// Entry 4 keeps the relays of a remote node in `nodes.relays`, as the list that node 1 keeps in its settings.
+pub const MIGRATIONS: &[&str] = &["alter table users add column proxy_password blob", NODES, SEVERAL, "alter table nodes add column emptied integer not null default 0", "alter table nodes add column relays text not null default '[]'"];
 
 const NODES: &str = "create table if not exists nodes (id integer primary key, uid blob not null unique, name text not null unique, slug text not null unique, link_id text, place integer not null default 0, pool_v4 text not null, settings text not null default '{}', wanted_rev integer not null default 0, applied_rev integer not null default 0, config_rev text, last_seen integer, last_error text, version text, counted integer not null default 1, max_rate integer, created integer not null);
 insert or ignore into nodes (id, uid, name, slug, pool_v4, created) values (1, randomblob(16), 'Node 1', 'node-1', coalesce((select json_extract(value, '$.pool_v4') from settings where key = 'settings'), '10.66.0.0/16'), cast(strftime('%s', 'now') as integer));
@@ -102,9 +103,20 @@ impl Db {
 		connection.execute_batch("pragma journal_mode=wal; pragma foreign_keys=on; pragma busy_timeout=5000;").map_err(|error| error.to_string())?;
 		let found: i64 = connection.query_row("pragma user_version", [], |row| row.get(0)).map_err(|error| error.to_string())?;
 		if found > 0 && found < SCHEMA_VERSION {
-			let copy = format!("{}.version-{found}", path.display());
-			let _ = std::fs::remove_file(&copy);
-			connection.execute("vacuum into ?", [&copy]).map_err(|error| format!("the database could not be copied before its migration: {error}"))?;
+			// The copy is the undo of the upgrade, made before any step runs. It is created first, owner-only, and VACUUM INTO fills it from this connection, so the write-ahead log is in it.
+			let copy = format!("{}.before-schema-{found}-to-{SCHEMA_VERSION}-{}", path.display(), now());
+			let refuse = |error: String| format!("the database could not be copied to {copy} before its migration to version {SCHEMA_VERSION}, so it was not migrated: {error}");
+			fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&copy).map_err(|error| refuse(error.to_string()))?;
+			if let Err(error) = connection.execute("vacuum into ?", [&copy]) {
+				let _ = fs::remove_file(&copy);
+				return Err(refuse(error.to_string()));
+			}
+			tracing::info!("the database was copied to {copy} before its migration from version {found} to {SCHEMA_VERSION}");
+			let prefix = format!("{}.before-schema-", path.file_name().unwrap_or_default().to_string_lossy());
+			let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
+			let mut copies: Vec<(i64, PathBuf)> = fs::read_dir(dir).into_iter().flatten().filter_map(Result::ok).filter_map(|entry| Some((entry.file_name().to_str()?.strip_prefix(&prefix)?.rsplit('-').next()?.parse::<i64>().ok()?, entry.path()))).collect();
+			copies.sort_by(|a, b| b.0.cmp(&a.0));
+			for (_, old) in copies.iter().skip(3) {if let Err(error) = fs::remove_file(old) {tracing::warn!("the old copy {} could not be removed: {error}", old.display())}}
 		}
 		migrate(&mut connection, MIGRATIONS)?;
 		let (jobs, queue) = mpsc::sync_channel::<Job>(QUEUE);
@@ -141,7 +153,7 @@ pub fn audit(connection: &Connection, actor: &str, source: &str, action: &str, t
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+	use std::{os::unix::fs::PermissionsExt, sync::{atomic::{AtomicBool, Ordering}, Arc}};
 
 	/// The layout of version 2, the last one with a single node.
 	const SCHEMA_V2: &str = include_str!("../tests/golden/schema_v2.sql");
@@ -161,8 +173,8 @@ mod tests {
 	fn a_fresh_database_gets_the_schema_and_version_1() {
 		let mut connection = memory();
 		migrate(&mut connection, MIGRATIONS).unwrap();
-		assert_eq!(SCHEMA_VERSION, 5);
-		assert_eq!(version(&connection), 5);
+		assert_eq!(SCHEMA_VERSION, 6);
+		assert_eq!(version(&connection), 6);
 		assert_eq!(connection.query_row("select count(*) from sqlite_master where type = 'table'", [], |row| row.get::<_, i64>(0)).unwrap(), 17);
 		assert_eq!(connection.query_row("select id, name, pool_v4 from nodes", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).unwrap(), (1, "Node 1".into(), "10.66.0.0/16".into()));
 	}
@@ -188,7 +200,7 @@ mod tests {
 		connection.execute("insert into users (id, name, device_limit, created, record_id, sub_id, token_lookup, token_created) values (1, 'a', 3, 1, x'00', 's', x'01', 1)", []).unwrap();
 		for (id, address) in [(1, "10.7.0.2"), (2, "10.7.0.9")] {connection.execute("insert into devices (id, user_id, name, public_key, secret_hash, address, transport_secret, state, token_gen, created) values (?, 1, 'd', ?, x'00', ?, x'00', 'enrolled', 1, 1)", params![id, format!("key{id}"), address]).unwrap();}
 		migrate(&mut connection, MIGRATIONS).unwrap();
-		assert_eq!(version(&connection), 5);
+		assert_eq!(version(&connection), 6);
 		assert_eq!(connection.query_row("select id, pool_v4, link_id, place, counted from nodes", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?))).unwrap(), (1, "10.7.0.0/24".into(), None, 0, 1));
 		let addresses: Vec<(i64, i64, String)> = connection.prepare("select node_id, device_id, address from device_addresses order by device_id").unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap().collect::<Result<_, _>>().unwrap();
 		assert_eq!(addresses, vec![(1, 1, "10.7.0.2".to_string()), (1, 2, "10.7.0.9".to_string())]);
@@ -279,5 +291,79 @@ mod tests {
 		go_tx.send(()).unwrap();
 		db.blocking(|_| ()).unwrap();
 		assert!(flag.load(Ordering::SeqCst));
+	}
+
+	/// A database file of the layout of version 2, as an older panel left it, in a directory of its own named after the test.
+	fn version_2(name: &str) -> (PathBuf, PathBuf) {
+		let dir = std::env::temp_dir().join(format!("vwdb-{name}-{}", std::process::id()));
+		let _ = fs::remove_dir_all(&dir);
+		fs::create_dir_all(&dir).unwrap();
+		let path = dir.join("panel.db");
+		let connection = Connection::open(&path).unwrap();
+		connection.execute_batch(SCHEMA_V2).unwrap();
+		connection.pragma_update(None, "user_version", 2).unwrap();
+		(dir, path)
+	}
+
+	/// The copies made before a migration in `dir`, sorted by name.
+	fn copies(dir: &Path) -> Vec<PathBuf> {
+		let mut found: Vec<PathBuf> = fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().path()).filter(|path| path.to_string_lossy().contains(".before-schema-")).collect();
+		found.sort();
+		found
+	}
+
+	#[test]
+	fn a_migration_copies_the_database_first_and_the_copy_is_the_old_version() {
+		let (dir, path) = version_2("copy-first");
+		let _db = Db::open(&path).unwrap();
+		let made = copies(&dir);
+		assert_eq!(made.len(), 1, "{made:?}");
+		assert!(made[0].to_string_lossy().contains(&format!("panel.db.before-schema-2-to-{SCHEMA_VERSION}-")), "{made:?}");
+		let copy = Connection::open(&made[0]).unwrap();
+		assert_eq!(version(&copy), 2);
+		assert_eq!(copy.query_row("select count(*) from sqlite_master where name = 'nodes'", [], |row| row.get::<_, i64>(0)).unwrap(), 0, "the copy has the layout of version 2");
+		assert_eq!(fs::metadata(&made[0]).unwrap().permissions().mode() & 0o777, 0o600);
+	}
+
+	#[test]
+	fn a_second_start_makes_no_copy() {
+		let (dir, path) = version_2("copy-second");
+		let _first = Db::open(&path).unwrap();
+		let _second = Db::open(&path).unwrap();
+		assert_eq!(copies(&dir).len(), 1, "a file at the newest version is not copied again");
+	}
+
+	#[test]
+	fn the_copies_are_capped_at_the_three_newest() {
+		let (dir, path) = version_2("copy-cap");
+		for stamp in [1000, 2000, 3000, 4000] {fs::write(dir.join(format!("panel.db.before-schema-2-to-{SCHEMA_VERSION}-{stamp}")), b"").unwrap()}
+		let _db = Db::open(&path).unwrap();
+		let stamps: Vec<i64> = copies(&dir).iter().map(|copy| copy.to_string_lossy().rsplit('-').next().unwrap().parse().unwrap()).collect();
+		assert_eq!(stamps.len(), 3, "{stamps:?}");
+		assert!(stamps.iter().all(|stamp| *stamp >= 3000), "the two oldest are removed: {stamps:?}");
+	}
+
+	#[test]
+	fn a_fresh_database_makes_no_copy() {
+		let dir = std::env::temp_dir().join(format!("vwdb-copy-fresh-{}", std::process::id()));
+		let _ = fs::remove_dir_all(&dir);
+		fs::create_dir_all(&dir).unwrap();
+		let _db = Db::open(&dir.join("panel.db")).unwrap();
+		assert!(copies(&dir).is_empty());
+	}
+
+	#[test]
+	fn a_copy_that_cannot_be_made_refuses_the_migration() {
+		let dir = std::env::temp_dir().join(format!("vwdb-copy-refused-{}", std::process::id()));
+		let _ = fs::remove_dir_all(&dir);
+		fs::create_dir_all(&dir).unwrap();
+		let path = dir.join(format!("{}.db", "a".repeat(240)));
+		let connection = Connection::open(&path).unwrap();
+		connection.execute_batch(SCHEMA_V2).unwrap();
+		connection.pragma_update(None, "user_version", 2).unwrap();
+		drop(connection);
+		let error = Db::open(&path).err().unwrap();
+		assert!(error.contains("could not be copied"), "{error}");
+		assert_eq!(version(&Connection::open(&path).unwrap()), 2, "the file is left at its version");
 	}
 }

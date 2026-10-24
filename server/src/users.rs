@@ -97,7 +97,7 @@ async fn reset_everywhere(app: &Arc<App>, id: i64, totals: bool) -> Result<(), F
 	if app.db.call(move |db| usage::reset(db, id, totals, now())).await?? {
 		app.dirty_all().set();
 		let held = app.clone();
-		tokio::spawn(async move {for node in held.nodes().into_iter().filter(|node| *node != LOCAL) {let _ = node::sync(&held, node).await;}});
+		for node in held.nodes().into_iter().filter(|node| *node != LOCAL) {let held = held.clone(); tokio::spawn(async move {let _ = node::sync(&held, node).await;});}
 	}
 	Ok(())
 }
