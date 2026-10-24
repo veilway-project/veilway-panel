@@ -61,7 +61,7 @@ Operators who run a Veilway node and want to manage its users from a browser or 
 
 ## Status
 
-> **Alpha.** The current release is `v0.2.22-alpha`. The server and the web app run against a real node in the alpha gate. The panel has had no outside security review. Downloads are on the [releases page](https://github.com/veilway-project/veilway-panel/releases). Manuals and release notes are on the [docs site](https://veilway-project.github.io/veilway-docs/).
+> **Alpha.** The current release is `v0.2.23-alpha`. The server and the web app run against a real node in the alpha gate. The panel has had no outside security review. Downloads are on the [releases page](https://github.com/veilway-project/veilway-panel/releases). Manuals and release notes are on the [docs site](https://veilway-project.github.io/veilway-docs/).
 
 ## Quick start
 
