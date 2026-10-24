@@ -50,6 +50,7 @@ Veilway is an open-source VPN platform for people on censored networks. It has a
 - Users and devices: quotas per period, expiry, groups, enabling and disabling, device keys, usage resets, and subscription links and QR codes.
 - Subscriptions and gateway keys: requests and answers are encrypted end to end to the panel's gateway key, so relay mirrors see none of their content. Links carry the gateway key. The panel has a page for rotating a key, and for a key that was stolen or lost. Named endpoints are reached at `sub_path/<name>`. You can assign them per user and per group, and a move between them is signed. An endpoint may be plain `http://`. The panel warns when one is.
 - Inbounds, exits and routing: native inbounds and the optional Xray add-on. Keys are made with a Generate button. Each inbound has its own addresses. There is a default exit, with exits per user. Routing rules are reordered by drag and drop. A raw JSON editor checks each change against the schema.
+- Several servers: other servers join through node links, each with its own address pool. A user's subscription lists the servers they may use, and usage is added up across them, with a cut on every server at the quota.
 - Node links and mirrors: guided setups for an entry node and a reverse tunnel, relays, and relay and static mirrors. The node address and relay addresses may be IP addresses or host names. The panel looks a name up when it makes a user's subscription, so apps always get IP addresses.
 - Traffic, DNS, logs and notices: live and past traffic per user, inbound, exit and outbound. Also DNS settings, logs, and notices to every device.
 - Admins and access: sign-in with a password and a TOTP code, sessions, rate limits, API tokens, and an audit log. The admin API is described by `server/openapi.json`.
@@ -61,7 +62,7 @@ Operators who run a Veilway node and want to manage its users from a browser or 
 
 ## Status
 
-> **Alpha.** The current release is `v0.2.23-alpha`. The server and the web app run against a real node in the alpha gate. The panel has had no outside security review. Downloads are on the [releases page](https://github.com/veilway-project/veilway-panel/releases). Manuals and release notes are on the [docs site](https://veilway-project.github.io/veilway-docs/).
+> **Alpha.** The current release is `v0.3.0-alpha`. The server and the web app run against a real node in the alpha gate. The panel has had no outside security review. Downloads are on the [releases page](https://github.com/veilway-project/veilway-panel/releases). Manuals and release notes are on the [docs site](https://veilway-project.github.io/veilway-docs/).
 
 ## Quick start
 
