@@ -169,8 +169,8 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 			let taken: HashSet<String> = db.prepare("select address from device_addresses where node_id = ?")?.query_map([id], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
 			nodes.push((id, name, slug, uid, pool, address, cache, serde_json::from_str::<Vec<crate::nodecfg::Relay>>(&relays).unwrap_or_default(), taken));
 		}
-		// A node that does not hold the device yet is left out of this document, and the app is asked back as soon as a document allows.
-		let waiting: bool = db.query_row("select exists (select 1 from device_addresses join nodes on nodes.id = device_addresses.node_id where device_addresses.device_id = ? and nodes.id != ? and nodes.applied_rev < device_addresses.added_rev)", params![device_id, LOCAL.0], |row| row.get(0))?;
+		// A node that does not hold the device yet is left out of this document, and the app is asked back as soon as a document allows, while that node was seen within the hour: one that is down for longer would keep every new device at the shortest interval.
+		let waiting: bool = db.query_row("select exists (select 1 from device_addresses join nodes on nodes.id = device_addresses.node_id where device_addresses.device_id = ? and nodes.id != ? and nodes.applied_rev < device_addresses.added_rev and nodes.last_seen > ?)", params![device_id, LOCAL.0, now() - 3600], |row| row.get(0))?;
 		Ok((usage::across(db, user_id, now())?, nodes, waiting))
 	}).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 	let mut profiles: Vec<Value> = settings.profiles.iter().cloned().filter_map(|mut profile| {
