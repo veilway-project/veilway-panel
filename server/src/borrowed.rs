@@ -11,7 +11,7 @@ const OWN: [&str; 6] = ["id", "name", "type", "transports", "transport_public_ke
 pub const ADDRESSES: &str = "faketls_addresses";
 /// What a `faketls` transport never has: it ends no TLS, has no decoy origin and no path, and sits behind no proxy.
 const NOT: [&str; 7] = ["path", "tls", "decoy", "trusted_proxies", "client_address_header", "shape", "http2"];
-const SITE: [&str; 5] = ["host", "names", "port", "address", "acknowledged"];
+const SITE: [&str; 6] = ["host", "names", "port", "address", "outbound", "acknowledged"];
 const NAMES_MAX: usize = 4;
 const RELAYED_MAX: u64 = 65536;
 const SITE_RATE_MAX: u64 = 1024;
@@ -68,6 +68,9 @@ pub fn problems(document: &Value, running: &Value) -> Vec<String> {
 						}
 					}
 					if site.get("port").is_some_and(|port| !port.as_u64().is_some_and(|port| (1..=65535).contains(&port))) {found.push(format!("{at}.site.port: expected a port from 1 to 65535"))}
+					if let Some(outbound) = site.get("outbound") {
+						if !outbound.as_str().is_some_and(|tag| document["outbounds"].as_array().into_iter().flatten().any(|item| item["tag"] == tag)) {found.push(format!("{at}.site.outbound: expected the tag of one of the outbounds"))}
+					}
 					if let Some(address) = site.get("address") {
 						match address.as_str().and_then(|address| address.parse::<SocketAddr>().ok()) {
 							None => found.push(format!("{at}.site.address: expected an address and port such as 192.0.2.10:443")),
@@ -221,6 +224,8 @@ mod tests {
 			(site(json!({"names": ["Bad Name"]})), "site.names[0]: expected a lowercase DNS name"),
 			(site(json!({"port": 0})), "site.port: expected a port from 1 to 65535"),
 			(site(json!({"port": 70000})), "site.port: expected a port from 1 to 65535"),
+			(site(json!({"outbound": "missing"})), "site.outbound: expected the tag of one of the outbounds"),
+			(site(json!({"outbound": 5})), "site.outbound: expected the tag of one of the outbounds"),
 			(site(json!({"address": "not an address"})), "site.address: expected an address and port"),
 			(site(json!({"address": "127.0.0.1:443"})), "site.address: expected the real site"),
 			(site(json!({"colour": "blue"})), "site.colour: expected no such key"),
@@ -279,6 +284,18 @@ mod tests {
 	}
 
 	fn template_without(document: &Value) -> bool {template(&Settings::default(), document, &document["inbounds"][0], &[]).is_none()}
+
+	#[test]
+	fn the_outbound_of_the_site_is_kept_in_the_node_config_and_never_reaches_the_profile() {
+		let mut document = document(vec![transport(json!({"site": {"host": "www.example.com", "outbound": "Via", "acknowledged": true}}))]);
+		assert!(problems(&document).iter().any(|found| found.contains("site.outbound")), "an outbound the node does not have");
+		document["outbounds"] = json!([{"tag": "Via", "type": "socks5"}]);
+		assert_eq!(problems(&document), Vec::<String>::new());
+		assert_eq!(document["inbounds"][0]["transports"][0]["site"]["outbound"], "Via");
+		let template = made(&settings(&document), &document);
+		assert!(!template["profile"].to_string().contains("Via"), "the outbound is node-only");
+		assert_eq!(template["profile"]["transports"][0]["candidates"], json!([{"address": "192.0.2.10:443", "sni": "www.example.com"}]));
+	}
 
 	#[test]
 	fn the_overrides_of_the_inbound_reach_it_except_what_belongs_to_the_other_profile() {
