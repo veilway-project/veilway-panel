@@ -99,6 +99,14 @@ function SettingsForm({initial, onSaved}: {initial: Settings, onSaved: (settings
 						<NumberField label={t("subs.newDevices")} hint={t("subs.newDevicesHint")} unit={t("form.devices")} min={1} max={64} value={draft.new_devices ?? 3} onChange={value => patch({new_devices: value === "" ? 3 : value})}/>
 						<NumberField label={t("subs.newWindow")} unit={t("subs.minutesUnit")} min={1} max={1440} value={draft.new_devices_window_minutes ?? 60} onChange={value => patch({new_devices_window_minutes: value === "" ? 60 : value})}/>
 					</div>
+					<fieldset className="p-proxies">
+						<legend className="vw-label">{t("subs.usagePoll")}</legend>
+						<p className="vw-muted vw-small">{t("subs.usagePollHint")}</p>
+						<div className="p-pair">
+							<NumberField label={t("subs.usagePollHere")} unit={t("unit.seconds")} min={10} max={600} value={draft.usage_poll_secs ?? 10} onChange={value => patch({usage_poll_secs: value === "" ? 10 : value})}/>
+							<NumberField label={t("subs.usagePollOthers")} unit={t("unit.seconds")} min={10} max={600} value={draft.node_poll_secs ?? 30} onChange={value => patch({node_poll_secs: value === "" ? 30 : value})}/>
+						</div>
+					</fieldset>
 				</div>
 			</section>
 			<section className="p-section" id="set-new-users">

@@ -14,18 +14,32 @@ use tokio::net::UnixStream;
 /// One request to a node. The answer is the status and the body. Node 1 is reached on the panel's own control socket. Any other node is reached through node 1, on the relay route of the link the node is bound to, which also answers for the link: a failure of the relay is an error here, never an answer of the node.
 pub async fn request(app: &App, node: Node, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>) -> Result<(u16, Vec<u8>), String> {request_within(app, node, method, path, if_match, body, Duration::from_secs(20)).await}
 
-/// What the relay route of node 1 says when it could not carry a request, by its error code. A code not here is the remote node's own answer.
+/// What the relay route of node 1 says when it could not carry a request, by its error code. Only an answer that carries the header `veilway-relay: node1` is node 1's: the same code in any other answer is the remote node's own.
 const RELAY_ERRORS: [(&str, &str); 9] = [("no_such_link", "node 1 has no such link"), ("not_managed", "the link is not one that node 1 manages"), ("not_allowed_through_link", "the call is not on the list a managed node answers"), ("link_down", "the link is down"), ("busy", "the link is busy"), ("peer_refused", "the node does not serve management"), ("peer_silent", "the node did not answer through the link"), ("answer_too_large", "the node's answer was too large"), ("bad_answer", "the node's answer was not understood")];
+/// The refusal for a remote node whose tag node 1 now gives to another link: nothing is sent through it, so no config is pushed to a node the panel did not add.
+pub const LINK_REUSED: &str = "the link with this name is not the one this server was added with";
 
 /// Like `request`, for a call that waits on a third party (the fetch of another provider's subscription).
 pub async fn request_within(app: &App, node: Node, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>, limit: Duration) -> Result<(u16, Vec<u8>), String> {
 	let relayed;
 	let path = if node == LOCAL {path} else {
-		let found = app.db.call(move |db| db.query_row("select link_tag from nodes where id = ?", [node.0], |row| row.get::<_, Option<String>>(0)).optional()).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
-		let Some(Some(tag)) = found else {return Err(format!("node {} cannot be reached: {}", node.0, if found.is_none() {"the panel has no such node"} else {"it is bound to no link"}))};
+		let found = app.db.call(move |db| db.query_row("select link_tag, link_id from nodes where id = ?", [node.0], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?))).optional()).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+		let Some((Some(tag), link_id)) = found else {return Err(format!("node {} cannot be reached: {}", node.0, if found.is_none() {"the panel has no such node"} else {"it is bound to no link"}))};
+		let Some(links) = crate::nodes::link_states(app).await else {return Err(format!("node {} cannot be reached: node 1 does not answer for its links", node.0))};
+		if links.get(&tag).map(|(_, id)| id) != link_id.as_ref() {return Err(LINK_REUSED.into())}
 		relayed = format!("/v1/links/{tag}/api{path}");
 		&relayed
 	};
+	let (status, via_node_1, bytes) = exchange(app, method, path, if_match, body, limit).await?;
+	if node != LOCAL && status >= 400 && via_node_1 {
+		let code = serde_json::from_slice::<Value>(&bytes).ok().and_then(|answer| answer["error"]["code"].as_str().map(str::to_string)).unwrap_or_default();
+		if let Some((_, said)) = RELAY_ERRORS.iter().find(|(known, _)| *known == code) {return Err(format!("node {}: {said} ({code})", node.0))}
+	}
+	Ok((status, bytes))
+}
+
+/// One request on the panel's own control socket, within `limit`: the status, whether node 1 marked the answer as its own relay failure, and the body.
+pub(crate) async fn exchange(app: &App, method: &str, path: &str, if_match: Option<&str>, body: Option<&Value>, limit: Duration) -> Result<(u16, bool, Vec<u8>), String> {
 	let attempt = async {
 		let stream = UnixStream::connect(&app.cfg.node_socket).await.map_err(|error| format!("the node's socket: {error}"))?;
 		let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.map_err(|error| error.to_string())?;
@@ -36,12 +50,9 @@ pub async fn request_within(app: &App, node: Node, method: &str, path: &str, if_
 		let request = builder.body(Full::new(Bytes::from(body.map(|body| serde_json::to_vec(body).unwrap_or_default()).unwrap_or_default()))).map_err(|error| error.to_string())?;
 		let response = sender.send_request(request).await.map_err(|error| error.to_string())?;
 		let status = response.status().as_u16();
+		let via_node_1 = response.headers().get("veilway-relay").is_some_and(|value| value == "node1");
 		let bytes = response.into_body().collect().await.map_err(|error| error.to_string())?.to_bytes().to_vec();
-		if node != LOCAL && status >= 400 {
-			let code = serde_json::from_slice::<Value>(&bytes).ok().and_then(|answer| answer["error"]["code"].as_str().map(str::to_string)).unwrap_or_default();
-			if let Some((_, said)) = RELAY_ERRORS.iter().find(|(known, _)| *known == code) {return Err(format!("node {}: {said} ({code})", node.0))}
-		}
-		Ok::<_, String>((status, bytes))
+		Ok::<_, String>((status, via_node_1, bytes))
 	};
 	tokio::time::timeout(limit, attempt).await.map_err(|_| "the node did not answer in time".to_string())?
 }
@@ -80,8 +91,9 @@ pub(crate) async fn fill(app: &Arc<App>, node: Node, document: &mut Value) -> Re
 		// An inbound a node link uses carries no users' devices (the node refuses a config that gives it one), so no device gets an address there.
 		let linked: Vec<Value> = document["links"].as_array().into_iter().flatten().filter_map(|link| link.get("inbound").cloned()).collect();
 		let (pool, uid): (String, Vec<u8>) = db.query_row("select pool_v4, uid from nodes where id = ?", [node.0], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|error| error.to_string())?;
-		// A remote node knows a user by an opaque name and holds secrets derived for it alone. Node 1 keeps the names and the stored secrets.
+		// A remote node knows a user and a device by opaque names and holds secrets derived for it alone. Node 1 keeps the names and the stored secrets.
 		let remote = node != LOCAL;
+		let declared: Vec<Value> = document["groups"].as_array().cloned().unwrap_or_default();
 		let inbounds: Vec<Value> = document["inbounds"].as_array().into_iter().flatten().filter(|inbound| !linked.contains(&inbound["tag"])).cloned().collect();
 		let mut taken: HashSet<String> = db.prepare("select address from device_addresses where node_id = ?").and_then(|mut statement| statement.query_map([node.0], |row| row.get(0))?.collect()).map_err(|error| error.to_string())?;
 		taken.extend(document["links"].as_array().into_iter().flatten().flat_map(|link| ["dialler", "listener"].map(|side| link["addresses"][side].clone())).flat_map(|list| list.as_array().cloned().unwrap_or_default()).filter_map(|address| Some(address.as_str()?.split('/').next()?.to_string())));
@@ -100,13 +112,16 @@ pub(crate) async fn fill(app: &Arc<App>, node: Node, document: &mut Value) -> Re
 			let devices: Vec<Value> = devices.into_iter().map(|(device, public_key, address, sealed)| {
 				let secret = keys.open_secret(&record, &format!("transport_secret:{public_key}"), &sealed).ok_or("a transport secret does not open")?;
 				let secret = if remote {crypto::node_secret(crypto::NODE_TRANSPORT_SALT, &uid, &secret).to_vec()} else {secret};
-				Ok::<_, String>(json!({"name": format!("d{device}"), "public_key": public_key, "transport_secrets": [App::standard(&secret)], "addresses": subs::node_addresses(&pool, &inbounds, &address, &taken)}))
+				Ok::<_, String>(json!({"name": if remote {keys.node_device(&uid, device)} else {format!("d{device}")}, "public_key": public_key, "transport_secrets": [App::standard(&secret)], "addresses": subs::node_addresses(&pool, &inbounds, &address, &taken)}))
 			}).collect::<Result<_, _>>()?;
 			let given = if remote {keys.node_user(&uid, &record)} else {name.clone()};
 			let mut exits_given = serde_json::from_str::<Value>(&exits).unwrap_or(json!("all"));
 			// The tags of exits are node 1's. A remote node is given the ones it has.
 			if remote {if let Some(tags) = exits_given.as_array_mut() {tags.retain(|tag| document["exits"].as_array().is_some_and(|list| list.iter().any(|found| found["tag"] == *tag)))}}
-			let mut user = json!({"name": given, "enabled": enabled, "groups": serde_json::from_str::<Value>(&groups).unwrap_or(json!([])), "devices": devices, "exits": exits_given});
+			let mut groups = serde_json::from_str::<Value>(&groups).unwrap_or(json!([]));
+			// A remote node is given only the groups its config declares: any other name makes its config refuse the whole document.
+			if remote {groups = json!(groups.as_array().into_iter().flatten().filter(|group| declared.contains(group)).collect::<Vec<_>>())}
+			let mut user = json!({"name": given, "enabled": enabled, "groups": groups, "devices": devices, "exits": exits_given});
 			// A default the document no longer allows is left out here, and cleared once the node takes the document.
 			if let Some(exit) = exit.filter(|exit| default_holds(document, &exits, exit)) {user["exit"] = json!(exit);}
 			// A user over the quota of all nodes together is cut by setting this node's limit to what it counted, which it enforces as its own quota.
@@ -163,7 +178,7 @@ pub(crate) async fn fill(app: &Arc<App>, node: Node, document: &mut Value) -> Re
 	Ok(())
 }
 
-/// Sends the usage resets a remote node has not had yet. A user the node no longer knows counts as reset. Stops at the first failure and leaves the rest for the next sync.
+/// Sends the usage resets a remote node has not had yet. A user the node no longer has counts as reset, but only when its user list confirms it. Stops at the first failure and leaves the rest for the next sync.
 async fn flush_resets(app: &Arc<App>, node: Node) -> Result<(), String> {
 	let keys = app.keys.as_ref().ok_or("the key file is missing")?;
 	let (uid, rows) = app.db.call(move |db| -> rusqlite::Result<(Vec<u8>, Vec<(i64, bool, Vec<u8>)>)> {
@@ -174,7 +189,15 @@ async fn flush_resets(app: &Arc<App>, node: Node) -> Result<(), String> {
 	for (user, totals, record) in rows {
 		let name = keys.node_user(&uid, &record.try_into().map_err(|_| "a user record id is not 16 bytes")?);
 		let (status, _) = request(app, node, "POST", &format!("/v1/users/{name}/usage/reset"), None, Some(&json!({"totals": totals}))).await?;
-		if status != 200 && status != 404 {return Err(format!("the node answered {status} to a usage reset"))}
+		// A 404 is a reset done only when the node no longer has the user. Otherwise the node lacks the route, and the reset waits for a node that has it.
+		let gone = status == 404 && {
+			let (listed, body) = request(app, node, "GET", "/v1/users", None, None).await?;
+			listed == 200 && serde_json::from_slice::<Value>(&body).ok().and_then(|answer| answer["users"].as_array().map(|users| users.iter().all(|found| found["name"] != name.as_str()))).unwrap_or(false)
+		};
+		if status != 200 && !gone {
+			if status == 404 {tracing::info!("node {}: it answers 404 to the usage reset of a user it still has, so the reset is sent again at its next push", node.0)}
+			return Err(format!("the node answered {status} to a usage reset"))
+		}
 		app.db.call(move |db| db.execute("delete from node_resets where node_id = ? and user_id = ?", params![node.0, user])).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 	}
 	Ok(())

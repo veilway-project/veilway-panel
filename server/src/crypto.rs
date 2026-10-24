@@ -35,6 +35,7 @@ const DEVICE_LABEL: &[u8] = b"veilway v1 sub device secret";
 const COPY_LABEL: &[u8] = b"veilway v1 sub token copy";
 const SECRET_LABEL: &[u8] = b"veilway v1 sub secret";
 const NODE_USER_LABEL: &[u8] = b"veilway v1 node user";
+const NODE_DEVICE_LABEL: &[u8] = b"veilway v1 node device";
 /// The salt of the transport secret a remote node holds, and of its proxy password.
 pub const NODE_TRANSPORT_SALT: &[u8] = b"veilway v1 node transport secret";
 pub const NODE_PROXY_SALT: &[u8] = b"veilway v1 node proxy password";
@@ -58,8 +59,10 @@ impl Keys {
 		context.update(bytes);
 		context.sign().as_ref().try_into().expect("32 bytes")
 	}
-	/// The name a user has on a remote node: `u` and 16 base32 characters of an HMAC over the node's uid and the user's record id, so the node learns nothing of the real name and two nodes cannot match their users.
+	/// The name a user has on a remote node: `u` and 16 base32 characters of an HMAC over the node's uid and the user's record id, so the node learns nothing of the real name and two nodes cannot match a user by it. The public keys of the user's devices are the same on every node, so they still link a user across nodes.
 	pub fn node_user(&self, uid: &[u8], record: &[u8; 16]) -> String {format!("u{}", data_encoding::BASE32_NOPAD.encode(&self.mac(NODE_USER_LABEL, &[uid, record.as_slice()].concat())[..10]).to_ascii_lowercase())}
+	/// The name a device has on a remote node: `d` and 16 base32 characters of an HMAC over the node's uid and the device's id, so two nodes cannot match a device by its name. Its public key is the same on every node, so the key still links one device across nodes.
+	pub fn node_device(&self, uid: &[u8], device: i64) -> String {format!("d{}", data_encoding::BASE32_NOPAD.encode(&self.mac(NODE_DEVICE_LABEL, &[uid, device.to_be_bytes().as_slice()].concat())[..10]).to_ascii_lowercase())}
 	pub fn token_lookup(&self, token: &[u8; 16]) -> [u8; 32] {self.mac(TOKEN_LABEL, token)}
 	pub fn device_secret_hash(&self, secret: &[u8; 16]) -> [u8; 32] {self.mac(DEVICE_LABEL, secret)}
 	fn seal(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> Vec<u8> {

@@ -1,5 +1,5 @@
 //! Another provider's subscription as an exit of the node ("upstream"). The panel only parses the pasted link, makes the device the node enrolls with, and writes the config entry once the operator has read what the provider sent and said yes again. The node does the fetching, so the provider sees the node's address and never the panel's. Previews wait in memory with the device key and secret, which are in no answer, no log and no audit line, and a restart drops them.
-use crate::{app::{App, LOCAL}, crypto::{now, random}, http::{ok, Body, Ctx, Failure}, node, nodecfg};
+use crate::{app::{App, Node, LOCAL}, crypto::{now, random}, http::{ok, Body, Ctx, Failure}, node, nodecfg};
 use axum::{extract::{Path, State}, http::StatusCode, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use schemars::JsonSchema;
@@ -102,10 +102,15 @@ pub struct Upstream {
 pub struct Upstreams {pub upstreams: Vec<Upstream>}
 
 /// What a preview needs to become a config entry. No Debug on purpose: it holds the device key and secret.
-struct Held {link: String, private_key: String, device_secret: String, via: Option<String>, review: Review, at: i64}
+struct Held {node: Node, link: String, private_key: String, device_secret: String, via: Option<String>, review: Review, at: i64}
 
 #[derive(Default)]
 pub struct Previews(HashMap<String, Held>);
+
+impl Previews {
+	/// Takes a preview out only for the node that made it: that node holds the place the fetch took at the provider.
+	fn take(&mut self, node: Node, id: &str) -> Option<Held> {if self.0.get(id).is_some_and(|held| held.node == node) {self.0.remove(id)} else {None}}
+}
 
 /// Turns the node's refusal into the panel's, with the node's own plain words.
 fn refused(status: u16, body: &Value) -> Failure {
@@ -123,6 +128,16 @@ fn refused(status: u16, body: &Value) -> Failure {
 /// A tag or an id as it goes into the node's path.
 fn segment(text: &str) -> Result<&str, Failure> {
 	if !text.is_empty() && text.len() <= 64 && text.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {Ok(text)} else {Err(Failure::missing("upstream"))}
+}
+
+/// The server a request is for, and the names in its path. The routes of node 1 name no server; the others name theirs as `id`.
+fn scope(app: &App, path: Option<Path<HashMap<String, String>>>) -> Result<(Node, HashMap<String, String>), Failure> {
+	let names = path.map_or_else(HashMap::new, |Path(names)| names);
+	let node = match names.get("id") {
+		None => LOCAL,
+		Some(id) => id.parse::<i64>().map(Node).ok().filter(|node| app.nodes().contains(node)).ok_or_else(|| Failure::missing("node"))?,
+	};
+	Ok((node, names))
 }
 
 /// The provider's host and the fingerprint of its key, read from the link alone. Only a native `veilway://sub/` link is an upstream: the node refuses every other form, and so does the panel before anything is fetched. Nothing of the link is in a message.
@@ -154,7 +169,7 @@ pub async fn inspect(Body(input): Body<InspectIn>) -> Result<Response, Failure> 
 }
 
 /// Makes a device for the provider and has the node fetch the subscription with it. The fetch takes a place at the provider, which is given back when the preview is declined or runs out.
-async fn fetch(app: &Arc<App>, link: String, host: String, via: Option<String>, allow_private: bool) -> Result<Review, Failure> {
+async fn fetch(app: &Arc<App>, node: Node, link: String, host: String, via: Option<String>, allow_private: bool) -> Result<Review, Failure> {
 	{
 		let mut previews = app.previews.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		previews.0.retain(|_, held| held.at + LIFETIME > now());
@@ -163,12 +178,12 @@ async fn fetch(app: &Arc<App>, link: String, host: String, via: Option<String>, 
 	let (private_key, device_secret) = (STANDARD.encode(random::<32>()), URL_SAFE_NO_PAD.encode(random::<16>()));
 	let mut body = json!({"link": link, "private_key": private_key, "device_secret": device_secret, "allow_private": allow_private});
 	if let Some(via) = &via {body["via"] = json!(via)}
-	let (status, bytes) = node::request_within(&app, LOCAL, "POST", "/v1/upstreams/preview", None, Some(&body), FETCH).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
+	let (status, bytes) = node::request_within(&app, node, "POST", "/v1/upstreams/preview", None, Some(&body), FETCH).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
 	let answer: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
 	if status != 200 {return Err(refused(status, &answer))}
 	let mut review: Review = serde_json::from_value(answer).map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_refused", format!("The node's preview does not read: {error}")))?;
 	(review.allow_private, review.host) = (allow_private, host);
-	app.previews.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).0.insert(review.id.clone(), Held {link, private_key, device_secret, via, review: review.clone(), at: now()});
+	app.previews.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).0.insert(review.id.clone(), Held {node, link, private_key, device_secret, via, review: review.clone(), at: now()});
 	Ok(review)
 }
 
@@ -184,10 +199,12 @@ pub struct PreviewIn {
 }
 
 /// Step 2, after the operator said "fetch": the node enrolls a new device and shows what the provider sent.
-pub async fn preview(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<PreviewIn>) -> Result<Response, Failure> {
+pub async fn preview(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, path: Option<Path<HashMap<String, String>>>, Body(input): Body<PreviewIn>) -> Result<Response, Failure> {
+	let (node, _) = scope(&app, path)?;
+	if node != LOCAL {crate::nodes::require_up(&app, node).await?}
 	let link = input.link.trim().to_string();
 	let (host, fingerprint) = read(&link)?;
-	let review = fetch(&app, link, host, input.via.filter(|via| !via.is_empty()), input.allow_private == Some(true)).await?;
+	let review = fetch(&app, node, link, host, input.via.filter(|via| !via.is_empty()), input.allow_private == Some(true)).await?;
 	app.db.audit(&ctx.actor, &ctx.source, "upstream.preview", &review.id, &format!("key {fingerprint}")).await;
 	ok(&review)
 }
@@ -197,21 +214,25 @@ pub async fn preview(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 pub struct PrivateIn {pub allow_private: bool}
 
 /// Fetches again with the other answer to "allow private addresses": the old preview is declined first, so its place at the provider is given back, and the new one has a new device.
-pub async fn again(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<String>, Body(input): Body<PrivateIn>) -> Result<Response, Failure> {
-	let id = segment(&id)?.to_string();
-	let held = app.previews.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).0.remove(&id).ok_or_else(|| Failure::new(StatusCode::NOT_FOUND, "preview_gone", "This fetch ran out or was declined. Start again from the link."))?;
-	let (status, answer) = nodecfg::call(&app, LOCAL, "POST", &format!("/v1/upstreams/preview/{id}/decline"), None, None).await?;
+pub async fn again(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, path: Option<Path<HashMap<String, String>>>, Body(input): Body<PrivateIn>) -> Result<Response, Failure> {
+	let (node, names) = scope(&app, path)?;
+	if node != LOCAL {crate::nodes::require_up(&app, node).await?}
+	let id = segment(names.get("preview").map_or("", String::as_str))?.to_string();
+	let held = app.previews.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take(node, &id).ok_or_else(|| Failure::new(StatusCode::NOT_FOUND, "preview_gone", "This fetch ran out or was declined. Start again from the link."))?;
+	let (status, answer) = nodecfg::call(&app, node, "POST", &format!("/v1/upstreams/preview/{id}/decline"), None, None).await?;
 	if status != 200 && status != 404 {return Err(refused(status, &answer))}
-	let review = fetch(&app, held.link, held.review.host, held.via, input.allow_private).await?;
+	let review = fetch(&app, node, held.link, held.review.host, held.via, input.allow_private).await?;
 	app.db.audit(&ctx.actor, &ctx.source, "upstream.preview", &review.id, &format!("key {}, private addresses {}", review.fingerprint, input.allow_private)).await;
 	ok(&review)
 }
 
 /// The operator says no: the provider is told to release the place.
-pub async fn decline(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<String>) -> Result<Response, Failure> {
-	let id = segment(&id)?.to_string();
-	app.previews.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).0.remove(&id);
-	let (status, answer) = nodecfg::call(&app, LOCAL, "POST", &format!("/v1/upstreams/preview/{id}/decline"), None, None).await?;
+pub async fn decline(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, path: Option<Path<HashMap<String, String>>>) -> Result<Response, Failure> {
+	let (node, names) = scope(&app, path)?;
+	if node != LOCAL {crate::nodes::require_up(&app, node).await?}
+	let id = segment(names.get("preview").map_or("", String::as_str))?.to_string();
+	app.previews.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take(node, &id);
+	let (status, answer) = nodecfg::call(&app, node, "POST", &format!("/v1/upstreams/preview/{id}/decline"), None, None).await?;
 	if status != 200 {return Err(refused(status, &answer))}
 	app.db.audit(&ctx.actor, &ctx.source, "upstream.decline", &id, "").await;
 	ok(&crate::admin::Done {ok: true})
@@ -237,11 +258,13 @@ pub struct AddIn {
 pub struct Added {pub tag: String, pub generation: u64}
 
 /// Step 3, with a recent re-authentication: the upstream and the exit that uses it go into the node's config. The node takes the fetched document when the link and the device are the ones it holds.
-pub async fn add(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<String>, Body(input): Body<AddIn>) -> Result<Response, Failure> {
-	let id = segment(&id)?;
+pub async fn add(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, path: Option<Path<HashMap<String, String>>>, Body(input): Body<AddIn>) -> Result<Response, Failure> {
+	let (node, names) = scope(&app, path)?;
+	if node != LOCAL {crate::nodes::require_up(&app, node).await?}
+	let id = segment(names.get("preview").map_or("", String::as_str))?;
 	let tag = input.tag.trim().to_string();
 	if tag.is_empty() || tag.len() > 64 || !tag.starts_with(|first: char| first.is_ascii_lowercase() || first.is_ascii_digit()) || !tag.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_') {return Err(Failure::bad("The tag is 1 to 64 characters of a-z, 0-9, - and _, and starts with a letter or a digit."))}
-	let held = app.previews.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).0.get(id).filter(|held| held.at + LIFETIME > now()).map(|held| (held.link.clone(), held.private_key.clone(), held.device_secret.clone(), held.via.clone(), held.review.clone()));
+	let held = app.previews.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).0.get(id).filter(|held| held.node == node && held.at + LIFETIME > now()).map(|held| (held.link.clone(), held.private_key.clone(), held.device_secret.clone(), held.via.clone(), held.review.clone()));
 	let Some((link, private_key, device_secret, via, review)) = held else {return Err(Failure::new(StatusCode::NOT_FOUND, "preview_gone", "This fetch ran out or was declined. Start again from the link."))};
 	let profile = input.profile.as_deref().filter(|profile| !profile.is_empty());
 	let chosen = match profile {Some(profile) => review.profiles.iter().find(|found| found.id == profile), None => review.profiles.iter().find(|found| found.refused.is_none())};
@@ -249,9 +272,9 @@ pub async fn add(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Pa
 	let exit = input.exit.as_deref().filter(|exit| !exit.is_empty());
 	if exit.is_some_and(|exit| !chosen.exits.iter().any(|found| found.tag == exit)) {return Err(Failure::bad("The profile does not offer that exit."))}
 	if input.allow.iter().any(|class| !CLASSES.contains(&class.as_str()) || !review.classes.contains(class)) {return Err(Failure::bad("A class of transports is not one the provider lists."))}
-	let _turn = app.turn(LOCAL).await;
-	let (revision, _, mut document) = nodecfg::running(&app, LOCAL).await?;
-	let named = |section: &str| document[section].as_array().into_iter().flatten().any(|item| item["tag"] == tag.as_str());
+	let _turn = app.turn(node).await;
+	let (revision, _, mut document) = nodecfg::running(&app, node).await?;
+	let named =|section: &str| document[section].as_array().into_iter().flatten().any(|item| item["tag"] == tag.as_str());
 	if named("upstreams") || named("exits") {return Err(Failure::conflict("An upstream or an exit already has this tag. Choose another."))}
 	let mut entry = json!({"tag": tag, "link": link, "signing_key": review.fingerprint, "private_key": private_key, "device_secret": device_secret});
 	if profile.is_some() {entry["profile"] = json!(chosen.id)}
@@ -265,15 +288,16 @@ pub async fn add(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Pa
 	for (section, item) in [("upstreams", entry), ("exits", exit_entry)] {
 		match object.entry(section).or_insert_with(|| json!([])) {Value::Array(items) => items.push(item), other => *other = json!([item])}
 	}
-	let applied = nodecfg::apply(&app, LOCAL, &ctx, document, &revision, &tag).await?;
+	let applied = nodecfg::apply(&app, node, &ctx, document, &revision, &tag).await?;
 	app.previews.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).0.remove(id);
 	app.db.audit(&ctx.actor, &ctx.source, "upstream.add", &tag, &format!("provider key {}", review.fingerprint)).await;
 	ok(&Added {tag, generation: applied.get("generation").and_then(Value::as_u64).unwrap_or(0)})
 }
 
 /// The node's upstreams with their state, as the node reports them. Only the fields below pass.
-pub async fn list(State(app): State<Arc<App>>) -> Result<Response, Failure> {
-	let (status, body) = nodecfg::call(&app, LOCAL, "GET", "/v1/upstreams", None, None).await?;
+pub async fn list(State(app): State<Arc<App>>, path: Option<Path<HashMap<String, String>>>) -> Result<Response, Failure> {
+	let (node, _) = scope(&app, path)?;
+	let (status, body) = nodecfg::call(&app, node, "GET", "/v1/upstreams", None, None).await?;
 	if status != 200 {return Err(refused(status, &body))}
 	ok(&serde_json::from_value::<Upstreams>(body).map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_refused", format!("The node's upstreams do not read: {error}")))?)
 }
@@ -292,10 +316,12 @@ pub struct MoveIn {
 pub struct Moved {pub moved: bool, pub hosts: bool}
 
 /// Says yes to what the provider announced: a new endpoint, new refresh hosts. Until then the node keeps the old ones. With no field given both are confirmed.
-pub async fn confirm_move(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(tag): Path<String>, Body(input): Body<MoveIn>) -> Result<Response, Failure> {
-	let tag = segment(&tag)?;
+pub async fn confirm_move(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, path: Option<Path<HashMap<String, String>>>, Body(input): Body<MoveIn>) -> Result<Response, Failure> {
+	let (node, names) = scope(&app, path)?;
+	if node != LOCAL {crate::nodes::require_up(&app, node).await?}
+	let tag = segment(names.get("tag").map_or("", String::as_str))?;
 	let body = (input.moving.is_some() || input.hosts.is_some()).then(|| json!({"move": input.moving == Some(true), "hosts": input.hosts == Some(true)}));
-	let (status, answer) = nodecfg::call(&app, LOCAL, "POST", &format!("/v1/upstreams/{tag}/confirm"), None, body.as_ref()).await?;
+	let (status, answer) = nodecfg::call(&app, node, "POST", &format!("/v1/upstreams/{tag}/confirm"), None, body.as_ref()).await?;
 	if status != 200 {return Err(refused(status, &answer))}
 	let moved = serde_json::from_value::<Moved>(answer).map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_refused", format!("The node's answer does not read: {error}")))?;
 	app.db.audit(&ctx.actor, &ctx.source, "upstream.confirm", tag, &format!("move {}, hosts {}", moved.moved, moved.hosts)).await;
@@ -306,9 +332,11 @@ pub async fn confirm_move(State(app): State<Arc<App>>, Extension(ctx): Extension
 pub struct Retried {pub tag: String}
 
 /// Asks the upstream to connect again now.
-pub async fn retry(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(tag): Path<String>) -> Result<Response, Failure> {
-	let tag = segment(&tag)?;
-	let (status, answer) = nodecfg::call(&app, LOCAL, "POST", &format!("/v1/upstreams/{tag}/retry"), None, None).await?;
+pub async fn retry(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, path: Option<Path<HashMap<String, String>>>) -> Result<Response, Failure> {
+	let (node, names) = scope(&app, path)?;
+	if node != LOCAL {crate::nodes::require_up(&app, node).await?}
+	let tag = segment(names.get("tag").map_or("", String::as_str))?;
+	let (status, answer) = nodecfg::call(&app, node, "POST", &format!("/v1/upstreams/{tag}/retry"), None, None).await?;
 	if status != 200 {return Err(refused(status, &answer))}
 	app.db.audit(&ctx.actor, &ctx.source, "upstream.retry", tag, "").await;
 	ok(&Retried {tag: tag.to_string()})
@@ -322,21 +350,39 @@ pub struct Removed {
 }
 
 /// With a recent re-authentication: the provider is told the device left (up to ten seconds), then the config is applied without the upstream and the exits that use it. The config without them is checked first, so a rule that still uses the exit stops the removal before the provider is told anything.
-pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(tag): Path<String>) -> Result<Response, Failure> {
-	let tag = segment(&tag)?.to_string();
-	let _turn = app.turn(LOCAL).await;
-	let (revision, _, mut document) = nodecfg::running(&app, LOCAL).await?;
+pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, path: Option<Path<HashMap<String, String>>>) -> Result<Response, Failure> {
+	let (node, names) = scope(&app, path)?;
+	if node != LOCAL {crate::nodes::require_up(&app, node).await?}
+	let tag = segment(names.get("tag").map_or("", String::as_str))?.to_string();
+	let _turn = app.turn(node).await;
+	let (revision, _, mut document) = nodecfg::running(&app, node).await?;
 	if !document["upstreams"].as_array().into_iter().flatten().any(|item| item["tag"] == tag.as_str()) {return Err(Failure::missing("upstream"))}
 	if let Some(items) = document["upstreams"].as_array_mut() {items.retain(|item| item["tag"] != tag.as_str())}
 	if let Some(items) = document["exits"].as_array_mut() {items.retain(|item| !(item["backend"]["type"] == "upstream" && item["backend"]["upstream"] == tag.as_str()))}
-	let (status, checked) = nodecfg::call(&app, LOCAL, "POST", "/v1/config/validate", None, Some(&nodecfg::with_users(&app, LOCAL, document.clone()).await?)).await?;
+	let (status, checked) = nodecfg::call(&app, node, "POST", "/v1/config/validate", None, Some(&nodecfg::with_users(&app, node, document.clone()).await?)).await?;
 	if status != 200 || checked.get("valid") != Some(&Value::Bool(true)) {
 		let first = &checked["report"]["errors"][0];
 		return Err(Failure::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", format!("The config without this provider is refused, so nothing was removed: {} {}", first["path"].as_str().unwrap_or_default(), first["message"].as_str().unwrap_or("see the config page")).trim().to_string()))
 	}
-	let (status, answer) = nodecfg::call(&app, LOCAL, "DELETE", &format!("/v1/upstreams/{tag}"), None, None).await?;
+	let (status, answer) = nodecfg::call(&app, node, "DELETE", &format!("/v1/upstreams/{tag}"), None, None).await?;
 	let confirmed = match status {200 => answer["confirmed"].as_bool(), 404 => None, _ => return Err(refused(status, &answer))};
-	nodecfg::apply(&app, LOCAL, &ctx, document, &revision, &tag).await?;
+	nodecfg::apply(&app, node, &ctx, document, &revision, &tag).await?;
 	app.db.audit(&ctx.actor, &ctx.source, "upstream.remove", &tag, match confirmed {Some(true) => "the provider confirmed the leave", Some(false) => "the provider did not confirm the leave", None => "nothing to leave"}).await;
 	ok(&Removed {tag, confirmed})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn a_preview_is_taken_only_by_the_node_that_made_it() {
+		let review: Review = serde_json::from_value(json!({"id": "p1", "expires_in_secs": 600, "provider": "P", "fingerprint": "ab", "serial": 1, "expires_at": 0, "quota": null, "account_expires_at": null, "device_limit": null, "devices": 0, "classes": [], "profiles": []})).unwrap();
+		let mut previews = Previews::default();
+		previews.0.insert("p1".into(), Held {node: LOCAL, link: String::new(), private_key: String::new(), device_secret: String::new(), via: None, review, at: now()});
+		assert!(previews.take(Node(2), "p1").is_none(), "node 2 does not take a preview node 1 made");
+		assert!(previews.0.contains_key("p1"), "and leaves it in memory");
+		assert!(previews.take(LOCAL, "p1").is_some());
+		assert!(previews.0.is_empty());
+	}
 }

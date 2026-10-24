@@ -167,6 +167,10 @@ pub struct Settings {
 	pub new_devices: u32,
 	/// The length of the window of `new_devices`, 1 to 1440 minutes. It slides: a device that enrolled leaves the count that many minutes later.
 	pub new_devices_window_minutes: u32,
+	/// How often the panel adds up node 1's usage, in seconds, 10 to 600.
+	pub usage_poll_secs: u32,
+	/// How often the panel adds up the usage of each other server, in seconds, 10 to 600.
+	pub node_poll_secs: u32,
 	/// Read only to carry an older setting over: the one wait in minutes between two new devices, now `new_devices` of 1 in a window of this length. It is never written and never in the schema; a value read is turned into the two new settings by `migrate`.
 	#[serde(skip_serializing)]
 	#[schemars(skip)]
@@ -253,7 +257,7 @@ impl Settings {
 
 impl Default for Settings {
 	fn default() -> Self {
-		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), subscription_notices: Vec::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, idle_device_days: 0, new_devices: 3, new_devices_window_minutes: 60, new_device_minutes: None, transport_key_days: 30, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), inbound_ranges: BTreeMap::new(), published_relays: Vec::new(), faketls_keys: BTreeMap::new(), inbound_keys: BTreeMap::new(), transport_keys: BTreeMap::new(), transport_clocks: BTreeMap::new()}
+		Self {provider_name: "Veilway".into(), terms_url: String::new(), privacy_url: String::new(), subscription_notices: Vec::new(), endpoints: Vec::new(), default_endpoint: String::new(), group_endpoints: BTreeMap::new(), gateway_retired_days: 120, pool_v4: "10.66.0.0/16".into(), default_device_limit: 3, show_links_once: false, update_interval: 3600, document_days: 14, idle_device_days: 0, new_devices: 3, new_devices_window_minutes: 60, usage_poll_secs: 10, node_poll_secs: 30, new_device_minutes: None, transport_key_days: 30, refresh_mirrors: Vec::new(), static_mirrors: Vec::new(), static_interval: 6, profiles: Vec::new(), profile_overrides: Default::default(), node_host: String::new(), not_found: None, relays: Vec::new(), relay_profiles: BTreeMap::new(), inbound_ranges: BTreeMap::new(), published_relays: Vec::new(), faketls_keys: BTreeMap::new(), inbound_keys: BTreeMap::new(), transport_keys: BTreeMap::new(), transport_clocks: BTreeMap::new()}
 	}
 }
 

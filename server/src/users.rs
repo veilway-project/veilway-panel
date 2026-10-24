@@ -188,10 +188,12 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	let lookup = keys.token_lookup(&token);
 	let (held, cache) = (app.clone(), app.settings.clone());
 	if let Some(name) = input.endpoint.as_deref() {if app.settings().named(name).is_none() {return Err(Failure::bad("endpoint is the name of one of the endpoints, or null."))}}
+	let nodes_text = input.nodes.as_ref().map_or("\"all\"".to_string(), |nodes| serde_json::to_string(nodes).unwrap_or_default());
+	subs::profiles_fit(&app, &nodes_text).await?;
 	let id = app.db.call(move |db| -> rusqlite::Result<i64> {
 		let once = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).show_links_once;
 		let copy = (!once).then(|| held.keys.as_ref().expect("checked before the lookup").seal_copy(&record, &token));
-		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created, default_exit, endpoint, nodes) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, lookup.as_slice(), copy, now(), input.exit, input.endpoint, input.nodes.map_or("\"all\"".to_string(), |nodes| serde_json::to_string(&nodes).unwrap_or_default())])?;
+		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created, default_exit, endpoint, nodes) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, lookup.as_slice(), copy, now(), input.exit, input.endpoint, nodes_text])?;
 		let id = db.last_insert_rowid();
 		crate::app::load_lookups(db, &held.lookups);
 		audit(db, &ctx.actor, &ctx.source, "user.create", &format!("user:{id}"), &input.name);
@@ -219,6 +221,7 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	if endpoint.as_deref().is_some_and(|name| app.settings().named(name).is_none()) {return Err(Failure::bad("endpoint is the name of one of the endpoints, or null."))}
 	let dirty = app.dirty_all();
 	let nodes_text = match &input.nodes {Some(Some(nodes)) => serde_json::to_string(nodes).unwrap_or_default(), Some(None) => "\"all\"".to_string(), None => user.nodes.clone()};
+	if nodes_text != user.nodes {subs::profiles_fit(&app, &nodes_text).await?}
 	app.db.call(move |db| -> rusqlite::Result<()> {
 		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ?, default_exit = ?, endpoint = ?, nodes = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), serde_json::to_string(&exits).unwrap_or_default(), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), exit, endpoint, nodes_text, id])?;
 		// The addresses follow the nodes the user may use: new ones are taken, the ones of a node taken away are freed.

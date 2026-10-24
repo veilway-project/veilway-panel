@@ -502,6 +502,7 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 	// An app refreshes once every `update_interval` at best, so a limit shorter than three of them would take devices that are in use.
 	if input.idle_device_days > 365 || (input.idle_device_days > 0 && i64::from(input.idle_device_days) * 86_400 < 3 * i64::from(input.update_interval)) {return Err(Failure::bad("idle_device_days is 0, or 1 to 365 and at least three refresh intervals."))}
 	if !(1..=64).contains(&input.new_devices) || !(1..=1440).contains(&input.new_devices_window_minutes) {return Err(Failure::bad("new_devices is 1 to 64 and new_devices_window_minutes is 1 to 1440."))}
+	if !(10..=600).contains(&input.usage_poll_secs) || !(10..=600).contains(&input.node_poll_secs) {return Err(Failure::bad("usage_poll_secs and node_poll_secs are 10 to 600 seconds."))}
 	if !(7..=30).contains(&input.transport_key_days) {return Err(Failure::bad("transport_key_days is 7 to 30."))}
 	if input.profiles.len() > 64 || input.profiles.iter().any(|profile| !profile.is_object() || profile.get("device").is_some()) || input.refresh_mirrors.len() > 4 {return Err(Failure::bad("profiles are at most 64 objects without a device, and refresh_mirrors at most 4."))}
 	if input.profile_overrides.values().any(|edits| edits.as_object().is_some_and(crate::nodecfg::plain_written)) {return Err(Failure::bad("An override of transports may not hold a ws-plain transport."))}

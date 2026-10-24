@@ -10,18 +10,20 @@ use veilway_proto::{pairing::{self, Direction, Manage, Offer, Offers, Pastes, Te
 
 const PASSWORD: &str = "correct horse battery";
 
-/// One fake node: the document it runs, how often it was pushed to, what its users counted and which usage resets reached it.
-struct Fake {document: Mutex<Value>, generation: Mutex<u64>, applied: Mutex<Vec<Value>>, users: Mutex<Vec<Value>>, resets: Mutex<Vec<(String, Value)>>, up: AtomicBool}
+/// One fake node: the document it runs, how often it was pushed to, what its users counted and which usage resets reached it. `reset_missing` makes it lack the usage reset route and `refuse` makes it refuse every config.
+struct Fake {document: Mutex<Value>, generation: Mutex<u64>, applied: Mutex<Vec<Value>>, users: Mutex<Vec<Value>>, resets: Mutex<Vec<(String, Value)>>, up: AtomicBool, reset_missing: AtomicBool, refuse: AtomicBool, calls: Mutex<Vec<String>>}
 
 impl Fake {
-	fn new(document: Value) -> Arc<Self> {Arc::new(Self {document: Mutex::new(document), generation: Mutex::new(1), applied: Mutex::new(Vec::new()), users: Mutex::new(Vec::new()), resets: Mutex::new(Vec::new()), up: AtomicBool::new(true)})}
+	fn new(document: Value) -> Arc<Self> {Arc::new(Self {document: Mutex::new(document), generation: Mutex::new(1), applied: Mutex::new(Vec::new()), users: Mutex::new(Vec::new()), resets: Mutex::new(Vec::new()), up: AtomicBool::new(true), reset_missing: AtomicBool::new(false), refuse: AtomicBool::new(false), calls: Mutex::new(Vec::new())})}
 	fn last(&self) -> Value {self.applied.lock().unwrap().last().cloned().unwrap_or(Value::Null)}
 	fn user_names(&self) -> Vec<String> {self.document.lock().unwrap()["users"].as_array().into_iter().flatten().map(|user| user["name"].as_str().unwrap().to_string()).collect()}
 	fn user(&self, name: &str) -> Value {self.document.lock().unwrap()["users"].as_array().into_iter().flatten().find(|user| user["name"] == name).cloned().unwrap_or(Value::Null)}
 	fn serve(&self, method: &Method, path: &str, if_match: Option<String>, body: Value) -> (u16, Value) {
+		self.calls.lock().unwrap().push(format!("{} {path}", method.as_str()));
 		match (method.as_str(), path) {
 			("GET", "/v1/config") => {let generation = *self.generation.lock().unwrap(); (200, json!({"revision": format!("rev{generation}"), "generation": generation, "document": self.document.lock().unwrap().clone()}))}
 			("PUT", "/v1/config") => {
+				if self.refuse.load(Ordering::Relaxed) {return (500, json!({"error": {"code": "internal", "message": "refused"}}))}
 				let mut generation = self.generation.lock().unwrap();
 				if if_match.as_deref() != Some(&format!("\"rev{generation}\"")) {return (409, json!({"error": {"code": "stale", "message": "stale"}}))}
 				*generation += 1;
@@ -36,14 +38,17 @@ impl Fake {
 			("GET", "/v1/exits") => (200, json!({"exits": []})),
 			("GET", "/v1/stats") => (200, json!({"users": [], "inbounds": [], "exits": [], "outbounds": []})),
 			("GET", "/v1/sessions") => (200, json!({"sessions": []})),
-			("POST", path) if path.starts_with("/v1/users/") && path.ends_with("/usage/reset") => {self.resets.lock().unwrap().push((path["/v1/users/".len()..path.len() - "/usage/reset".len()].to_string(), body)); (200, json!({}))}
+			("GET", "/v1/busy") => (503, json!({"error": {"code": "busy", "message": "the node is busy"}})),
+			("GET", "/v1/upstreams") => (200, json!({"upstreams": []})),
+			("POST", path) if path.starts_with("/v1/upstreams/") && path.ends_with("/retry") => (200, json!({"tag": path.trim_start_matches("/v1/upstreams/").trim_end_matches("/retry")})),
+			("POST", path) if path.starts_with("/v1/users/") && path.ends_with("/usage/reset") => {if self.reset_missing.load(Ordering::Relaxed) {return (404, json!({"error": {"code": "not_found", "message": "no such route"}}))} self.resets.lock().unwrap().push((path["/v1/users/".len()..path.len() - "/usage/reset".len()].to_string(), body)); (200, json!({}))}
 			_ => (404, json!({"error": {"code": "not_found", "message": "no such route"}})),
 		}
 	}
 }
 
-/// Node 1 and the remote nodes behind its links.
-struct World {local: Arc<Fake>, remotes: Mutex<HashMap<String, Arc<Fake>>>, states: Mutex<HashMap<String, &'static str>>}
+/// Node 1 and the remote nodes behind its links. `ids` gives a link another id than its tag's default, as a tag that node 1 reuses for another link has.
+struct World {local: Arc<Fake>, remotes: Mutex<HashMap<String, Arc<Fake>>>, states: Mutex<HashMap<String, &'static str>>, ids: Mutex<HashMap<String, String>>}
 
 fn document(address: &str, port: u16, exit: &str) -> Value {
 	json!({"version": 1, "dns": {}, "inbounds": [{"tag": "Main", "type": "veilway", "private_key": "<redacted>", "address": [address], "transports": [{"type": "udp", "listen": format!("0.0.0.0:{port}")}]}], "outbounds": [{"tag": "plain", "type": "direct"}], "exits": [{"tag": exit}], "routing": {"default": exit, "rules": []}, "links": [], "users": []})
@@ -56,7 +61,7 @@ async fn relay(State(world): State<Arc<World>>, request: Request<Body>) -> Respo
 	let if_match = parts.headers.get("if-match").map(|value| value.to_str().unwrap().to_string());
 	let path = parts.uri.path().to_string();
 	let answer = |(status, body): (u16, Value)| (StatusCode::from_u16(status).unwrap(), Json(body)).into_response();
-	let fail = |status: u16, code: &str| answer((status, json!({"error": {"code": code, "message": code}})));
+	let fail = |status: u16, code: &str| (StatusCode::from_u16(status).unwrap(), [("veilway-relay", "node1")], Json(json!({"error": {"code": code, "message": code}}))).into_response();
 	if let Some(rest) = path.strip_prefix("/v1/links/") {
 		let (tag, rest) = rest.split_once("/api").unwrap_or((rest, ""));
 		let Some(remote) = world.remotes.lock().unwrap().get(tag).cloned() else {return fail(404, "no_such_link")};
@@ -65,7 +70,8 @@ async fn relay(State(world): State<Arc<World>>, request: Request<Body>) -> Respo
 	}
 	if path == "/v1/links" {
 		let states = world.states.lock().unwrap().clone();
-		let mut links: Vec<Value> = states.iter().map(|(tag, state)| json!({"tag": tag, "id": format!("id-{tag}"), "manage": "peer", "state": state})).collect();
+		let ids = world.ids.lock().unwrap().clone();
+		let mut links: Vec<Value> = states.iter().map(|(tag, state)| json!({"tag": tag, "id": ids.get(tag).cloned().unwrap_or(format!("id-{tag}")), "manage": "peer", "state": state})).collect();
 		links.extend(world.local.document.lock().unwrap()["links"].as_array().into_iter().flatten().filter(|link| !states.contains_key(link["tag"].as_str().unwrap_or_default())).map(|link| json!({"tag": link["tag"], "id": link["id"], "manage": link["manage"], "state": "up"})));
 		links.sort_by_key(|link| link["tag"].as_str().unwrap().to_string());
 		return answer((200, json!({"links": links})));
@@ -79,7 +85,7 @@ impl Panel {
 	async fn start() -> Self {
 		let dir = std::env::temp_dir().join(format!("vwnodes-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
 		std::fs::create_dir_all(&dir).unwrap();
-		let world = Arc::new(World {local: Fake::new(document("10.66.0.1/24", 51820, "main")), remotes: Mutex::new(HashMap::new()), states: Mutex::new(HashMap::new())});
+		let world = Arc::new(World {local: Fake::new(document("10.66.0.1/24", 51820, "main")), remotes: Mutex::new(HashMap::new()), states: Mutex::new(HashMap::new()), ids: Mutex::new(HashMap::new())});
 		let socket = dir.join("control.sock");
 		let listener = tokio::net::UnixListener::bind(&socket).unwrap();
 		let served = Router::new().fallback(relay).with_state(world.clone());
@@ -151,6 +157,8 @@ impl Panel {
 	fn opaque(&self, node: i64, user: i64) -> String {self.app.keys.as_ref().unwrap().node_user(&self.uid(node), &self.record(user))}
 	/// One pass of upkeep with nothing remembered, so every node that is due is read and pushed to.
 	async fn upkeep(&self) {upkeep_once(&self.app, &mut Upkeep::default()).await}
+	/// Node 1 is left with `count` published profiles, written by hand.
+	async fn own(&self, count: usize) {self.app.update_settings(move |settings| settings.profiles = (0..count).map(|i| profile(&format!("p{i}"), "192.0.2.10")).collect()).await.unwrap();}
 }
 
 impl Drop for Panel {
@@ -161,6 +169,20 @@ fn month_start() -> i64 {usage::bounds(Some("monthly"), crypto::now()).0}
 
 /// A profile of node 1 as a published one looks, reached at `address`.
 fn profile(id: &str, address: &str) -> Value {json!({"id": id, "name": id, "type": "veilway", "inbound_public_key": STANDARD.encode([7u8; 32]), "gateways": ["10.66.0.1"], "mtu": 1420, "transports": [{"type": "udp", "endpoints": [format!("{address}:51820")]}]})}
+
+/// The document of a remote node with `count` `veilway` inbounds that each make a profile, reached at a public address.
+fn crowded(count: usize) -> Value {
+	let mut config = document("10.67.0.1/24", 51820, "exit2");
+	config["inbounds"] = json!((0..count).map(|i| json!({"tag": format!("In{i}"), "type": "veilway", "private_key": "<redacted>", "address": ["10.67.0.1/24"], "transports": [{"type": "udp", "listen": format!("0.0.0.0:{}", 51820 + i)}]})).collect::<Vec<_>>());
+	config["public_addresses"] = json!(["192.0.2.20"]);
+	config
+}
+
+/// The refusal of a change that would make a subscription hold `count` profiles.
+fn too_many((status, error): (StatusCode, Value), count: usize) {
+	assert_eq!((status, error["error"]["code"].as_str()), (StatusCode::UNPROCESSABLE_ENTITY, Some("too_many_profiles")), "{error}");
+	assert!(error["error"]["message"].as_str().unwrap().contains(&format!("would make a subscription hold {count} profiles, and a subscription holds 64 at most")), "{error}");
+}
 
 /// The payload of the subscription document a device gets, read back through its signature.
 async fn signed_payload(panel: &Panel, user: i64, device: i64) -> Value {
@@ -193,6 +215,8 @@ async fn two_nodes_get_the_users_with_their_own_names_secrets_and_addresses_and_
 	assert_eq!(remote.user_names().len(), 1);
 	let name = second["name"].as_str().unwrap();
 	assert!(name.starts_with('u') && name.len() == 17 && name != "alice", "{name}");
+	assert_eq!(first["devices"][0]["name"], format!("d{}", made["id"]), "node 1 names a device by its id, as before");
+	assert_eq!(second["devices"][0]["name"], panel.app.keys.as_ref().unwrap().node_device(&panel.uid(two), made["id"].as_i64().unwrap()), "node 2 names the device for itself alone");
 	let (a, b) = (&first["devices"][0], &second["devices"][0]);
 	assert_eq!(a["public_key"], b["public_key"], "one key for a device, nodes hold the public half");
 	assert!(a["addresses"][0].as_str().unwrap().starts_with("10.66.0."), "{a}");
@@ -316,12 +340,15 @@ async fn the_sum_over_the_nodes_cuts_a_user_on_every_node_and_a_raised_quota_or_
 	remote.up.store(false, Ordering::Relaxed);
 	panel.world.states.lock().unwrap().insert("n2".into(), "ended");
 	panel.call(Method::POST, &format!("/p/api/users/{alice}/usage/reset"), Some(json!({}))).await;
+	counted(&panel.world.local, "alice", 0);
+	counted(&remote, &name, 0);
 	assert_eq!(panel.world.local.resets.lock().unwrap().len(), 1, "node 1 is reset at once");
 	assert!(remote.resets.lock().unwrap().is_empty(), "the node that is down is told at its next push");
 	let shown = panel.shown(alice).await;
 	assert_eq!((shown["usage"]["total_bytes"].as_i64(), shown["usage"]["cut"].as_bool()), (Some(0), Some(false)));
 	remote.up.store(true, Ordering::Relaxed);
 	panel.world.states.lock().unwrap().insert("n2".into(), "up");
+	node::sync(&panel.app, Node(two)).await.unwrap();
 	panel.upkeep().await;
 	assert_eq!(remote.resets.lock().unwrap().clone(), vec![(name.clone(), json!({"totals": false}))], "the reset reaches the node under its opaque name");
 	assert_eq!(panel.query::<i64>("select count(*) from node_resets", vec![]), [0]);
@@ -429,6 +456,7 @@ fn the_names_and_secrets_of_a_node_are_made_for_it_alone() {
 async fn a_remote_node_adds_its_profiles_once_it_has_the_device_and_keeps_them_while_it_is_down() {
 	let panel = Panel::start().await;
 	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	panel.settle().await;
 	remote.document.lock().unwrap()["public_addresses"] = json!(["192.0.2.20"]);
 	panel.app.update_settings(|settings| settings.profiles = vec![profile("main", "192.0.2.10")]).await.unwrap();
 	node::sync(&panel.app, Node(two)).await.unwrap();
@@ -469,6 +497,7 @@ async fn a_remote_node_adds_its_profiles_once_it_has_the_device_and_keeps_them_w
 async fn the_profiles_of_other_nodes_stop_at_the_cap_of_a_document_and_the_document_is_still_given() {
 	let panel = Panel::start().await;
 	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	panel.settle().await;
 	let mut config = document("10.67.0.1/24", 51820, "exit2");
 	config["inbounds"] = json!((0..10).map(|i| json!({"tag": format!("In{i}"), "type": "veilway", "private_key": "<redacted>", "address": ["10.67.0.1/24"], "transports": [{"type": "udp", "listen": format!("0.0.0.0:{}", 51820 + i)}]})).collect::<Vec<_>>());
 	config["public_addresses"] = json!(["192.0.2.20"]);
@@ -518,4 +547,302 @@ async fn a_managed_link_is_offered_and_answered_through_the_api_and_the_node_on_
 	let refused = Offers::default().issue(&Terms {manage: Some(Manage::Listener), ..edge}, crypto::now() as u64, 600, &mut crypto::fill).unwrap();
 	assert_eq!(panel.call(Method::POST, "/p/api/links/paste", Some(json!({"code": refused}))).await["manage"], "other_node");
 	assert_eq!(panel.refused(Method::POST, "/p/api/links/paste/answer", Some(json!({"code": refused, "tag": "other", "accept": true, "managed": true}))).await.0, StatusCode::CONFLICT, "a node that would manage this one is not paired");
+}
+
+#[tokio::test]
+async fn a_remote_node_is_given_only_the_groups_its_config_declares() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	remote.document.lock().unwrap()["groups"] = json!(["office"]);
+	let alice = panel.user("alice", json!({"groups": ["office", "other"]})).await;
+	panel.device(alice).await;
+	panel.settle().await;
+	assert_eq!(remote.user(&panel.opaque(two, alice))["groups"], json!(["office"]), "a group the node does not declare is left out");
+	assert_eq!(panel.world.local.user("alice")["groups"], json!(["office", "other"]), "node 1 keeps every group");
+}
+
+#[tokio::test]
+async fn an_answer_is_the_remote_nodes_own_unless_node_1_marks_it_as_its_relay_failure() {
+	let panel = Panel::start().await;
+	let (two, _) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	let (status, body) = node::request(&panel.app, Node(two), "GET", "/v1/busy", None, None).await.unwrap();
+	assert_eq!((status, String::from_utf8_lossy(&body).contains("the node is busy")), (503, true), "a busy answer of the node itself is not a relay failure");
+	panel.world.states.lock().unwrap().insert("n2".into(), "ended");
+	let error = node::request(&panel.app, Node(two), "GET", "/v1/status", None, None).await.unwrap_err();
+	assert!(error.contains("the link is down") && error.contains("link_down"), "{error}");
+}
+
+#[tokio::test]
+async fn a_tag_that_node_1_gives_to_another_link_pushes_nothing_until_the_link_has_the_id_it_was_added_with() {
+	let panel = Panel::start().await;
+	let (_, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	let alice = panel.user("alice", json!({})).await;
+	panel.device(alice).await;
+	panel.settle().await;
+	let pushed = remote.applied.lock().unwrap().len();
+	panel.world.ids.lock().unwrap().insert("n2".into(), "another-link".into());
+	let bob = panel.user("bob", json!({})).await;
+	panel.device(bob).await;
+	panel.settle().await;
+	assert_eq!((remote.applied.lock().unwrap().len(), remote.user_names().len()), (pushed, 1), "nothing is pushed through a tag that names another link");
+	panel.upkeep().await;
+	let listed = panel.call(Method::GET, "/p/api/nodes", None).await;
+	assert_eq!((listed["nodes"][1]["last_error"].as_str(), listed["nodes"][1]["down_since"].is_number()), (Some("the link with this name is not the one this server was added with"), true));
+	panel.world.ids.lock().unwrap().insert("n2".into(), "id-n2".into());
+	panel.upkeep().await;
+	assert_eq!(remote.user_names().len(), 2, "the node takes the users again once its link has the id it was added with");
+}
+
+#[tokio::test]
+async fn a_removal_that_node_1_fails_is_retried_without_asking_the_emptied_node_again() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	let alice = panel.user("alice", json!({"nodes": [1, two]})).await;
+	panel.device(alice).await;
+	panel.settle().await;
+	panel.world.local.document.lock().unwrap()["links"].as_array_mut().unwrap().push(json!({"tag": "n2", "id": "id-n2", "manage": "peer"}));
+	panel.world.local.refuse.store(true, Ordering::Relaxed);
+	panel.refused(Method::DELETE, &format!("/p/api/nodes/{two}"), None).await;
+	assert_eq!(remote.last()["users"], json!([]), "the node is emptied first");
+	assert_eq!(panel.app.nodes(), vec![LOCAL, Node(two)], "and kept while node 1 still has its link");
+	remote.up.store(false, Ordering::Relaxed);
+	panel.world.local.refuse.store(false, Ordering::Relaxed);
+	panel.call(Method::DELETE, &format!("/p/api/nodes/{two}"), None).await;
+	assert_eq!(panel.app.nodes(), vec![LOCAL]);
+	assert!(panel.world.local.document.lock().unwrap()["links"].as_array().unwrap().is_empty(), "the link leaves node 1's config");
+}
+
+#[tokio::test]
+async fn a_usage_reset_that_the_node_answers_with_404_waits_for_a_node_with_the_route_while_it_still_lists_the_user() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	let alice = panel.user("alice", json!({"quota_bytes": 1000, "quota_period": "monthly"})).await;
+	panel.device(alice).await;
+	panel.settle().await;
+	let name = panel.opaque(two, alice);
+	*remote.users.lock().unwrap() = vec![json!({"name": name, "used_bytes": 5, "period_start": month_start()})];
+	remote.reset_missing.store(true, Ordering::Relaxed);
+	panel.call(Method::POST, &format!("/p/api/users/{alice}/usage/reset"), Some(json!({}))).await;
+	panel.settle().await;
+	assert_eq!(panel.query::<i64>("select count(*) from node_resets", vec![]), [1], "a 404 for a user the node still lists is no reset");
+	assert!(panel.query::<String>("select last_error from nodes where id = ?", vec![two.into()])[0].contains("404"));
+	remote.reset_missing.store(false, Ordering::Relaxed);
+	panel.upkeep().await;
+	assert_eq!(remote.resets.lock().unwrap().clone(), vec![(name.clone(), json!({"totals": false}))], "the reset reaches the node once it has the route");
+	assert_eq!(panel.query::<i64>("select count(*) from node_resets", vec![]), [0]);
+}
+
+#[tokio::test]
+async fn a_usage_reset_answered_with_404_for_a_user_the_node_no_longer_lists_is_done() {
+	let panel = Panel::start().await;
+	let (_, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	let alice = panel.user("alice", json!({"quota_bytes": 1000, "quota_period": "monthly"})).await;
+	panel.device(alice).await;
+	panel.settle().await;
+	remote.reset_missing.store(true, Ordering::Relaxed);
+	panel.call(Method::POST, &format!("/p/api/users/{alice}/usage/reset"), Some(json!({}))).await;
+	panel.settle().await;
+	assert_eq!(panel.query::<i64>("select count(*) from node_resets", vec![]), [0], "the node has no such user, so there is nothing to reset there");
+	assert!(remote.resets.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_reading_for_a_period_that_is_not_the_current_one_is_not_kept() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	let alice = panel.user("alice", json!({"quota_bytes": 1000, "quota_period": "monthly"})).await;
+	panel.device(alice).await;
+	panel.settle().await;
+	let name = panel.opaque(two, alice);
+	let previous = usage::bounds(Some("monthly"), month_start() - 1).0;
+	for period in [9_000_000_000_000i64, previous] {
+		*remote.users.lock().unwrap() = vec![json!({"name": name, "used_bytes": 900, "period_start": period})];
+		panel.upkeep().await;
+		assert_eq!(panel.query::<i64>("select count(*) from node_usage where node_id = ?", vec![two.into()]), [0], "a period starting at {period} is not kept");
+	}
+	*remote.users.lock().unwrap() = vec![json!({"name": name, "used_bytes": 10, "period_start": month_start()})];
+	panel.upkeep().await;
+	assert_eq!(panel.shown(alice).await["usage"]["total_bytes"], 10, "the current period is kept");
+}
+
+#[tokio::test]
+async fn a_node_that_reports_growth_for_all_its_users_at_once_cannot_cut_them_in_one_reading() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	panel.call(Method::PATCH, &format!("/p/api/nodes/{two}"), Some(json!({"max_rate": 1000}))).await;
+	let mut ids = Vec::new();
+	for i in 0..20 {
+		let id = panel.user(&format!("user{i}"), json!({"quota_bytes": 1000, "quota_period": "monthly"})).await;
+		panel.device(id).await;
+		ids.push(id);
+	}
+	panel.settle().await;
+	let names: Vec<String> = ids.iter().map(|id| panel.opaque(two, *id)).collect();
+	let reading = |used: i64| names.iter().map(|name| json!({"name": name, "used_bytes": used, "period_start": month_start()})).collect::<Vec<_>>();
+	*remote.users.lock().unwrap() = reading(0);
+	panel.upkeep().await;
+	*remote.users.lock().unwrap() = reading(1_000_000_000);
+	panel.upkeep().await;
+	for id in &ids {assert_eq!(panel.shown(*id).await["usage"]["cut"], false, "one reading that asks for far more cuts nobody");}
+	assert!(panel.query::<i64>("select max(used_bytes) from node_usage where node_id = ?", vec![two.into()])[0] < 1000, "no user reaches the quota of 1000 in one reading");
+}
+
+#[tokio::test]
+async fn the_usage_intervals_are_panel_settings_checked_on_save_and_a_pass_inside_the_interval_reads_nothing() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	let shown = panel.call(Method::GET, "/p/api/settings", None).await;
+	assert_eq!((shown["usage_poll_secs"].clone(), shown["node_poll_secs"].clone()), (json!(10), json!(30)), "the defaults");
+	for (field, value) in [("usage_poll_secs", 9), ("node_poll_secs", 601)] {
+		let mut body = shown.clone();
+		body[field] = json!(value);
+		assert_eq!(panel.refused(Method::PUT, "/p/api/settings", Some(body)).await.0, StatusCode::BAD_REQUEST, "{field}");
+	}
+	let mut body = shown.clone();
+	body["node_poll_secs"] = json!(600);
+	panel.call(Method::PUT, "/p/api/settings", Some(body)).await;
+	let alice = panel.user("alice", json!({})).await;
+	panel.device(alice).await;
+	panel.settle().await;
+	let name = panel.opaque(two, alice);
+	let mut state = Upkeep::default();
+	upkeep_once(&panel.app, &mut state).await;
+	*remote.users.lock().unwrap() = vec![json!({"name": name, "used_bytes": 50, "period_start": 0})];
+	upkeep_once(&panel.app, &mut state).await;
+	assert_eq!(panel.query::<i64>("select count(*) from node_usage where node_id = ?", vec![two.into()]), [0], "a node read less than node_poll_secs ago is not read again");
+}
+
+#[tokio::test]
+async fn the_upstreams_of_another_server_go_through_its_link_and_node_1_is_not_called_for_them() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	assert_eq!(panel.call(Method::GET, &format!("/p/api/nodes/{two}/upstreams"), None).await, json!({"upstreams": []}));
+	assert_eq!(panel.call(Method::POST, &format!("/p/api/nodes/{two}/upstreams/edge/retry"), None).await, json!({"tag": "edge"}));
+	assert_eq!(panel.call(Method::GET, "/p/api/upstreams", None).await, json!({"upstreams": []}), "node 1 keeps its own endpoints");
+	let seen = remote.calls.lock().unwrap().clone();
+	assert!(seen.contains(&"GET /v1/upstreams".to_string()) && seen.contains(&"POST /v1/upstreams/edge/retry".to_string()), "{seen:?}");
+	assert!(panel.world.local.calls.lock().unwrap().iter().all(|call| !call.contains("/retry")), "node 1 is not called for another server's retry");
+}
+
+#[tokio::test]
+async fn a_node_list_that_would_make_a_subscription_hold_more_than_64_profiles_is_refused_and_exactly_64_is_allowed() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	panel.settle().await;
+	*remote.document.lock().unwrap() = crowded(10);
+	node::sync(&panel.app, Node(two)).await.unwrap();
+	panel.own(55).await;
+	let alice = panel.user("alice", json!({"nodes": [1]})).await;
+	let path = format!("/p/api/users/{alice}");
+	let nodes = || panel.query::<String>("select nodes from users where id = ?", vec![alice.into()]);
+	too_many(panel.refused(Method::PATCH, &path, Some(json!({"nodes": [1, two]}))).await, 65);
+	too_many(panel.refused(Method::PATCH, &path, Some(json!({"nodes": null}))).await, 65);
+	assert_eq!(nodes(), ["[1]"], "the account keeps its list");
+	panel.own(54).await;
+	panel.call(Method::PATCH, &path, Some(json!({"nodes": [1, two]}))).await;
+	assert_eq!(nodes(), ["[1,2]"], "54 and the 10 of the other node are exactly 64");
+	panel.own(60).await;
+	panel.call(Method::PATCH, &path, Some(json!({"nodes": [1, two], "note": "kept"}))).await;
+	assert_eq!(panel.shown(alice).await["note"], "kept", "a list that does not change is no change to refuse, even above the cap from before");
+}
+
+#[tokio::test]
+async fn a_new_account_that_would_hold_more_than_64_profiles_is_refused_and_not_made() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	panel.settle().await;
+	*remote.document.lock().unwrap() = crowded(10);
+	node::sync(&panel.app, Node(two)).await.unwrap();
+	panel.own(55).await;
+	too_many(panel.refused(Method::POST, "/p/api/users", Some(json!({"name": "alice"}))).await, 65);
+	too_many(panel.refused(Method::POST, "/p/api/users", Some(json!({"name": "alice", "nodes": [1, two]}))).await, 65);
+	assert_eq!(panel.query::<i64>("select count(*) from users", vec![]), [0], "no account was made");
+	panel.user("alice", json!({"nodes": [1]})).await;
+	panel.own(54).await;
+	panel.user("bob", json!({})).await;
+}
+
+#[tokio::test]
+async fn a_publish_that_would_make_a_subscription_hold_more_than_64_profiles_is_refused_and_exactly_64_is_allowed() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	panel.settle().await;
+	*remote.document.lock().unwrap() = crowded(10);
+	node::sync(&panel.app, Node(two)).await.unwrap();
+	panel.app.update_settings(|settings| {settings.node_host = "192.0.2.10".into(); settings.inbound_keys.insert("Main".into(), STANDARD.encode([7u8; 32]));}).await.unwrap();
+	panel.own(54).await;
+	panel.user("alice", json!({})).await;
+	let lines = || panel.query::<i64>("select count(*) from audit where action = 'settings.update'", vec![])[0];
+	let before = lines();
+	too_many(panel.refused(Method::POST, "/p/api/profiles/publish", None).await, 65);
+	assert_eq!((panel.app.settings().profiles.len(), lines()), (54, before), "nothing was published");
+	panel.own(53).await;
+	panel.call(Method::POST, "/p/api/profiles/publish", None).await;
+	assert_eq!((panel.app.settings().profiles.len(), lines()), (54, before + 1), "53 written by hand and the one of node 1's inbound make exactly 64 with the 10 of the other node");
+	panel.own(60).await;
+	panel.app.update_settings(|settings| settings.profiles.push(profile("main", "192.0.2.10"))).await.unwrap();
+	panel.call(Method::POST, "/p/api/profiles/publish", None).await;
+	assert_eq!(panel.app.settings().profiles.len(), 61, "a publish that adds no profile goes through even above the cap from before");
+}
+
+#[tokio::test]
+async fn a_node_that_would_make_a_subscription_hold_more_than_64_profiles_is_refused_and_leaves_nothing_behind() {
+	let panel = Panel::start().await;
+	panel.own(55).await;
+	let alice = panel.user("alice", json!({})).await;
+	panel.device(alice).await;
+	let remote = Fake::new(crowded(10));
+	panel.world.remotes.lock().unwrap().insert("n2".into(), remote.clone());
+	panel.world.states.lock().unwrap().insert("n2".into(), "up");
+	let offer = json!({"name": "Frankfurt", "link": "n2", "pool_v4": "10.67.0.0/24"});
+	too_many(panel.refused(Method::POST, "/p/api/nodes", Some(offer.clone())).await, 65);
+	panel.settle().await;
+	assert_eq!((panel.app.nodes(), panel.query::<i64>("select count(*) from nodes", vec![])), (vec![LOCAL], vec![1]), "the node is not kept");
+	assert_eq!(panel.query::<i64>("select count(*) from device_addresses where node_id != 1", vec![]), [0], "and the addresses it was given are gone");
+	assert_eq!(panel.query::<i64>("select count(*) from audit where action = 'node.add'", vec![]), [0], "a refused add writes no line");
+	assert!(remote.applied.lock().unwrap().is_empty(), "nothing was pushed to it");
+	panel.own(54).await;
+	panel.call(Method::POST, "/p/api/nodes", Some(offer)).await;
+	assert_eq!(panel.app.nodes(), vec![LOCAL, Node(2)], "54 and the 10 of the node are exactly 64");
+	assert_eq!((panel.query::<i64>("select count(*) from audit where action = 'node.add'", vec![]), panel.query::<i64>("select count(*) from device_addresses where node_id = 2", vec![])), (vec![1], vec![1]));
+	panel.own(70).await;
+	panel.add_node("n3", "Oslo", "10.68.0.0/24").await;
+	assert_eq!(panel.app.nodes().len(), 3, "a node that gives no profile is added even above the cap from before");
+}
+
+#[tokio::test]
+async fn an_inbounds_change_on_a_remote_node_that_would_make_a_subscription_hold_more_than_64_profiles_is_refused_before_it_is_applied() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	panel.settle().await;
+	*remote.document.lock().unwrap() = crowded(5);
+	node::sync(&panel.app, Node(two)).await.unwrap();
+	panel.own(54).await;
+	panel.user("alice", json!({})).await;
+	let path = format!("/p/api/nodes/{two}/config/inbounds");
+	let change = |count: usize| Some(json!({"revision": format!("rev{}", *remote.generation.lock().unwrap()), "value": crowded(count)["inbounds"]}));
+	let inbounds = || remote.document.lock().unwrap()["inbounds"].as_array().unwrap().len();
+	let pushed = || remote.applied.lock().unwrap().len();
+	let before = pushed();
+	too_many(panel.refused(Method::PUT, &path, change(11)).await, 65);
+	assert_eq!((inbounds(), pushed()), (5, before), "nothing reached the node");
+	panel.call(Method::PUT, &path, change(10)).await;
+	assert_eq!(inbounds(), 10, "54, the 5 it gave and 5 more are exactly 64");
+	node::sync(&panel.app, Node(two)).await.unwrap();
+	panel.own(60).await;
+	panel.call(Method::PUT, &path, change(10)).await;
+	too_many(panel.refused(Method::PUT, &path, change(11)).await, 71);
+	assert_eq!(inbounds(), 10);
+	panel.call(Method::PUT, &path, change(9)).await;
+	assert_eq!(inbounds(), 9, "a change that adds no profile goes through even above the cap from before");
+}
+
+#[tokio::test]
+async fn an_upstream_change_on_an_offline_server_is_refused_as_offline_and_sends_nothing() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	panel.world.states.lock().unwrap().insert("n2".into(), "ended");
+	let (status, body) = panel.refused(Method::POST, &format!("/p/api/nodes/{two}/upstreams/edge/retry"), None).await;
+	assert_eq!((status, body["error"]["code"].as_str()), (StatusCode::SERVICE_UNAVAILABLE, Some("node_offline")));
+	assert!(remote.calls.lock().unwrap().iter().all(|call| !call.contains("/retry")), "nothing is sent to an offline server");
 }

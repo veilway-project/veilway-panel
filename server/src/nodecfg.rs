@@ -1,5 +1,5 @@
 //! The node's config through its control API: the schema, the document as a whole and by section, dry runs, the one path that applies a change, and the profile templates derived from the inbounds.
-use crate::{app::{store_settings, App, Node, Settings, TransportClock, LOCAL}, auth::reauthed, crypto::{now, random}, http::{json, ok, Body, Ctx, Failure}, node, subs::UserRow, users::name_ok, xray::{self, addresses, Exposure}};
+use crate::{app::{store_settings, App, Node, Settings, TransportClock, LOCAL}, auth::reauthed, crypto::{now, random}, http::{json, ok, Body, Ctx, Failure}, node, subs::{self, UserRow}, users::name_ok, xray::{self, addresses, Exposure}};
 use axum::{extract::{Path, State}, http::{header::CONTENT_TYPE, HeaderValue, StatusCode}, response::{IntoResponse, Response}, Extension};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rusqlite::Connection;
@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::{collections::{BTreeMap, BTreeSet}, net::{IpAddr, SocketAddr}, sync::{atomic::Ordering, Arc, RwLock}};
-use veilway_proto::subscription::{is_host, payload::{dialable, CANDIDATES_MAX}};
+use veilway_proto::subscription::{is_host, payload::{dialable, CANDIDATES_MAX, PROFILES_MAX}};
 
 /// `veilway schema` of the core, kept next to the manifest. The node's own validation stays the authority: this is for an editor.
 const SCHEMA: &str = include_str!("../config.schema.json");
@@ -231,6 +231,15 @@ pub(crate) async fn section_put(app: Arc<App>, node: Node, ctx: Ctx, section: St
 	if GUARDED.contains(&section.as_str()) {reauthed(&app, &ctx).await?}
 	let _turn = app.turn(node).await;
 	let (_, _, mut document) = running(&app, node).await?;
+	if node != LOCAL && section == "inbounds" {
+		let inbounds = |list: &Value| list.as_array().into_iter().flatten().filter(|inbound| inbound["type"] == "veilway" && !live(inbound).is_empty()).count();
+		let (before, after, own) = (inbounds(&document["inbounds"]), inbounds(&input.value), app.settings().profiles.len());
+		// Only a change that adds profiles can be refused, so a node stays editable while a subscription is above the cap from before.
+		if after > before {
+			let would = app.db.call(move |db| subs::most_held(db, own, Some(node))).await?? + after - before;
+			if would > PROFILES_MAX {return Err(subs::too_many(would))}
+		}
+	}
 	if input.value.is_null() {document.as_object_mut().map(|document| document.remove(&section));} else {document[&section] = input.value;}
 	ok(&apply(&app, node, &ctx, document, &input.revision, &section).await?)
 }
@@ -547,6 +556,11 @@ pub async fn publish_profiles(State(app): State<Arc<App>>, Extension(ctx): Exten
 	// Profiles are published without relays: each document adds the published relays that reach its account.
 	let carrying: BTreeMap<String, String> = templates.iter().filter(|template| !empty(template)).map(|template| (template["profile"]["id"].as_str().unwrap_or_default().to_string(), template["inbound"].as_str().unwrap_or_default().to_string())).collect();
 	let relays = current.relays.clone();
+	// Checked before anything is stored: node 1's profiles as they will be, and the most any account is offered by the other nodes. A publish that adds no profile is never refused, so node 1's addresses can still be changed while a subscription is above the cap from before.
+	let stored = app.settings().profiles;
+	let kept = stored.iter().filter(|profile| !ids.contains(&profile["id"])).count() + fresh.len();
+	let most = app.db.call(|db| subs::most_held(db, 0, None)).await??;
+	if kept > stored.len() && kept + most > PROFILES_MAX {return Err(subs::too_many(kept + most))}
 	let ranges: BTreeMap<String, String> = document["inbounds"].as_array().into_iter().flatten().filter(|inbound| inbound["type"] == "veilway").filter_map(|inbound| Some((inbound["tag"].as_str()?.to_string(), crate::subs::range_of(inbound)?.to_string()))).collect();
 	app.update_settings(move |settings| {
 		settings.profiles.retain(|profile| !ids.contains(&profile["id"]));

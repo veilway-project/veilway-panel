@@ -233,6 +233,7 @@
 .p-facts dd { margin: 0; font-weight: var(--weight-strong); overflow-wrap: anywhere; }
 .p-node-card dd { margin: 0; font-weight: var(--weight-strong); }
 .p-server-pick { max-inline-size: 24rem; }
+.p-server-pick .vw-select:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Settings as one page: a menu that follows the reader, sections in a few sheets, one save bar for the whole document. */
 .p-settings { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: var(--s-5); align-items: start; }

@@ -2,26 +2,37 @@ import {Banner, Button, Checkbox, ConfirmDialog, Glass, RadioGroup, SelectField,
 import {useEffect, useState} from "react";
 import {api, type Inspected, type Review, type Upstream} from "../api.ts";
 import {ago, ErrorNote, Mark, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {ServerPicker, useServers} from "../servers.tsx";
 import {loadRunning} from "./config.tsx";
 
 const TAG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const STATE_TONE = {up: "success", fetching: "warning", connecting: "warning", down: "danger"} as const;
 const tags = (value: unknown) => (Array.isArray(value) ? value as {tag?: unknown, type?: unknown}[] : []);
+// Node 1 keeps its own routes; every other server names itself as {id}. The calls pass the id either way, and a path without {id} ignores it.
+const route = (server: number) => server === 1 ? "/upstreams" as const : "/nodes/{id}/upstreams" as const;
 
-// Other providers whose subscription is an exit of this node: one status card each, and the steps that add one. Nothing is fetched before the operator has seen the host and the key fingerprint and said so, and nothing is written to the config before the provider's document was read and a recent re-authentication confirmed it.
+// Other providers whose subscription is an exit of the server picked above: one status card each, and the steps that add one. Nothing is fetched before the operator has seen the host and the key fingerprint and said so, and nothing is written to the config before the provider's document was read and a recent re-authentication confirmed it.
 export function UpstreamsTab() {
-	const {t} = useP(), say = useSay(), [adding, setAdding] = useState(false), found = useLoad(() => api("get", "/upstreams"), []);
+	const {selected} = useServers();
+	return <Upstreams key={selected} server={selected}/>;
+}
+
+function Upstreams({server}: {server: number}) {
+	const {t} = useP(), say = useSay(), [adding, setAdding] = useState(false), found = useLoad(() => api("get", route(server), {params: {id: server}}), []);
 	useEffect(() => { const timer = setInterval(found.reload, 15000); return () => clearInterval(timer); }, [found.reload]);
-	if (adding) return <AddFlow onClose={() => { setAdding(false); found.reload(); }}/>;
+	// A preview belongs to the server that made it, so the picker stays in view but cannot move while a provider is being added.
+	if (adding) return <div className="p-stack"><ServerPicker disabled/><AddFlow server={server} onClose={() => { setAdding(false); found.reload(); }}/></div>;
+	if (found.error && !found.data) return <div className="p-stack"><ServerPicker/><StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={found.reload}>{t("action.retry")}</Button>}>{say(found.error)}</StateBlock></div>;
+	if (!found.data) return <div className="p-stack"><ServerPicker/><StateBlock kind="loading" title={t("common.loading")}/></div>;
 	return <div className="p-stack">
+		<ServerPicker/>
 		<div className="p-row"><p className="vw-muted p-lead">{t("up.lead")}</p><Button variant="primary" icon="plus" onClick={() => setAdding(true)}>{t("up.add")}</Button></div>
-		{!!found.error && !found.data && <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={found.reload}>{t("action.retry")}</Button>}>{say(found.error)}</StateBlock>}
-		{found.data && !found.data.upstreams.length && <Glass className="p-panel"><StateBlock kind="empty" title={t("up.empty")} action={<Button variant="primary" icon="plus" onClick={() => setAdding(true)}>{t("up.add")}</Button>}>{t("up.emptyBody")}</StateBlock></Glass>}
-		<div className="p-columns p-node-cards">{(found.data?.upstreams ?? []).map(upstream => <UpstreamCard key={upstream.tag} upstream={upstream} onChanged={found.reload}/>)}</div>
+		{!found.data.upstreams.length && <Glass className="p-panel"><StateBlock kind="empty" title={t("up.empty")} action={<Button variant="primary" icon="plus" onClick={() => setAdding(true)}>{t("up.add")}</Button>}>{t("up.emptyBody")}</StateBlock></Glass>}
+		<div className="p-columns p-node-cards">{found.data.upstreams.map(upstream => <UpstreamCard key={upstream.tag} server={server} upstream={upstream} onChanged={found.reload}/>)}</div>
 	</div>;
 }
 
-function UpstreamCard({upstream, onChanged}: {upstream: Upstream, onChanged: () => void}) {
+function UpstreamCard({server, upstream, onChanged}: {server: number, upstream: Upstream, onChanged: () => void}) {
 	const {t, bytes, number, date} = useP(), say = useSay(), toast = useToast(), guard = useGuard(), [busy, setBusy] = useState(false), [removing, setRemoving] = useState(false);
 	const waiting = upstream.pending_move != null || upstream.pending_hosts.length > 0, since = (at: number) => { const found = ago(Math.max(0, Date.now() / 1000 - at)); return t(found.key, {count: found.count}); };
 	const unknown = t("users.usageUnknown"), day = (at?: number | null) => at ? date(new Date(at * 1000)) : unknown;
@@ -30,7 +41,7 @@ function UpstreamCard({upstream, onChanged}: {upstream: Upstream, onChanged: () 
 		<div className="p-sheet-head"><div><strong className="vw-h3"><bdi className="vw-code" dir="ltr">{upstream.tag}</bdi></strong><span className="vw-small vw-muted">{upstream.provider ?? t("up.unnamed")}</span></div><Mark tone={STATE_TONE[upstream.state as keyof typeof STATE_TONE]}>{t(`up.state.${upstream.state as "up"}`)}</Mark></div>
 		{upstream.reason && <p className="vw-small" dir="auto">{upstream.reason}</p>}
 		{upstream.refresh_error && <Banner tone="warning" title={t("up.refreshError")}><span dir="auto">{upstream.refresh_error}</span></Banner>}
-		{waiting && <Banner tone="warning" title={t("up.pending.title")} action={<Button size="sm" disabled={busy} onClick={() => act(() => api("post", "/upstreams/{tag}/confirm", {params: {tag: upstream.tag}, body: {move: upstream.pending_move != null, hosts: upstream.pending_hosts.length > 0}}), () => { toast({tone: "success", title: t("up.confirmed")}); onChanged(); })}>{t("up.pending.confirm")}</Button>}>
+		{waiting && <Banner tone="warning" title={t("up.pending.title")} action={<Button size="sm" disabled={busy} onClick={() => act(() => api("post", `${route(server)}/{tag}/confirm` as const, {params: {id: server, tag: upstream.tag}, body: {move: upstream.pending_move != null, hosts: upstream.pending_hosts.length > 0}}), () => { toast({tone: "success", title: t("up.confirmed")}); onChanged(); })}>{t("up.pending.confirm")}</Button>}>
 			<p>{t("up.pending.body")}</p>
 			{upstream.pending_move != null && <p>{t("up.pending.move")} <bdi className="vw-code" dir="ltr">{upstream.pending_move}</bdi></p>}
 			{upstream.pending_hosts.length > 0 && <p>{t("up.pending.hosts")} <bdi className="vw-code" dir="ltr">{upstream.pending_hosts.join(", ")}</bdi></p>}
@@ -48,18 +59,18 @@ function UpstreamCard({upstream, onChanged}: {upstream: Upstream, onChanged: () 
 			<div><dt>{t("up.dropped")}</dt><dd className="vw-num">{number(upstream.counters.dropped)}</dd></div>
 		</dl>
 		{upstream.notices.length > 0 && <div className="p-stack"><span className="vw-label">{t("up.notices")}</span><ul className="p-row-list">{upstream.notices.map((notice, i) => <li key={i} className="vw-small" dir="auto">{notice}</li>)}</ul></div>}
-		<span className="p-cluster"><Button size="sm" variant="quiet" icon="refresh" disabled={busy} onClick={() => act(() => api("post", "/upstreams/{tag}/retry", {params: {tag: upstream.tag}}), () => { toast({tone: "success", title: t("up.retried")}); onChanged(); })}>{t("up.retry")}</Button><Button size="sm" variant="quiet" disabled={busy} onClick={() => setRemoving(true)}>{t("common.remove")}</Button></span>
-		<ConfirmDialog open={removing} onOpenChange={setRemoving} danger title={t("up.removeTitle", {name: upstream.tag})} body={t("up.removeBody", {name: upstream.tag})} confirmLabel={t("up.removeConfirm")} onConfirm={() => { setRemoving(false); act(() => api("delete", "/upstreams/{tag}", {params: {tag: upstream.tag}}), gone => { toast({tone: gone.confirmed === false ? "warning" : "success", title: t(gone.confirmed === false ? "up.removed.unconfirmed" : gone.confirmed ? "up.removed.confirmed" : "up.removed")}); onChanged(); }); }}/>
+		<span className="p-cluster"><Button size="sm" variant="quiet" icon="refresh" disabled={busy} onClick={() => act(() => api("post", `${route(server)}/{tag}/retry` as const, {params: {id: server, tag: upstream.tag}}), () => { toast({tone: "success", title: t("up.retried")}); onChanged(); })}>{t("up.retry")}</Button><Button size="sm" variant="quiet" disabled={busy} onClick={() => setRemoving(true)}>{t("common.remove")}</Button></span>
+		<ConfirmDialog open={removing} onOpenChange={setRemoving} danger title={t("up.removeTitle", {name: upstream.tag})} body={t("up.removeBody", {name: upstream.tag})} confirmLabel={t("up.removeConfirm")} onConfirm={() => { setRemoving(false); act(() => api("delete", `${route(server)}/{tag}` as const, {params: {id: server, tag: upstream.tag}}), gone => { toast({tone: gone.confirmed === false ? "warning" : "success", title: t(gone.confirmed === false ? "up.removed.unconfirmed" : gone.confirmed ? "up.removed.confirmed" : "up.removed")}); onChanged(); }); }}/>
 	</Glass>;
 }
 
 // Paste and read the link offline, fetch on the operator's word, read what the provider sent, then confirm. The device key and secret never reach this page.
-function AddFlow({onClose}: {onClose: () => void}) {
+function AddFlow({server, onClose}: {server: number, onClose: () => void}) {
 	const {t, date, bytes, number} = useP(), say = useSay(), toast = useToast(), guard = useGuard(), [link, setLink] = useState(""), [via, setVia] = useState(""), [read, setRead] = useState<Inspected | null>(null), [review, setReview] = useState<Review | null>(null);
 	const [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [profile, setProfile] = useState(""), [exit, setExit] = useState(""), [allow, setAllow] = useState<string[]>([]), [tag, setTag] = useState("provider"), [name, setName] = useState("");
-	const running = useLoad(loadRunning, []), outbounds = tags(running.data?.document.outbounds).filter(item => item.type === "direct" || item.type === "socks5").map(item => String(item.tag)), taken = [...tags(running.data?.document.upstreams), ...tags(running.data?.document.exits)].map(item => item.tag);
+	const running = useLoad(() => loadRunning(server), []), outbounds = tags(running.data?.document.outbounds).filter(item => item.type === "direct" || item.type === "socks5").map(item => String(item.tag)), taken = [...tags(running.data?.document.upstreams), ...tags(running.data?.document.exits)].map(item => item.tag);
 	const work = (job: () => Promise<void>) => { setBusy(true); setError(null); void job().catch(setError).finally(() => setBusy(false)); };
-	const leave = () => { if (review) void api("delete", "/upstreams/previews/{preview}", {params: {preview: review.id}}).catch(() => { }); onClose(); };
+	const leave = () => { if (review) void api("delete", `${route(server)}/previews/{preview}` as const, {params: {id: server, preview: review.id}}).catch(() => { }); onClose(); };
 	const usable = review?.profiles.filter(item => !item.refused) ?? [], chosen = review ? review.profiles.find(item => item.id === (profile || usable[0]?.id)) : undefined;
 	const tagWrong = !TAG.test(tag) ? t("up.err.tag") : taken.includes(tag) ? t("up.err.tagTaken") : undefined;
 	const warning = <Banner tone="warning" title={t("up.warn.title")}>{t("up.warn.body")}</Banner>;
@@ -75,11 +86,11 @@ function AddFlow({onClose}: {onClose: () => void}) {
 		</div>}
 		<ErrorNote error={error}/>
 		{busy && read && <StateBlock kind="loading" title={t("up.fetching")}/>}
-		<div className="p-form-foot"><Button onClick={onClose}>{t("action.cancel")}</Button>{read ? <Button variant="primary" disabled={busy} onClick={() => work(async () => show(await api("post", "/upstreams/previews", {body: {link: link.trim(), via: via || undefined}})))}>{t("up.fetch")}</Button> : <Button variant="primary" disabled={busy || !link.trim()} onClick={() => work(async () => setRead(await api("post", "/upstreams/inspect", {body: {link: link.trim()}})))}>{t("up.read")}</Button>}</div>
+		<div className="p-form-foot"><Button onClick={onClose}>{t("action.cancel")}</Button>{read ? <Button variant="primary" disabled={busy} onClick={() => work(async () => show(await api("post", `${route(server)}/previews` as const, {params: {id: server}, body: {link: link.trim(), via: via || undefined}})))}>{t("up.fetch")}</Button> : <Button variant="primary" disabled={busy || !link.trim()} onClick={() => work(async () => setRead(await api("post", "/upstreams/inspect", {body: {link: link.trim()}})))}>{t("up.read")}</Button>}</div>
 	</Glass>;
 	const privateSeen = review.profiles.some(item => item.private_addresses.length > 0), classes = review.classes.filter(item => item !== "cover");
 	const add = () => work(async () => {
-		const done = await guard(() => api("post", "/upstreams/previews/{preview}/confirm", {params: {preview: review.id}, body: {tag, name: name.trim() || undefined, profile: profile || undefined, exit: exit || undefined, allow}}));
+		const done = await guard(() => api("post", `${route(server)}/previews/{preview}/confirm` as const, {params: {id: server, preview: review.id}, body: {tag, name: name.trim() || undefined, profile: profile || undefined, exit: exit || undefined, allow}}));
 		toast({tone: "success", title: t("up.added", {tag: done.tag})});
 		onClose();
 	});
@@ -97,7 +108,7 @@ function AddFlow({onClose}: {onClose: () => void}) {
 		</dl>
 		<RadioGroup label={t("up.profiles")} value={chosen?.id ?? ""} onChange={value => { setProfile(value); setExit(""); }} options={review.profiles.map(item => ({value: item.id, label: item.name, disabled: !!item.refused, detail: item.refused ? t("up.profile.refused", {why: item.refused}) : [t(`up.rating.${item.rating as "protected"}`), item.transports.join(", "), t("up.profile.mtu", {mtu: number(item.mtu)}), item.exits.length ? t("up.profile.exits", {exits: item.exits.map(found => found.name).join(", ")}) : "", item.private_addresses.length ? t("up.profile.private", {addresses: item.private_addresses.join(", ")}) : ""].filter(Boolean).join(". ")}))}/>
 		{privateSeen && <div className="p-stack">
-			<Switch label={t("up.private")} hint={t("up.privateHint")} checked={review.allow_private} disabled={busy} onChange={on => work(async () => show(await api("post", "/upstreams/previews/{preview}/private", {params: {preview: review.id}, body: {allow_private: on}})))}/>
+			<Switch label={t("up.private")} hint={t("up.privateHint")} checked={review.allow_private} disabled={busy} onChange={on => work(async () => show(await api("post", `${route(server)}/previews/{preview}/private` as const, {params: {id: server, preview: review.id}, body: {allow_private: on}})))}/>
 			{review.allow_private && <Banner tone="danger" title={t("up.private.warnTitle")}>{t("up.private.warn")}</Banner>}
 		</div>}
 		{chosen && chosen.exits.length > 0 && <SelectField label={t("up.exitChoice")} value={exit || "default"} onChange={value => setExit(value === "default" ? "" : value)} options={[{value: "default", label: t("up.exitDefault")}, ...chosen.exits.map(item => ({value: item.tag, label: item.name}))]}/>}

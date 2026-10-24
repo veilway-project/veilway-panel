@@ -3000,6 +3000,13 @@
             "description": "The public host or address of this node, which the profiles' endpoints are made with.",
             "type": "string"
           },
+          "node_poll_secs": {
+            "default": 30,
+            "description": "How often the panel adds up the usage of each other server, in seconds, 10 to 600.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "not_found": {
             "anyOf": [
               {
@@ -3127,6 +3134,13 @@
           },
           "update_interval": {
             "default": 3600,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "usage_poll_secs": {
+            "default": 10,
+            "description": "How often the panel adds up node 1's usage, in seconds, 10 to 600.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -6937,7 +6951,7 @@
             "description": "Rate limited."
           }
         },
-        "summary": "Removes a remote node: it is asked to empty itself and drop the managing link (unless `taken=true`), then the link leaves node 1's config and the node's addresses and counts go. Query: taken. Needs a recent re-authentication.",
+        "summary": "Removes a remote node. Unless `taken=true`, it is first asked to empty itself: no users, no Xray clients and no managing link. Then the link leaves node 1's config, and the node's addresses and counts go. If node 1 cannot take the link out, the node stays emptied and the next call only takes the link out. Left on the node, and not changed by the panel: its inbounds, exits, outbounds, routing, other links and upstream subscriptions. Query: taken. Needs a recent re-authentication.",
         "x-access": "session-reauth"
       },
       "patch": {
@@ -7237,6 +7251,646 @@
         },
         "summary": "Pushes the panel's users to one node now.",
         "x-access": "users"
+      }
+    },
+    "/nodes/{id}/upstreams": {
+      "get": {
+        "operationId": "listNodeUpstreams",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Upstreams"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The subscriptions of other providers that this server's exits use, as the server reports them. The same as listUpstreams, for the server named in the path.",
+        "x-access": "read"
+      }
+    },
+    "/nodes/{id}/upstreams/previews": {
+      "post": {
+        "operationId": "previewNodeUpstream",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewIn2"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Step 2 for this server: the server enrolls a device with the provider and returns what the provider sent. The same as previewUpstream.",
+        "x-access": "session"
+      }
+    },
+    "/nodes/{id}/upstreams/previews/{preview}": {
+      "delete": {
+        "operationId": "declineNodeUpstream",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "preview",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Says no to a preview made for this server. The same as declineUpstream.",
+        "x-access": "session"
+      }
+    },
+    "/nodes/{id}/upstreams/previews/{preview}/confirm": {
+      "post": {
+        "operationId": "addNodeUpstream",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "preview",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Added"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Step 3 for this server: puts the upstream and an exit that leaves through it into this server's config. Needs a recent re-authentication. The same as addUpstream.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/nodes/{id}/upstreams/previews/{preview}/private": {
+      "post": {
+        "operationId": "previewNodeUpstreamAgain",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "preview",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrivateIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Review"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Declines the preview made for this server and fetches again, as previewUpstreamAgain does.",
+        "x-access": "session"
+      }
+    },
+    "/nodes/{id}/upstreams/{tag}": {
+      "delete": {
+        "operationId": "removeNodeUpstream",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Removed2"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Removes an upstream from this server, as removeUpstream does, and the exits that use it. Needs a recent re-authentication.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/nodes/{id}/upstreams/{tag}/confirm": {
+      "post": {
+        "operationId": "confirmNodeUpstreamMove",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveIn2"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Moved"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Says yes to the move of a provider's endpoint, or to its refresh hosts, on this server. The same as confirmUpstreamMove.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/nodes/{id}/upstreams/{tag}/retry": {
+      "post": {
+        "operationId": "retryNodeUpstream",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Retried"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Asks the upstream of this server to connect again now.",
+        "x-access": "full"
       }
     },
     "/openapi.json": {

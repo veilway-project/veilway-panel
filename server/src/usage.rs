@@ -7,8 +7,6 @@ use serde_json::Value;
 use std::{collections::{HashMap, HashSet}, sync::Arc};
 use time::OffsetDateTime;
 
-/// Seconds between two reads of a remote node's users. Node 1 is read as often as its stats.
-pub const REMOTE_POLL: i64 = 30;
 /// The most a node's counters may grow, in bytes per second, when the node has no limit of its own set: 10 Gbit/s. A node that reports more than it could have carried since its last reading is clipped, since a node that is taken could otherwise cut users everywhere with false usage.
 pub const MAX_RATE: i64 = 1_250_000_000;
 const DAY: i64 = 86_400;
@@ -32,42 +30,53 @@ pub fn bounds(period: Option<&str>, at: i64) -> (i64, i64) {
 /// What a node said it counted for a user.
 pub struct Reading {pub used: i64, pub up: i64, pub down: i64, pub period_start: i64}
 
-/// Takes one reading into what the panel keeps for the node and the user. The counters are absolute: a repeat changes nothing, a count that went down inside the same period (the node restarted, or lost its file) banks what was held, a newer period starts over and an older one is ignored. The count may grow by no more than `max_rate` bytes for each second since the last reading, and a reading above that is clipped. A user not seen before is judged from `created`, when the node was added.
-pub fn merge(db: &Connection, node: i64, user: i64, reading: &Reading, at: i64, max_rate: i64, created: i64) -> rusqlite::Result<()> {
-	let held = db.query_row("select period_start, used_bytes, banked_bytes, reported_at from node_usage where node_id = ? and user_id = ?", params![node, user], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?))).optional()?;
-	let (start, used, banked, since) = held.unwrap_or((reading.period_start, 0, 0, created));
-	if reading.period_start < start {return Ok(())}
-	let (from, banked) = if reading.period_start > start {(0, 0)} else if reading.used < used {(0, banked.saturating_add(used))} else {(used, banked)};
+/// Takes one node's readings into what the panel keeps for the node and its users. The counters are absolute: a repeat changes nothing, a count that went down inside the same period (the node restarted, or lost its file) banks what was held, a newer period starts over and an older one is ignored. The growth of all the node's users together may be no more than `max_rate` bytes for each second since the node was last read, so a reading above that has each user's growth scaled down by the same share. A user not seen before starts from that last reading too, and a node that was never read starts from one poll interval ago, so a user is never judged from when the node was added.
+pub fn merge(db: &Connection, node: i64, readings: &[(i64, Reading)], at: i64, max_rate: i64, poll: i64) -> rusqlite::Result<()> {
+	let since = db.query_row("select max(reported_at) from node_usage where node_id = ?", [node], |row| row.get::<_, Option<i64>>(0))?.unwrap_or(at - poll);
 	let room = max_rate.saturating_mul((at - since).max(1));
-	let counted = if reading.used - from > room {
-		tracing::warn!("node {node} reported {} bytes more for user {user} than it could have carried in {}s, so only {room} are counted", reading.used - from, at - since);
-		from.saturating_add(room)
-	} else {reading.used};
-	db.execute("insert into node_usage (node_id, user_id, period_start, used_bytes, up_bytes, down_bytes, banked_bytes, reported_at) values (?, ?, ?, ?, ?, ?, ?, ?) on conflict (node_id, user_id) do update set period_start = excluded.period_start, used_bytes = excluded.used_bytes, up_bytes = excluded.up_bytes, down_bytes = excluded.down_bytes, banked_bytes = excluded.banked_bytes, reported_at = excluded.reported_at", params![node, user, reading.period_start, counted, reading.up, reading.down, banked, at])?;
+	let mut kept = Vec::with_capacity(readings.len());
+	for (user, reading) in readings {
+		let held = db.query_row("select period_start, used_bytes, banked_bytes from node_usage where node_id = ? and user_id = ?", params![node, user], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))).optional()?;
+		let (start, used, banked) = held.unwrap_or((reading.period_start, 0, 0));
+		if reading.period_start < start {continue}
+		let (from, banked) = if reading.period_start > start {(0, 0)} else if reading.used < used {(0, banked.saturating_add(used))} else {(used, banked)};
+		kept.push((user, reading, from, banked));
+	}
+	let growth: i128 = kept.iter().map(|(_, reading, from, _)| (reading.used - from) as i128).sum();
+	let scaled = growth > room as i128;
+	if scaled {tracing::warn!("node {node} reported {growth} bytes more for its users than it could have carried in {}s, so each user's growth is scaled down to {room} bytes in all", at - since)}
+	for (user, reading, from, banked) in kept {
+		let counted = if scaled {from + ((reading.used - from) as i128 * room as i128 / growth) as i64} else {reading.used};
+		db.execute("insert into node_usage (node_id, user_id, period_start, used_bytes, up_bytes, down_bytes, banked_bytes, reported_at) values (?, ?, ?, ?, ?, ?, ?, ?) on conflict (node_id, user_id) do update set period_start = excluded.period_start, used_bytes = excluded.used_bytes, up_bytes = excluded.up_bytes, down_bytes = excluded.down_bytes, banked_bytes = excluded.banked_bytes, reported_at = excluded.reported_at", params![node, user, reading.period_start, counted, reading.up, reading.down, banked, at])?;
+	}
 	Ok(())
 }
 
-/// Reads what one node counted for its users into the table. A user whose usage reset has not reached the node yet is skipped, since the node still holds the count that was reset. Nothing is written when the node cannot be reached.
+/// Reads what one node counted for its users into the table. A user whose usage reset has not reached the node yet is skipped, since the node still holds the count that was reset. A reading is kept only for the period the user is in now, so a period the node made up, or one that is over, is not kept. Nothing is written when the node cannot be reached.
 pub async fn collect(app: &Arc<App>, node: Node) {
 	let at = now();
 	let Ok((200, body)) = node::request(app, node, "GET", "/v1/users", None, None).await else {return};
 	let Some(list) = serde_json::from_slice::<Value>(&body).ok().and_then(|answer| answer["users"].as_array().cloned()) else {return};
+	let settings = app.settings();
+	let poll = if node == LOCAL {settings.usage_poll_secs} else {settings.node_poll_secs} as i64;
 	let held = app.clone();
 	let result = app.db.call(move |db| -> rusqlite::Result<()> {
 		let Some(keys) = held.keys.as_ref() else {return Ok(())};
-		let (uid, limit, created): (Vec<u8>, Option<i64>, i64) = db.query_row("select uid, max_rate, created from nodes where id = ?", [node.0], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+		let (uid, limit): (Vec<u8>, Option<i64>) = db.query_row("select uid, max_rate from nodes where id = ?", [node.0], |row| Ok((row.get(0)?, row.get(1)?)))?;
 		let mut known = HashMap::new();
-		for row in db.prepare("select id, name, record_id from users")?.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()? {
-			known.insert(if node == LOCAL {row.1} else {keys.node_user(&uid, &row.2.try_into().unwrap_or([0; 16]))}, row.0);
+		for row in db.prepare("select id, name, record_id, quota_period from users")?.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, Option<String>>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()? {
+			known.insert(if node == LOCAL {row.1} else {keys.node_user(&uid, &row.2.try_into().unwrap_or([0; 16]))}, (row.0, row.3));
 		}
 		let waiting: HashSet<i64> = db.prepare("select user_id from node_resets where node_id = ?")?.query_map([node.0], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
-		let tx = db.transaction()?;
-		for item in &list {
-			let Some(user) = item["name"].as_str().and_then(|name| known.get(name)).filter(|user| !waiting.contains(user)) else {continue};
+		let readings: Vec<(i64, Reading)> = list.iter().filter_map(|item| {
+			let (user, period) = known.get(item["name"].as_str()?)?;
 			let number = |value: &Value| value.as_u64().map_or(0, |number| number.min(i64::MAX as u64) as i64);
 			let (up, down) = if item["traffic"].is_object() {(number(&item["traffic"]["up_bytes"]), number(&item["traffic"]["down_bytes"]))} else {(number(&item["up_bytes"]), number(&item["down_bytes"]))};
-			merge(&tx, node.0, *user, &Reading {used: number(&item["used_bytes"]), up, down, period_start: item["period_start"].as_i64().unwrap_or(0)}, at, limit.unwrap_or(MAX_RATE), created)?;
-		}
+			let reading = Reading {used: number(&item["used_bytes"]), up, down, period_start: item["period_start"].as_i64().unwrap_or(0)};
+			(!waiting.contains(user) && reading.period_start == bounds(period.as_deref(), at).0).then_some((*user, reading))
+		}).collect();
+		let tx = db.transaction()?;
+		merge(&tx, node.0, &readings, at, limit.unwrap_or(MAX_RATE), poll)?;
 		tx.commit()
 	}).await;
 	if let Err(error) = result.map_err(|error| error.to_string()).and_then(|done| done.map_err(|error| error.to_string())) {tracing::warn!("the usage of node {} was not kept: {error}", node.0)}
@@ -103,10 +112,10 @@ pub async fn enforce(app: &Arc<App>) -> bool {
 
 /// One pass of usage upkeep for upkeep: reads each node that is due and up, all at once so that a node that does not answer holds up no other, then cuts and lets back. `last` remembers when each node was read.
 pub async fn round(app: &Arc<App>, last: &mut HashMap<i64, i64>, up: &HashSet<i64>) {
-	let (at, nodes) = (now(), app.nodes());
+	let (at, nodes, settings) = (now(), app.nodes(), app.settings());
 	if nodes.len() < 2 {return}
 	let mut reads = tokio::task::JoinSet::new();
-	let due: Vec<Node> = nodes.into_iter().filter(|node| up.contains(&node.0) && at - last.get(&node.0).copied().unwrap_or(0) >= if *node == LOCAL {crate::stats::POLL} else {REMOTE_POLL}).collect();
+	let due: Vec<Node> = nodes.into_iter().filter(|node| up.contains(&node.0) && at - last.get(&node.0).copied().unwrap_or(0) >= if *node == LOCAL {settings.usage_poll_secs} else {settings.node_poll_secs} as i64).collect();
 	for node in due {
 		last.insert(node.0, at);
 		let held = app.clone();
@@ -166,7 +175,7 @@ mod tests {
 
 	fn held(db: &Connection) -> (i64, i64, i64) {db.query_row("select used_bytes, banked_bytes, period_start from node_usage where node_id = 2 and user_id = 1", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()}
 
-	fn read(db: &Connection, used: i64, start: i64, at: i64) {merge(db, 2, 1, &Reading {used, up: 0, down: 0, period_start: start}, at, 1000, 0).unwrap()}
+	fn read(db: &Connection, used: i64, start: i64, at: i64) {merge(db, 2, &[(1, Reading {used, up: 0, down: 0, period_start: start})], at, 1000, 30).unwrap()}
 
 	#[test]
 	fn periods_start_and_end_at_midnight_utc_a_week_on_monday_and_a_month_on_the_first() {
@@ -212,10 +221,25 @@ mod tests {
 	}
 
 	#[test]
-	fn the_first_reading_of_a_user_is_judged_from_when_the_node_was_added() {
+	fn a_user_is_judged_from_the_last_reading_of_the_node_and_a_node_never_read_from_one_poll_interval_ago() {
 		let db = world();
-		merge(&db, 2, 1, &Reading {used: 1_000_000, up: 0, down: 0, period_start: 0}, 100, 1000, 90).unwrap();
-		assert_eq!(held(&db).0, 10_000, "ten seconds of the node's rate");
+		db.execute("insert into users (id, name, device_limit, created, record_id, sub_id, token_lookup, token_created) values (2, 'b', 3, 1, x'00', 't', x'02', 1)", []).unwrap();
+		read(&db, 1_000_000, 0, 100);
+		assert_eq!(held(&db).0, 30_000, "a node read for the first time gives one poll interval of its rate");
+		merge(&db, 2, &[(2, Reading {used: 1_000_000, up: 0, down: 0, period_start: 0})], 110, 1000, 30).unwrap();
+		assert_eq!(db.query_row("select used_bytes from node_usage where user_id = 2", [], |row| row.get::<_, i64>(0)).unwrap(), 10_000, "a user added later gets the rate since the node's last reading");
+	}
+
+	#[test]
+	fn the_growth_of_all_the_users_of_a_node_together_is_held_to_its_rate() {
+		let db = world();
+		for id in 2..=20 {db.execute("insert into users (id, name, device_limit, created, record_id, sub_id, token_lookup, token_created) values (?, ?, 3, 1, x'00', ?, ?, 1)", params![id, format!("u{id}"), format!("s{id}"), vec![id as u8]]).unwrap();}
+		let all = |used: i64| (1..=20).map(|user| (user, Reading {used, up: 0, down: 0, period_start: 0})).collect::<Vec<_>>();
+		merge(&db, 2, &all(0), 10, 1000, 30).unwrap();
+		merge(&db, 2, &all(1_000_000_000), 11, 1000, 30).unwrap();
+		let (total, most): (i64, i64) = db.query_row("select sum(used_bytes), max(used_bytes) from node_usage where node_id = 2", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+		assert_eq!(total, 1000, "twenty users asking for far more get one second of the rate between them");
+		assert!(most < 1000, "no user reaches a quota of 1000 in one reading: {most}");
 	}
 
 	#[test]

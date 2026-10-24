@@ -1,5 +1,5 @@
 //! The subscription side: the link, the signed document, and the public endpoint that answers a valid token and nothing else.
-use crate::{app::{bucket, App, Endpoint, Node, SigningEntry, LOCAL}, auth, crypto::{self, now}, gateway, mirrors, statics, usage};
+use crate::{app::{bucket, App, Endpoint, Node, SigningEntry, LOCAL}, auth, crypto::{self, now}, gateway, http::Failure, mirrors, statics, usage};
 use axum::{body::Body, extract::{Request, State}, http::{header::{CACHE_CONTROL, CONTENT_TYPE}, HeaderValue, Method, StatusCode}, response::Response};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
@@ -99,6 +99,31 @@ pub fn refusal(entry: &SigningEntry, subscription_id: &str, reason: &str) -> Str
 pub fn allowed(nodes: &str, node: Node) -> bool {
 	let nodes: Value = serde_json::from_str(nodes).unwrap_or(json!("all"));
 	nodes == json!("all") || nodes.as_array().is_some_and(|list| list.iter().any(|id| id.as_i64() == Some(node.0)))
+}
+
+/// How many profiles each other node has cached, by node id: what its last sync wrote. A node that has not synced yet has none.
+fn cached(db: &Connection) -> rusqlite::Result<Vec<(i64, usize)>> {
+	db.prepare("select id, settings from nodes where id != ?")?.query_map([LOCAL.0], |row| Ok((row.get::<_, i64>(0)?, serde_json::from_str::<Value>(&row.get::<_, String>(1)?).ok().and_then(|cache| cache["profiles"].as_array().map(Vec::len)).unwrap_or(0))))?.collect()
+}
+
+/// The profiles a subscription holds for an account whose `nodes` setting is `nodes`: the `own` published profiles of node 1 and the cached ones of each other node the account may use. An upper bound, since a document drops a profile whose device address cannot be given.
+fn held(counts: &[(i64, usize)], own: usize, nodes: &str) -> usize {own + counts.iter().filter(|(id, _)| allowed(nodes, Node(*id))).map(|(_, count)| count).sum::<usize>()}
+
+/// The most `held` over the accounts, or over the ones that may use `node`, and 0 when there is none.
+pub fn most_held(db: &Connection, own: usize, node: Option<Node>) -> rusqlite::Result<usize> {
+	let (counts, lists) = (cached(db)?, db.prepare("select distinct nodes from users")?.query_map([], |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?);
+	Ok(lists.iter().filter(|nodes| node.is_none_or(|node| allowed(nodes, node))).map(|nodes| held(&counts, own, nodes)).max().unwrap_or(0))
+}
+
+/// The refusal for a change that would make a subscription hold `count` profiles, more than a document can.
+pub fn too_many(count: usize) -> Failure {Failure::new(StatusCode::UNPROCESSABLE_ENTITY, "too_many_profiles", format!("This would make a subscription hold {count} profiles, and a subscription holds {PROFILES_MAX} at most. Give the users fewer servers, or publish fewer profiles."))}
+
+/// Refuses a `nodes` setting that would give an account more than `PROFILES_MAX` profiles.
+pub async fn profiles_fit(app: &App, nodes: &str) -> Result<(), Failure> {
+	let (own, nodes) = (app.settings().profiles.len(), nodes.to_string());
+	let count = app.db.call(move |db| cached(db).map(|counts| held(&counts, own, &nodes))).await??;
+	if count > PROFILES_MAX {return Err(too_many(count))}
+	Ok(())
 }
 
 /// Gives each enrolled device of the user (of every user when none is named) an address in the pool of every remote node the user may use that it has none in, and raises the node's wanted revision for each, so that a document tells when the node has the device. A pool with no free address leaves the node out for that device, with a warning, and the device keeps the others. Node 1 is not touched: its address is taken when the device is made.
