@@ -1,5 +1,5 @@
 //! The gateway keys: the X25519 keys every native subscription request is sealed to, their file, the gateway that opens requests with them, and the switch, theft and loss actions of the subscription format page, "Gateway keys".
-use crate::{app::{App, LOCAL}, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, subs::USER_COLUMNS};
+use crate::{app::App, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, subs::USER_COLUMNS};
 use axum::{extract::State, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use rusqlite::{params, OptionalExtension};
@@ -356,7 +356,7 @@ pub async fn reset_affected(State(app): State<Arc<App>>, Extension(ctx): Extensi
 	if input.dry_run {return ok(&Reset {applied: false, count: app.db.call(|db| affected_ids(db).len() as i64).await?, links: Vec::new(), node: None})}
 	if app.keys.is_none() {return Err(Failure::bad("The key file is missing, so no link can be made."))}
 	tokio::spawn(async move {
-		let (held, dirty) = (app.clone(), app.node(LOCAL).dirty.clone());
+		let (held, dirty) = (app.clone(), app.dirty_all());
 		let (made, settled) = app.db.call(move |db| -> rusqlite::Result<(Vec<(i64, String, [u8; 16])>, Vec<i64>)> {
 			let keys = held.keys.as_ref().expect("checked before the job");
 			let once = held.settings.read().unwrap_or_else(|poisoned| poisoned.into_inner()).show_links_once;
@@ -373,7 +373,7 @@ pub async fn reset_affected(State(app): State<Arc<App>>, Extension(ctx): Extensi
 			audit(&tx, &ctx.actor, &ctx.source, "gateway.reset", "gateway", &format!("{} tokens reset after a stolen key", done.len()));
 			tx.commit()?;
 			crate::app::load_lookups(db, &held.lookups);
-			dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+			dirty.set();
 			Ok((done, settled))
 		}).await??;
 		let mut links = Vec::new();

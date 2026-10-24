@@ -15,12 +15,14 @@ pub mod mirrors;
 pub mod names;
 pub mod nodecfg;
 pub mod node;
+pub mod nodes;
 pub mod openapi;
 pub mod routes;
 pub mod stats;
 pub mod statics;
 pub mod subs;
 pub mod updater;
+pub mod usage;
 pub mod upstreams;
 pub mod users;
 pub mod via;
@@ -33,7 +35,7 @@ use auth::{Access, Guard};
 use config::Config;
 use http::Failure;
 use rusqlite::OptionalExtension;
-use std::{collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, time::Duration};
+use std::{collections::{HashMap, HashSet}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, time::Duration};
 
 /// Opens the database and the key files. The first start with no accounts makes the keys and prints a setup token.
 pub fn build(cfg: Config) -> Result<Arc<App>, String> {
@@ -92,7 +94,7 @@ pub fn build(cfg: Config) -> Result<Arc<App>, String> {
 
 /// What the upkeep loop remembers between passes.
 #[derive(Default)]
-pub struct Upkeep {pub cleaned_at: i64, pub polled_at: i64, pub nodes: HashMap<i64, Retry>}
+pub struct Upkeep {pub cleaned_at: i64, pub polled_at: i64, pub nodes: HashMap<i64, Retry>, pub read_at: HashMap<i64, i64>}
 
 /// When a node whose push failed is tried again, and how long the wait before it was.
 #[derive(Default)]
@@ -156,12 +158,22 @@ pub async fn upkeep_once(app: &Arc<App>, state: &mut Upkeep) {
 	if statics::due(app, at).await {
 		if let Err(error) = statics::round(app, at).await {tracing::warn!("static mirrors: no round was published: {error}")}
 	}
-	for node in app.nodes() {
+	let up = if app.nodes().len() > 1 {nodes::up(app).await} else {HashSet::from([LOCAL.0])};
+	usage::round(app, &mut state.read_at, &up).await;
+	// Every node that is due is pushed to at once, so one that is slow or down holds nothing up. One that is not up keeps its flag and is pushed to when its link is up again.
+	let mut pushes = tokio::task::JoinSet::new();
+	for node in app.nodes().into_iter().filter(|node| up.contains(&node.0)) {
 		let retry = state.nodes.entry(node.0).or_default();
 		if app.node(node).dirty.load(Ordering::Relaxed) && at >= retry.retry_at {
-			retry.wait = if node::sync(app, node).await.is_ok() {0} else {(retry.wait * 2).clamp(5, 600)};
-			retry.retry_at = at + retry.wait;
+			let held = app.clone();
+			pushes.spawn(async move {(node, node::sync(&held, node).await.is_ok())});
 		}
+	}
+	while let Some(done) = pushes.join_next().await {
+		let Ok((node, worked)) = done else {continue};
+		let retry = state.nodes.entry(node.0).or_default();
+		retry.wait = if worked {0} else {(retry.wait * 2).clamp(5, 600)};
+		retry.retry_at = at + retry.wait;
 	}
 }
 

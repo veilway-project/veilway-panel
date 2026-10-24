@@ -1,6 +1,31 @@
 {
   "components": {
     "schemas": {
+      "Across": {
+        "properties": {
+          "cut": {
+            "description": "Whether every node cuts the user now, because the total reached the quota.",
+            "type": "boolean"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/NodeUsage"
+            },
+            "type": "array"
+          },
+          "total_bytes": {
+            "description": "The sum over the counted nodes, in the user's current period.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_bytes",
+          "cut",
+          "nodes"
+        ],
+        "type": "object"
+      },
       "AddIn": {
         "additionalProperties": false,
         "properties": {
@@ -1595,6 +1620,36 @@
         ],
         "type": "object"
       },
+      "NodeIn": {
+        "additionalProperties": false,
+        "properties": {
+          "link": {
+            "description": "The tag of a link of node 1 that node 1 manages (`manage: \"peer\"`), made by the link pairing. A link already bound to a node is refused.",
+            "type": "string"
+          },
+          "name": {
+            "description": "1 to 32 characters, without spaces around it.",
+            "type": "string"
+          },
+          "place": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "pool_v4": {
+            "description": "The IPv4 range devices get their address at this node from.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "link",
+          "pool_v4"
+        ],
+        "type": "object"
+      },
       "NodeInfo": {
         "properties": {
           "clock_synchronized": {
@@ -1634,6 +1689,155 @@
         ],
         "type": "object"
       },
+      "NodeOut": {
+        "properties": {
+          "applied_rev": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "behind": {
+            "description": "Whether its users are still to be pushed.",
+            "type": "boolean"
+          },
+          "counted": {
+            "description": "Whether what the node counts adds to the users' totals.",
+            "type": "boolean"
+          },
+          "devices": {
+            "description": "The devices that have an address in its pool.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "down_since": {
+            "description": "Since when the link has not been up, Unix seconds, null while it is.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "id": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_seen": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "link": {
+            "description": "The tag of the link of node 1 that reaches the node. Null for node 1.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "link_state": {
+            "description": "The state of that link as node 1 reports it, null for node 1 or when node 1 cannot say.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_rate": {
+            "description": "The most the node's counters may grow, in bytes per second. Null is the default of 1.25 GB/s.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "place": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "pool_v4": {
+            "description": "The address pool devices get their address at this node from.",
+            "type": "string"
+          },
+          "slug": {
+            "description": "Short and lowercase, put in front of this node's profile ids.",
+            "type": "string"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wanted_rev": {
+            "description": "The revision of what the panel wants the node to have, and the last one the node took. A node whose applied revision is lower is behind.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "place",
+          "pool_v4",
+          "counted",
+          "wanted_rev",
+          "applied_rev",
+          "behind",
+          "devices"
+        ],
+        "type": "object"
+      },
+      "NodePatch": {
+        "additionalProperties": false,
+        "properties": {
+          "counted": {
+            "description": "False stops its usage from adding to the users' totals, for a node that reports false usage. Its users stay on it.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_rate": {
+            "default": null,
+            "description": "The most its counters may grow, in bytes per second, or null for the default.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "place": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "pool_v4": {
+            "description": "Only for a remote node that no device has an address at yet: node 1's pool is the `pool_v4` setting.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "NodeState": {
         "description": "Whether the node took the change. The panel's database is changed either way and the next successful push brings the node up to date.",
         "properties": {
@@ -1649,6 +1853,64 @@
         },
         "required": [
           "synced"
+        ],
+        "type": "object"
+      },
+      "NodeUsage": {
+        "properties": {
+          "banked_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "counted": {
+            "description": "Whether it counts toward the user's total. An admin can stop counting a node.",
+            "type": "boolean"
+          },
+          "down_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "node": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "reported_at": {
+            "description": "When the panel last read it. Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "up_bytes": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "used_bytes": {
+            "description": "What the node counts now in the user's period, and what it counted before it restarted.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "node",
+          "used_bytes",
+          "banked_bytes",
+          "up_bytes",
+          "down_bytes",
+          "reported_at",
+          "counted"
+        ],
+        "type": "object"
+      },
+      "NodesOut": {
+        "properties": {
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/NodeOut"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "nodes"
         ],
         "type": "object"
       },
@@ -2157,6 +2419,17 @@
         "type": "object"
       },
       "Removed": {
+        "properties": {
+          "removed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "removed"
+        ],
+        "type": "object"
+      },
+      "Removed2": {
         "properties": {
           "confirmed": {
             "description": "Whether the provider took the word that the device left. False: its place stays until the provider removes it. Null: the node never ran this upstream, so there was nothing to tell.",
@@ -3072,6 +3345,23 @@
         ],
         "type": "object"
       },
+      "Synced": {
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "synced": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "synced"
+        ],
+        "type": "object"
+      },
       "TokenCreated": {
         "properties": {
           "id": {
@@ -3581,6 +3871,17 @@
           "name": {
             "type": "string"
           },
+          "nodes": {
+            "description": "The ids of the nodes the user may use, at least one. Left out or null: every node.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "note": {
             "type": [
               "string",
@@ -3666,6 +3967,17 @@
           "node": {
             "description": "The node's own record of the user: usage, denial and traffic. Null when the node cannot be reached."
           },
+          "nodes": {
+            "description": "The ids of the nodes the user may use. Left out when every node is allowed.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "note": {
             "type": "string"
           },
@@ -3692,6 +4004,17 @@
           },
           "subscription_id": {
             "type": "string"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Across"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the nodes counted together, in a panel with more than one node. Only on one user's answer."
           }
         },
         "required": [
@@ -3765,6 +4088,18 @@
           "name": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "nodes": {
+            "default": null,
+            "description": "The ids of the nodes the user may use, at least one, or null for every node. A node taken out frees the addresses of the user's devices in its pool.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
               "null"
             ]
           },
@@ -6399,6 +6734,501 @@
         "x-access": "users"
       }
     },
+    "/nodes": {
+      "get": {
+        "operationId": "listNodes",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodesOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The nodes the panel manages: node 1 on the panel's own socket and the others through managed links of node 1, each with the state of its link, its pool, its revisions and whether it is behind.",
+        "x-access": "read"
+      },
+      "post": {
+        "operationId": "addNode",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Adds a remote node bound to a link of node 1 that node 1 manages. Devices get an address in its pool and its users are pushed at once. Needs a recent re-authentication.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/nodes/{id}": {
+      "delete": {
+        "operationId": "removeNode",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Removed"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Removes a remote node: it is asked to empty itself and drop the managing link (unless `taken=true`), then the link leaves node 1's config and the node's addresses and counts go. Needs a recent re-authentication.",
+        "x-access": "session-reauth"
+      },
+      "patch": {
+        "operationId": "updateNode",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodePatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NodeOut"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Changes a node's name, place, pool (a remote node with no device at it), whether it counts toward the users' totals and the most its counters may grow.",
+        "x-access": "full"
+      }
+    },
+    "/nodes/{id}/config": {
+      "get": {
+        "operationId": "getNodeConfig",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": true
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The config a node runs without its users, and its revision. A remote node is read through its link.",
+        "x-access": "read"
+      }
+    },
+    "/nodes/{id}/config/{section}": {
+      "put": {
+        "operationId": "putNodeConfigSection",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "section",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SectionIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": true
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Replaces one section of a node's config like putConfigSection does for node 1. Refused with node_offline while the node's link is not up.",
+        "x-access": "full"
+      }
+    },
+    "/nodes/{id}/sync": {
+      "post": {
+        "operationId": "syncOneNode",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Synced"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Pushes the panel's users to one node now.",
+        "x-access": "users"
+      }
+    },
     "/openapi.json": {
       "get": {
         "operationId": "openapi",
@@ -8624,7 +9454,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Removed"
+                  "$ref": "#/components/schemas/Removed2"
                 }
               }
             },

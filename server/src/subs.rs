@@ -6,7 +6,7 @@ use http_body_util::BodyExt;
 use ipnet::Ipv4Net;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::{json, Value};
-use std::{collections::HashSet, net::Ipv4Addr, sync::{atomic::Ordering, Arc}};
+use std::{collections::HashSet, net::Ipv4Addr, sync::Arc};
 use veilway_proto::subscription::{envelope, exchange::{self, GatewayKey}, fetch::{Op, RequestError}, link::Link};
 
 pub const PENDING_PLACES: i64 = 2;
@@ -14,13 +14,13 @@ pub const PENDING_LAPSE: i64 = 600;
 const NODE_DEVICES_MAX: i64 = 16;
 
 #[derive(Clone, Debug)]
-pub struct UserRow {pub id: i64, pub name: String, pub enabled: bool, pub groups: String, pub exits: String, pub quota_bytes: Option<i64>, pub quota_period: Option<String>, pub expires_at: Option<i64>, pub device_limit: i64, pub note: String, pub created: i64, pub record_id: [u8; 16], pub sub_id: String, pub token_copy: Option<Vec<u8>>, pub token_gen: i64, pub token_created: i64, pub default_exit: Option<String>, pub endpoint: Option<String>, pub proxy: bool}
+pub struct UserRow {pub id: i64, pub name: String, pub enabled: bool, pub groups: String, pub exits: String, pub quota_bytes: Option<i64>, pub quota_period: Option<String>, pub expires_at: Option<i64>, pub device_limit: i64, pub note: String, pub created: i64, pub record_id: [u8; 16], pub sub_id: String, pub token_copy: Option<Vec<u8>>, pub token_gen: i64, pub token_created: i64, pub default_exit: Option<String>, pub endpoint: Option<String>, pub proxy: bool, pub nodes: String}
 
-pub const USER_COLUMNS: &str = "id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_copy, token_gen, token_created, default_exit, endpoint, proxy_password is not null";
+pub const USER_COLUMNS: &str = "id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_copy, token_gen, token_created, default_exit, endpoint, proxy_password is not null, nodes";
 
 impl UserRow {
 	pub fn read(row: &Row) -> rusqlite::Result<Self> {
-		Ok(Self {id: row.get(0)?, name: row.get(1)?, enabled: row.get(2)?, groups: row.get(3)?, exits: row.get(4)?, quota_bytes: row.get(5)?, quota_period: row.get(6)?, expires_at: row.get(7)?, device_limit: row.get(8)?, note: row.get(9)?, created: row.get(10)?, record_id: row.get::<_, Vec<u8>>(11)?.try_into().unwrap_or([0; 16]), sub_id: row.get(12)?, token_copy: row.get(13)?, token_gen: row.get(14)?, token_created: row.get(15)?, default_exit: row.get(16)?, endpoint: row.get(17)?, proxy: row.get(18)?})
+		Ok(Self {id: row.get(0)?, name: row.get(1)?, enabled: row.get(2)?, groups: row.get(3)?, exits: row.get(4)?, quota_bytes: row.get(5)?, quota_period: row.get(6)?, expires_at: row.get(7)?, device_limit: row.get(8)?, note: row.get(9)?, created: row.get(10)?, record_id: row.get::<_, Vec<u8>>(11)?.try_into().unwrap_or([0; 16]), sub_id: row.get(12)?, token_copy: row.get(13)?, token_gen: row.get(14)?, token_created: row.get(15)?, default_exit: row.get(16)?, endpoint: row.get(17)?, proxy: row.get(18)?, nodes: row.get(19)?})
 	}
 	pub fn load(db: &Connection, id: i64) -> rusqlite::Result<Self> {db.query_row(&format!("select {USER_COLUMNS} from users where id = ?"), [id], Self::read)}
 }
@@ -94,6 +94,27 @@ fn sign(entry: &SigningEntry, payload: &Value) -> String {
 }
 
 pub fn refusal(entry: &SigningEntry, subscription_id: &str, reason: &str) -> String {sign(entry, &json!({"v": 1, "subscription_id": subscription_id, "issued_at": now(), "refusal": reason}))}
+
+/// Whether the user's `nodes` setting, `"all"` or a list of node ids, lets them use the node.
+pub fn allowed(nodes: &str, node: Node) -> bool {
+	let nodes: Value = serde_json::from_str(nodes).unwrap_or(json!("all"));
+	nodes == json!("all") || nodes.as_array().is_some_and(|list| list.iter().any(|id| id.as_i64() == Some(node.0)))
+}
+
+/// Gives each enrolled device of the user (of every user when none is named) an address in the pool of every remote node the user may use that it has none in, and raises the node's wanted revision for each, so that a document tells when the node has the device. A pool with no free address leaves the node out for that device, with a warning, and the device keeps the others. Node 1 is not touched: its address is taken when the device is made.
+pub fn add_addresses(db: &Connection, user: Option<i64>) -> rusqlite::Result<()> {
+	let devices: Vec<(i64, String)> = db.prepare("select devices.id, users.nodes from devices join users on users.id = devices.user_id where devices.state = 'enrolled' and (?1 is null or users.id = ?1) order by devices.id")?.query_map([user], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+	let nodes: Vec<i64> = db.prepare("select id from nodes where id != ? order by id")?.query_map([LOCAL.0], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+	for (device, allowed_nodes) in devices {
+		for node in nodes.iter().filter(|node| allowed(&allowed_nodes, Node(**node))) {
+			if db.query_row("select exists (select 1 from device_addresses where node_id = ? and device_id = ?)", params![node, device], |row| row.get::<_, bool>(0))? {continue}
+			let Some(address) = allocate(db, Node(*node)) else {tracing::warn!("the pool of node {node} has no free address, so device {device} is left out of it"); continue};
+			let rev: i64 = db.query_row("update nodes set wanted_rev = wanted_rev + 1 where id = ? returning wanted_rev", [node], |row| row.get(0))?;
+			db.execute("insert into device_addresses (node_id, device_id, address, added_rev) values (?, ?, ?, ?)", params![node, device, address, rev])?;
+		}
+	}
+	Ok(())
+}
 
 /// Which document is built. The endpoint's answer lists the static mirrors and carries usage. A static file has no usage, since a host may keep every version for good. A whole document, handed out as a file or in a link, lists no static mirrors, since it has no link to derive their keys from.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -263,7 +284,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	// A key that is some inbound's public key of this node is never a device's: the node would take the device for the node itself.
 	let node_key = settings.profiles.iter().chain(settings.profile_overrides.values()).filter_map(|profile| profile.get("inbound_public_key")?.as_str()).any(|key| STANDARD.decode(key).is_ok_and(|bytes| STANDARD.encode(bytes) == public_key));
 	let (changed, outcome) = {
-		let (handle, held, user, dirty, (new_max, window)) = (app.db.clone(), app.clone(), user.clone(), app.node(LOCAL).dirty.clone(), (settings.new_devices as usize, i64::from(settings.new_devices_window_minutes) * 60));
+		let (handle, held, user, dirty, (new_max, window)) = (app.db.clone(), app.clone(), user.clone(), app.dirty_all(), (settings.new_devices as usize, i64::from(settings.new_devices_window_minutes) * 60));
 		match handle.call(move |db| -> rusqlite::Result<(bool, Result<Option<DeviceRow>, &'static str>)> {
 			let (keys, mut changed, tx) = (held.keys.as_ref().expect("checked before the lookup"), false, db.transaction()?);
 			changed |= tx.execute("delete from devices where user_id = ? and state = 'pending' and created < ?", params![user.id, at - PENDING_LAPSE])? > 0;
@@ -306,8 +327,9 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 					}
 				}
 			};
+			if changed {add_addresses(&tx, Some(user.id))?}
 			tx.commit()?;
-			if changed {dirty.store(true, Ordering::Relaxed)}
+			if changed {dirty.set()}
 			Ok((changed, outcome))
 		}).await {
 			Ok(Ok(done)) => done,
@@ -318,7 +340,7 @@ pub async fn endpoint(State(app): State<Arc<App>>, request: Request) -> Response
 	// An app answered before the node has its new device is refused on its first connection and then waits out its retry, so the answer waits for the push, for a few seconds at most. The push goes on by itself if it takes longer.
 	if changed {
 		let app = app.clone();
-		let push = tokio::spawn(async move {let _ = crate::node::sync(&app, LOCAL).await;});
+		let push = tokio::spawn(async move {let _ = crate::users::push(&app).await;});
 		let _ = tokio::time::timeout(std::time::Duration::from_secs(5), push).await;
 	}
 	let device = match outcome {

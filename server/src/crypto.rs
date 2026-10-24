@@ -1,5 +1,5 @@
 //! Randomness, the keys of sealed secrets, TOTP and the small hashes the panel stores.
-use ring::{aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305}, digest, hmac, rand::{SecureRandom, SystemRandom}};
+use ring::{hkdf, aead::{Aad, LessSafeKey, Nonce, UnboundKey, CHACHA20_POLY1305}, digest, hmac, rand::{SecureRandom, SystemRandom}};
 use std::{fs::{self, OpenOptions}, io::{self, Write}, os::unix::fs::{OpenOptionsExt, PermissionsExt}, path::Path};
 
 pub fn random<const N: usize>() -> [u8; N] {
@@ -34,6 +34,10 @@ const TOKEN_LABEL: &[u8] = b"veilway v1 sub token";
 const DEVICE_LABEL: &[u8] = b"veilway v1 sub device secret";
 const COPY_LABEL: &[u8] = b"veilway v1 sub token copy";
 const SECRET_LABEL: &[u8] = b"veilway v1 sub secret";
+const NODE_USER_LABEL: &[u8] = b"veilway v1 node user";
+/// The salt of the transport secret a remote node holds, and of its proxy password.
+pub const NODE_TRANSPORT_SALT: &[u8] = b"veilway v1 node transport secret";
+pub const NODE_PROXY_SALT: &[u8] = b"veilway v1 node proxy password";
 
 impl Keys {
 	pub fn create(path: &Path) -> io::Result<Self> {
@@ -54,6 +58,8 @@ impl Keys {
 		context.update(bytes);
 		context.sign().as_ref().try_into().expect("32 bytes")
 	}
+	/// The name a user has on a remote node: `u` and 16 base32 characters of an HMAC over the node's uid and the user's record id, so the node learns nothing of the real name and two nodes cannot match their users.
+	pub fn node_user(&self, uid: &[u8], record: &[u8; 16]) -> String {format!("u{}", data_encoding::BASE32_NOPAD.encode(&self.mac(NODE_USER_LABEL, &[uid, record.as_slice()].concat())[..10]).to_ascii_lowercase())}
 	pub fn token_lookup(&self, token: &[u8; 16]) -> [u8; 32] {self.mac(TOKEN_LABEL, token)}
 	pub fn device_secret_hash(&self, secret: &[u8; 16]) -> [u8; 32] {self.mac(DEVICE_LABEL, secret)}
 	fn seal(key: &[u8; 32], aad: &[u8], plain: &[u8]) -> Vec<u8> {
@@ -72,6 +78,13 @@ impl Keys {
 	pub fn open_copy(&self, record: &[u8; 16], sealed: &[u8]) -> Option<[u8; 16]> {Self::open(&self.copy, &[COPY_LABEL, record].concat(), sealed)?.try_into().ok()}
 	pub fn seal_secret(&self, record: &[u8; 16], name: impl AsRef<[u8]>, plain: &[u8]) -> Vec<u8> {Self::seal(&self.secret, &[SECRET_LABEL, record, name.as_ref()].concat(), plain)}
 	pub fn open_secret(&self, record: &[u8; 16], name: impl AsRef<[u8]>, sealed: &[u8]) -> Option<Vec<u8>> {Self::open(&self.secret, &[SECRET_LABEL, record, name.as_ref()].concat(), sealed)}
+}
+
+/// A secret as one remote node holds it: HKDF-SHA256 of the stored secret under a salt of its own and the node's uid, 32 bytes. A node that is taken gives a value that opens nothing on node 1 or on any other node.
+pub fn node_secret(salt: &[u8], uid: &[u8], secret: &[u8]) -> [u8; 32] {
+	let mut out = [0u8; 32];
+	hkdf::Salt::new(hkdf::HKDF_SHA256, salt).extract(secret).expand(&[uid], hkdf::HKDF_SHA256).and_then(|okm| okm.fill(&mut out)).expect("32 bytes of HKDF output");
+	out
 }
 
 /// RFC 6238 with SHA-1, 30 seconds and 6 digits, the form every authenticator app takes.

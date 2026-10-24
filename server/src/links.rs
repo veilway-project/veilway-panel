@@ -85,7 +85,7 @@ pub async fn offer(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	if input.tag.is_empty() || input.tag.len() > 64 || document["links"].as_array().into_iter().flatten().any(|link| link["tag"] == input.tag.as_str()) {return Err(Failure::conflict("The link tag is empty, too long, or already in the config."))}
 	let transports = pairing::transports(&serde_json::to_vec(&input.transports).unwrap_or_default()).map_err(code_error)?;
 	let mtu = input.mtu.unwrap_or(if found["transports"].as_array().into_iter().flatten().any(|transport| transport["type"] == "udp-obfs") {1390} else {1420});
-	let terms = Terms {direction, name: input.name, inbound_public_key: key32(&input.inbound_public_key, "inbound_public_key")?, transport_public_key: input.transport_public_key.as_deref().map(|key| key32(key, "transport_public_key")).transpose()?, dialler: input.dialler, listener: input.listener, mtu, transports};
+	let terms = Terms {direction, name: input.name, inbound_public_key: key32(&input.inbound_public_key, "inbound_public_key")?, transport_public_key: input.transport_public_key.as_deref().map(|key| key32(key, "transport_public_key")).transpose()?, dialler: input.dialler, listener: input.listener, manage: None, mtu, transports};
 	let (at, lifetime) = (now() as u64, input.lifetime.unwrap_or(LIFETIME));
 	let (code, parsed) = {
 		let mut pairing = app.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

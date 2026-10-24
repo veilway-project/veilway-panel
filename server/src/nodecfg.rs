@@ -144,7 +144,8 @@ pub(crate) async fn apply(app: &Arc<App>, node: Node, ctx: &Ctx, document: Value
 			if node == LOCAL {node::clear_defaults(app, &document).await}
 			let (kept, published) = (document.clone(), app.settings().profiles);
 			// A profile of a borrowed site that was published is made again from what the node runs now, or taken down when it can no longer be emitted, so that no document carries the key or the listener it had before. One that was never published, and one written by hand, stay as they are.
-			let republished = app.update_settings(move |settings| {
+			// The settings hold node 1's profiles and keys. Another node's document has no part in them.
+			let republished = if node != LOCAL {Ok(())} else {app.update_settings(move |settings| {
 				crate::borrowed::remember(settings, &kept);
 				remember_keys(settings, &kept);
 				let templates = derive(settings, &kept, &[], None, &Exposure::default(), false);
@@ -156,10 +157,10 @@ pub(crate) async fn apply(app: &Arc<App>, node: Node, ctx: &Ctx, document: Value
 						_ => {settings.profiles.retain(|profile| profile["id"] != id.as_str()); settings.relay_profiles.remove(&id);}
 					}
 				}
-			}).await;
+			}).await};
 			if let Err(error) = &republished {tracing::warn!("the public keys and profiles of the borrowed-site transports were not kept: {error}")}
 			let mut changed = vec![format!("generation {}", applied.get("generation").and_then(Value::as_u64).unwrap_or(0))];
-			if republished.is_ok() && app.settings().profiles != published {changed.push("borrowed-site profiles republished".into())}
+			if node == LOCAL && republished.is_ok() && app.settings().profiles != published {changed.push("borrowed-site profiles republished".into())}
 			for key in before.as_object().into_iter().chain(document.as_object()).flat_map(|object| object.keys()).filter(|key| !["users", "xray"].contains(&key.as_str())).collect::<BTreeSet<_>>() {changes(key, &before[key.as_str()], &document[key.as_str()], &mut changed)}
 			app.db.audit(&ctx.actor, &ctx.source, "config.apply", target, &changed.join(", ")).await;
 			Ok(applied)
@@ -218,15 +219,18 @@ pub struct SectionIn {
 	pub value: Value,
 }
 
-pub async fn put_section(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(section): Path<String>, Body(input): Body<SectionIn>) -> Result<Response, Failure> {
+pub async fn put_section(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(section): Path<String>, Body(input): Body<SectionIn>) -> Result<Response, Failure> {section_put(app, LOCAL, ctx, section, input).await}
+
+/// Replaces one section of a node's document. The caller has said which node.
+pub(crate) async fn section_put(app: Arc<App>, node: Node, ctx: Ctx, section: String, input: SectionIn) -> Result<Response, Failure> {
 	if !SECTIONS.contains(&section.as_str()) {return Err(Failure::missing("section"))}
 	if input.value.is_null() && !OPTIONAL.contains(&section.as_str()) {return Err(Failure::bad("This section is required, so it cannot be null."))}
 	if !input.value.is_null() && (input.value.is_object() != OBJECTS.contains(&section.as_str()) || !(input.value.is_object() || input.value.is_array())) {return Err(Failure::bad(if OBJECTS.contains(&section.as_str()) {"This section is an object."} else {"This section is a list."}))}
 	if GUARDED.contains(&section.as_str()) {reauthed(&app, &ctx).await?}
-	let _turn = app.turn(LOCAL).await;
-	let (_, _, mut document) = running(&app, LOCAL).await?;
+	let _turn = app.turn(node).await;
+	let (_, _, mut document) = running(&app, node).await?;
 	if input.value.is_null() {document.as_object_mut().map(|document| document.remove(&section));} else {document[&section] = input.value;}
-	ok(&apply(&app, LOCAL, &ctx, document, &input.revision, &section).await?)
+	ok(&apply(&app, node, &ctx, document, &input.revision, &section).await?)
 }
 
 /// The override member with the addresses apps reach an inbound's profiles at, IP addresses or host names, in place of the node address.

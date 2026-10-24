@@ -1,5 +1,5 @@
 //! The route table. One list builds both the router and `openapi.json`, so the document cannot say anything else than what is served.
-use crate::{admin, backup, endpoints, gateway, updater, app::{App, Settings}, auth::Access, http::ErrorBody, links, nodecfg, stats, upstreams, users, xray};
+use crate::{admin, backup, endpoints, gateway, updater, app::{App, Settings}, auth::Access, http::ErrorBody, links, nodecfg, nodes, stats, upstreams, users, xray};
 use axum::{extract::State, handler::Handler, http::{header::CONTENT_TYPE, HeaderValue, Method, StatusCode}, response::{IntoResponse, Response}, routing::{on, MethodFilter, MethodRouter}};
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use std::{any::TypeId, sync::Arc};
@@ -75,6 +75,13 @@ pub fn routes(schemas: &mut SchemaGenerator) -> Vec<Route> {
 		route::<updater::Choice, updater::Requested, _, _>(s, M::POST, "/update/request", "requestUpdate", "Asks the host to update the panel, the node or both (`part`, the panel when the body is empty) to the newest release, which the host script downloads and checks itself. Needs a recent re-authentication and is audited. No API token can do this.", Access::AdminReauth, updater::request),
 		route::<Nothing, admin::NodeInfo, _, _>(s, M::GET, "/node", "node", "Whether the node answers on its control socket and when the panel last pushed its users.", Access::Read, admin::node_info),
 		route::<Nothing, users::NodeState, _, _>(s, M::POST, "/node/sync", "syncNode", "Pushes the panel's users into the node's config.", Access::Users, admin::node_sync),
+		route::<Nothing, nodes::NodesOut, _, _>(s, M::GET, "/nodes", "listNodes", "The nodes the panel manages: node 1 on the panel's own socket and the others through managed links of node 1, each with the state of its link, its pool, its revisions and whether it is behind.", Access::Read, nodes::list),
+		route::<nodes::NodeIn, nodes::NodeOut, _, _>(s, M::POST, "/nodes", "addNode", "Adds a remote node bound to a link of node 1 that node 1 manages. Devices get an address in its pool and its users are pushed at once. Needs a recent re-authentication.", Access::AdminReauth, nodes::add),
+		route::<nodes::NodePatch, nodes::NodeOut, _, _>(s, M::PATCH, "/nodes/{id}", "updateNode", "Changes a node's name, place, pool (a remote node with no device at it), whether it counts toward the users' totals and the most its counters may grow.", Access::Full, nodes::patch),
+		route::<Nothing, nodes::Removed, _, _>(s, M::DELETE, "/nodes/{id}", "removeNode", "Removes a remote node: it is asked to empty itself and drop the managing link (unless `taken=true`), then the link leaves node 1's config and the node's addresses and counts go. Needs a recent re-authentication.", Access::AdminReauth, nodes::remove),
+		route::<Nothing, nodes::Synced, _, _>(s, M::POST, "/nodes/{id}/sync", "syncOneNode", "Pushes the panel's users to one node now.", Access::Users, nodes::sync),
+		route::<Nothing, serde_json::Value, _, _>(s, M::GET, "/nodes/{id}/config", "getNodeConfig", "The config a node runs without its users, and its revision. A remote node is read through its link.", Access::Read, nodes::get_config),
+		route::<nodecfg::SectionIn, serde_json::Value, _, _>(s, M::PUT, "/nodes/{id}/config/{section}", "putNodeConfigSection", "Replaces one section of a node's config like putConfigSection does for node 1. Refused with node_offline while the node's link is not up.", Access::Full, nodes::put_section),
 		route::<Nothing, users::UsersOut, _, _>(s, M::GET, "/users", "listUsers", "Users with the node's usage. Query: q, group, enabled.", Access::Read, users::list),
 		route::<users::UserIn, users::Created, _, _>(s, M::POST, "/users", "createUser", "Makes a user and a subscription link, shown now and again only through the sealed copy.", Access::Users, users::create),
 		route::<users::Bulk, users::BulkResult, _, _>(s, M::POST, "/users/bulk", "bulkUsers", "One action on many users.", Access::Users, users::bulk),

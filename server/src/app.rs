@@ -272,6 +272,16 @@ pub struct NodeState {
 	pub last_sync: Mutex<Option<String>>,
 	/// Set when the node's config was not brought up to date, and cleared by the next push that works.
 	pub dirty: Arc<AtomicBool>,
+	/// Since when the link that reaches the node has not been up, while it is not.
+	pub down_since: Mutex<Option<i64>>,
+}
+
+/// The dirty flags of every node, set together by a change to users or devices: a node's sync always carries the whole users list, so it does not matter which node a change belongs to.
+#[derive(Clone)]
+pub struct Dirty(Vec<Arc<AtomicBool>>);
+
+impl Dirty {
+	pub fn set(&self) {for flag in &self.0 {flag.store(true, std::sync::atomic::Ordering::Relaxed)}}
 }
 
 pub struct App {
@@ -326,6 +336,12 @@ impl App {
 		ids.sort();
 		ids.into_iter().map(Node).collect()
 	}
+	/// The flags of all nodes at once, to be moved into a database job that changes users or devices.
+	pub fn dirty_all(&self) -> Dirty {Dirty(self.node_states.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).values().map(|state| state.dirty.clone()).collect())}
+	/// Starts keeping the memory of a node that was added, behind with its first push.
+	pub fn add_node(&self, node: Node) {self.node_states.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(node.0, Arc::new(NodeState {dirty: Arc::new(AtomicBool::new(true)), ..Default::default()}));}
+	/// Forgets a node that was removed.
+	pub fn drop_node(&self, node: Node) {self.node_states.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&node.0);}
 	/// The turn on a node's config: held while the panel reads it, changes it and pushes it.
 	pub async fn turn(&self, node: Node) -> tokio::sync::OwnedMutexGuard<()> {self.node(node).lock.clone().lock_owned().await}
 	pub fn settings(&self) -> Settings {self.settings.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()}

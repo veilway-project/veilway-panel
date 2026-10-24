@@ -1,12 +1,12 @@
 //! Users, their devices and their subscription links.
-use crate::{app::{App, Settings, LOCAL}, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, subs::{self, DeviceRow, UserRow, USER_COLUMNS}};
+use crate::{app::{App, Settings, LOCAL}, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, usage, subs::{self, DeviceRow, UserRow, USER_COLUMNS}};
 use axum::{extract::{Path, Query, State}, http::StatusCode, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use rusqlite::{params, Connection};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::{atomic::Ordering, Arc, RwLock}};
+use std::{collections::HashMap, sync::{Arc, RwLock}};
 use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 use veilway_proto::subscription::{link::{Carried, Link}, sealed_file};
@@ -17,6 +17,8 @@ pub struct NodeState {pub synced: bool, pub error: Option<String>}
 
 pub async fn push(app: &Arc<App>) -> NodeState {
 	let held = app.clone();
+	// The other nodes are brought up to date in the background: node 1 is the answer, and a node that is down holds nothing up.
+	for node in held.nodes().into_iter().filter(|node| *node != LOCAL && held.node(*node).dirty.load(std::sync::atomic::Ordering::Relaxed)) {let held = held.clone(); tokio::spawn(async move {let _ = node::sync(&held, node).await;});}
 	// Its own task, so a client that goes away mid-push does not stop the push half way.
 	match tokio::spawn(async move {node::sync(&held, LOCAL).await}).await.map_err(|error| error.to_string()).and_then(|done| done) {Ok(()) => NodeState {synced: true, error: None}, Err(error) => NodeState {synced: false, error: Some(error)}}
 }
@@ -45,10 +47,16 @@ pub struct UserOut {
 	pub proxy_login: bool,
 	/// The node's own record of the user: usage, denial and traffic. Null when the node cannot be reached.
 	pub node: Option<Value>,
+	/// The ids of the nodes the user may use. Left out when every node is allowed.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub nodes: Option<Vec<i64>>,
+	/// What the nodes counted together, in a panel with more than one node. Only on one user's answer.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub usage: Option<usage::Across>,
 }
 
 fn out(user: &UserRow, devices: i64, pending: i64, node: Option<Value>) -> UserOut {
-	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), endpoint: user.endpoint.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, proxy_login: user.proxy, node}
+	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), endpoint: user.endpoint.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, proxy_login: user.proxy, node, nodes: serde_json::from_str(&user.nodes).ok(), usage: None}
 }
 
 async fn counts(app: &App, id: i64) -> Result<(i64, i64), Failure> {
@@ -79,7 +87,19 @@ pub async fn list(State(app): State<Arc<App>>, Query(query): Query<UserQuery>) -
 pub async fn get(State(app): State<Arc<App>>, Path(id): Path<i64>) -> Result<Response, Failure> {
 	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
 	let (devices, pending) = counts(&app, id).await?;
-	ok(&out(&user, devices, pending, node::usage(&app, LOCAL).await.remove(&user.name)))
+	let mut shown = out(&user, devices, pending, node::usage(&app, LOCAL).await.remove(&user.name));
+	shown.usage = app.db.call(move |db| usage::across(db, id, now())).await??;
+	ok(&shown)
+}
+
+/// After node 1 reset a user's count: forgets what the nodes counted, lifts the cut, and has every other node told at its next push.
+async fn reset_everywhere(app: &Arc<App>, id: i64, totals: bool) -> Result<(), Failure> {
+	if app.db.call(move |db| usage::reset(db, id, totals, now())).await?? {
+		app.dirty_all().set();
+		let held = app.clone();
+		tokio::spawn(async move {for node in held.nodes().into_iter().filter(|node| *node != LOCAL) {let _ = node::sync(&held, node).await;}});
+	}
+	Ok(())
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -95,6 +115,8 @@ pub struct UserIn {
 	pub quota_period: Option<String>,
 	/// Unix seconds.
 	pub expires_at: Option<i64>, pub device_limit: Option<u16>, pub note: Option<String>,
+	/// The ids of the nodes the user may use, at least one. Left out or null: every node.
+	pub nodes: Option<Vec<i64>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -109,6 +131,15 @@ pub struct UserPatch {
 	#[serde(default, deserialize_with = "double")] pub quota_period: Option<Option<String>>,
 	#[serde(default, deserialize_with = "double")] pub expires_at: Option<Option<i64>>,
 	pub device_limit: Option<u16>, pub note: Option<String>,
+	/// The ids of the nodes the user may use, at least one, or null for every node. A node taken out frees the addresses of the user's devices in its pool.
+	#[serde(default, deserialize_with = "double")] pub nodes: Option<Option<Vec<i64>>>,
+}
+
+/// Refuses a list of node ids that is empty, repeats an id or names a node the panel does not have.
+async fn nodes_check(app: &App, nodes: &[i64]) -> Result<(), Failure> {
+	let (listed, known) = (nodes.to_vec(), app.db.call(|db| db.prepare("select id from nodes")?.query_map([], |row| row.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()).await??);
+	if listed.is_empty() || listed.iter().any(|id| !known.contains(id)) || listed.iter().enumerate().any(|(at, id)| listed[..at].contains(id)) {return Err(Failure::bad("nodes is a list of the ids of nodes the panel has, each once, and at least one."))}
+	Ok(())
 }
 
 /// Whether `exit` may be the default of a user with these exits. Whether the node has it is decided at the next sync.
@@ -150,6 +181,7 @@ pub struct Created {pub user: UserOut, pub link: Option<LinkView>, pub link_erro
 pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<UserIn>) -> Result<Response, Failure> {
 	if !name_ok(&input.name, true) {return Err(Failure::bad("name is 1 to 64 characters of a-z, 0-9, dot, dash and underscore, starting with a letter or digit."))}
 	check(input.groups.as_ref(), input.exits.as_ref(), input.quota_bytes, input.quota_period.as_deref())?;
+	if let Some(nodes) = &input.nodes {nodes_check(&app, nodes).await?}
 	if input.exit.as_deref().is_some_and(|exit| !default_ok(input.exits.as_ref().unwrap_or(&json!("all")), exit)) {return Err(Failure::bad(DEFAULT_REFUSED))}
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing, so no account can be made."))?;
 	let (token, record, sub_id) = (crypto::random::<16>(), crypto::random::<16>(), URL_SAFE_NO_PAD.encode(crypto::random::<16>()));
@@ -159,7 +191,7 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	let id = app.db.call(move |db| -> rusqlite::Result<i64> {
 		let once = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).show_links_once;
 		let copy = (!once).then(|| held.keys.as_ref().expect("checked before the lookup").seal_copy(&record, &token));
-		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created, default_exit, endpoint) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, lookup.as_slice(), copy, now(), input.exit, input.endpoint])?;
+		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created, default_exit, endpoint, nodes) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, lookup.as_slice(), copy, now(), input.exit, input.endpoint, input.nodes.map_or("\"all\"".to_string(), |nodes| serde_json::to_string(&nodes).unwrap_or_default())])?;
 		let id = db.last_insert_rowid();
 		crate::app::load_lookups(db, &held.lookups);
 		audit(db, &ctx.actor, &ctx.source, "user.create", &format!("user:{id}"), &input.name);
@@ -178,17 +210,22 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	let quota = input.quota_bytes.unwrap_or(user.quota_bytes.map(|quota| quota as u64));
 	let period = input.quota_period.unwrap_or(user.quota_period.clone());
 	check(input.groups.as_ref(), input.exits.as_ref(), quota, period.as_deref())?;
+	if let Some(Some(nodes)) = &input.nodes {nodes_check(&app, nodes).await?}
 	let exits = input.exits.clone().unwrap_or_else(|| serde_json::from_str(&user.exits).unwrap_or(json!("all")));
 	if input.exit.as_ref().is_some_and(|exit| exit.as_deref().is_some_and(|exit| !default_ok(&exits, exit))) {return Err(Failure::bad(DEFAULT_REFUSED))}
 	let exit = input.exit.clone().unwrap_or(user.default_exit.clone()).filter(|exit| default_ok(&exits, exit));
 	if input.name.as_ref().is_some_and(|name| !name_ok(name, true)) {return Err(Failure::bad("name is 1 to 64 characters of a-z, 0-9, dot, dash and underscore, starting with a letter or digit."))}
 	let endpoint = input.endpoint.clone().unwrap_or(user.endpoint.clone());
 	if endpoint.as_deref().is_some_and(|name| app.settings().named(name).is_none()) {return Err(Failure::bad("endpoint is the name of one of the endpoints, or null."))}
-	let dirty = app.node(LOCAL).dirty.clone();
+	let dirty = app.dirty_all();
+	let nodes_text = match &input.nodes {Some(Some(nodes)) => serde_json::to_string(nodes).unwrap_or_default(), Some(None) => "\"all\"".to_string(), None => user.nodes.clone()};
 	app.db.call(move |db| -> rusqlite::Result<()> {
-		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ?, default_exit = ?, endpoint = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), serde_json::to_string(&exits).unwrap_or_default(), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), exit, endpoint, id])?;
+		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ?, default_exit = ?, endpoint = ?, nodes = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), serde_json::to_string(&exits).unwrap_or_default(), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), exit, endpoint, nodes_text, id])?;
+		// The addresses follow the nodes the user may use: new ones are taken, the ones of a node taken away are freed.
+		db.execute("delete from device_addresses where device_id in (select id from devices where user_id = ?1) and node_id in (select id from nodes where id != ?2 and ?3 != '\"all\"' and not exists (select 1 from json_each(?3) where value = nodes.id))", params![id, LOCAL.0, nodes_text])?;
+		subs::add_addresses(db, Some(id))?;
 		audit(db, &ctx.actor, &ctx.source, "user.update", &format!("user:{id}"), &user.name);
-		dirty.store(true, Ordering::Relaxed);
+		dirty.set();
 		Ok(())
 	}).await??;
 	let node = push(&app).await;
@@ -212,12 +249,12 @@ fn delete_account(db: &mut Connection, cache: &RwLock<Settings>, lookups: &RwLoc
 }
 
 pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
-	let (dirty, lookups, cache) = (app.node(LOCAL).dirty.clone(), app.lookups.clone(), app.settings.clone());
+	let (dirty, lookups, cache) = (app.dirty_all(), app.lookups.clone(), app.settings.clone());
 	app.db.call(move |db| -> Result<(), Failure> {
 		let name: String = db.query_row("select name from users where id = ?", [id], |row| row.get(0))?;
 		delete_account(db, &cache, &lookups, id)?;
 		audit(db, &ctx.actor, &ctx.source, "user.delete", &format!("user:{id}"), &name);
-		dirty.store(true, Ordering::Relaxed);
+		dirty.set();
 		Ok(())
 	}).await??;
 	ok(&Deleted {node: push(&app).await})
@@ -252,11 +289,11 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 		let result: Result<(), String> = async {
 			let id = *id;
 			let user = app.db.call(move |db| UserRow::load(db, id)).await.map_err(|error| error.to_string())?.map_err(|error| if matches!(error, rusqlite::Error::QueryReturnedNoRows) {"no such user".to_string()} else {error.to_string()})?;
-			let (value, dirty, lookups) = (input.value.clone(), app.node(LOCAL).dirty.clone(), app.lookups.clone());
+			let (value, dirty, lookups) = (input.value.clone(), app.dirty_all(), app.lookups.clone());
 			match input.action.as_str() {
-				"enable" | "disable" => {let enable = input.action == "enable"; app.db.call(move |db| db.execute("update users set enabled = ? where id = ?", params![enable, id]).inspect(|_| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
-				"delete" => {let cache = app.settings.clone(); app.db.call(move |db| delete_account(db, &cache, &lookups, id).map(|()| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.message)?;}
-				"reset_usage" => {let (status, _) = node::request(&app, LOCAL, "POST", &format!("/v1/users/{}/usage/reset", user.name), None, Some(&json!({"totals": false}))).await?; if status != 200 {return Err(format!("the node answered {status}"))}}
+				"enable" | "disable" => {let enable = input.action == "enable"; app.db.call(move |db| db.execute("update users set enabled = ? where id = ?", params![enable, id]).inspect(|_| dirty.set())).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
+				"delete" => {let cache = app.settings.clone(); app.db.call(move |db| delete_account(db, &cache, &lookups, id).map(|()| dirty.set())).await.map_err(|error| error.to_string())?.map_err(|error| error.message)?;}
+				"reset_usage" => {let (status, _) = node::request(&app, LOCAL, "POST", &format!("/v1/users/{}/usage/reset", user.name), None, Some(&json!({"totals": false}))).await?; if status != 200 {return Err(format!("the node answered {status}"))} reset_everywhere(&app, id, false).await.map_err(|error| error.message)?;}
 				"reset_links" => {let (_, old) = reset_link(&app, &ctx, id, input.remove_devices).await.map_err(|error| error.message)?; if input.remove_devices {removed += old.len()}}
 				"add_group" | "remove_group" => {
 					let group = value.as_ref().and_then(Value::as_str).filter(|group| name_ok(group, true)).ok_or("value is a group name")?;
@@ -265,22 +302,22 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 					if input.action == "add_group" {groups.push(group.to_string());}
 					check(Some(&groups), None, None, None).map_err(|error| error.message)?;
 					let groups = serde_json::to_string(&groups).unwrap_or_default();
-					app.db.call(move |db| db.execute("update users set groups = ? where id = ?", params![groups, id]).inspect(|_| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+					app.db.call(move |db| db.execute("update users set groups = ? where id = ?", params![groups, id]).inspect(|_| dirty.set())).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 				}
 				"set_quota" => {
 					let quota = value.as_ref().and_then(|value| value.get("quota_bytes")).and_then(Value::as_u64);
 					let period = value.as_ref().and_then(|value| value.get("quota_period")).and_then(Value::as_str);
 					check(None, None, quota, period).map_err(|error| error.message)?;
 					let period = period.filter(|_| quota.is_some()).map(str::to_owned);
-					app.db.call(move |db| db.execute("update users set quota_bytes = ?, quota_period = ? where id = ?", params![quota.map(|quota| quota as i64), period, id]).inspect(|_| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+					app.db.call(move |db| db.execute("update users set quota_bytes = ?, quota_period = ? where id = ?", params![quota.map(|quota| quota as i64), period, id]).inspect(|_| dirty.set())).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 				}
-				"set_expiry" => {let expiry = value.as_ref().and_then(Value::as_i64); app.db.call(move |db| db.execute("update users set expires_at = ? where id = ?", params![expiry, id]).inspect(|_| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
-				"set_device_limit" => {let limit = value.as_ref().and_then(Value::as_u64).filter(|limit| *limit <= 65535).ok_or("value is a number from 0 to 65535")?; app.db.call(move |db| db.execute("update users set device_limit = ? where id = ?", params![limit, id]).inspect(|_| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
+				"set_expiry" => {let expiry = value.as_ref().and_then(Value::as_i64); app.db.call(move |db| db.execute("update users set expires_at = ? where id = ?", params![expiry, id]).inspect(|_| dirty.set())).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
+				"set_device_limit" => {let limit = value.as_ref().and_then(Value::as_u64).filter(|limit| *limit <= 65535).ok_or("value is a number from 0 to 65535")?; app.db.call(move |db| db.execute("update users set device_limit = ? where id = ?", params![limit, id]).inspect(|_| dirty.set())).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
 				"set_exits" => {
 					let exits = value.ok_or("value is \"all\" or a list of exit tags")?;
 					check(None, Some(&exits), None, None).map_err(|error| error.message)?;
 					let (stored, default_exit) = (serde_json::to_string(&exits).unwrap_or_default(), user.default_exit.filter(|exit| default_ok(&exits, exit)));
-					app.db.call(move |db| db.execute("update users set exits = ?, default_exit = ? where id = ?", params![stored, default_exit, id]).inspect(|_| dirty.store(true, Ordering::Relaxed))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+					app.db.call(move |db| db.execute("update users set exits = ?, default_exit = ? where id = ?", params![stored, default_exit, id]).inspect(|_| dirty.set())).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 				}
 				other => return Err(format!("unknown action {other}")),
 			}
@@ -300,6 +337,7 @@ pub async fn reset_usage(State(app): State<Arc<App>>, Extension(ctx): Extension<
 	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
 	let (status, body) = node::request(&app, LOCAL, "POST", &format!("/v1/users/{}/usage/reset", user.name), None, Some(&json!({"totals": input.totals}))).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
 	if status != 200 {return Err(Failure::new(StatusCode::BAD_GATEWAY, "node_refused", format!("The node answered {status}.")))}
+	reset_everywhere(&app, id, input.totals).await?;
 	app.db.audit(&ctx.actor, &ctx.source, "user.usage_reset", &format!("user:{id}"), if input.totals {"with totals"} else {"quota count"}).await;
 	ok(&serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null))
 }
@@ -345,7 +383,7 @@ pub async fn make_device(State(app): State<Arc<App>>, Extension(ctx): Extension<
 		let secret = x25519_dalek::StaticSecret::from(crypto::random::<32>());
 		(secret.to_bytes(), x25519_dalek::PublicKey::from(&secret).to_bytes())
 	};
-	let (public_key, held, dirty) = (STANDARD.encode(public), app.clone(), app.node(LOCAL).dirty.clone());
+	let (public_key, held, dirty) = (STANDARD.encode(public), app.clone(), app.dirty_all());
 	let device = app.db.call(move |db| -> Result<DeviceRow, Failure> {
 		let keys = held.keys.as_ref().expect("checked before the lookup");
 		let user = UserRow::load(db, id)?;
@@ -354,19 +392,20 @@ pub async fn make_device(State(app): State<Arc<App>>, Extension(ctx): Extension<
 		let address = subs::allocate(db, LOCAL).ok_or_else(|| Failure::conflict("The address pool is full."))?;
 		db.execute("insert into devices (user_id, name, public_key, secret_hash, transport_secret, private_key, state, token_gen, created, confirmed_at) values (?, ?, ?, ?, ?, ?, 'enrolled', ?, ?, ?)", params![id, veilway_proto::control::display(&input.name, 32, 128), public_key, keys.device_secret_hash(&crypto::random::<16>()).as_slice(), keys.seal_secret(&user.record_id, &format!("transport_secret:{public_key}"), &crypto::random::<32>()), keys.seal_secret(&user.record_id, &format!("private_key:{public_key}"), &secret), user.token_gen, now(), now()])?;
 		db.execute("insert into device_addresses (node_id, device_id, address) values (?, last_insert_rowid(), ?)", params![LOCAL.0, address])?;
+		subs::add_addresses(db, Some(id))?;
 		audit(db, &ctx.actor, &ctx.source, "device.create", &format!("user:{id}"), "key made by the panel");
-		dirty.store(true, Ordering::Relaxed);
+		dirty.set();
 		DeviceRow::for_user(db, id)?.into_iter().find(|device| device.public_key == public_key).ok_or_else(|| Failure::internal("the new device is gone"))
 	}).await??;
 	ok(&DeviceCreated {device: device_out(&device), weaker: true, node: push(&app).await})
 }
 
 pub async fn remove_device(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path((id, device)): Path<(i64, i64)>) -> Result<Response, Failure> {
-	let dirty = app.node(LOCAL).dirty.clone();
+	let dirty = app.dirty_all();
 	app.db.call(move |db| -> Result<(), Failure> {
 		if db.execute("delete from devices where id = ? and user_id = ?", params![device, id])? == 0 {return Err(Failure::missing("device"))}
 		audit(db, &ctx.actor, &ctx.source, "device.remove", &format!("user:{id}"), &format!("device:{device}"));
-		dirty.store(true, Ordering::Relaxed);
+		dirty.set();
 		Ok(())
 	}).await??;
 	ok(&Deleted {node: push(&app).await})
@@ -526,7 +565,7 @@ const PROXY_LABEL: &str = "proxy_password";
 /// Makes or replaces the user's proxy password: 32 characters of letters and digits, drawn without bias, so no ':' and nothing a proxy URL needs escaped. The caller pushes to the node.
 pub async fn proxy_set(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
 	if app.keys.is_none() {return Err(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))}
-	let (held, dirty) = (app.clone(), app.node(LOCAL).dirty.clone());
+	let (held, dirty) = (app.clone(), app.dirty_all());
 	app.db.call(move |db| -> Result<(), Failure> {
 		let user = UserRow::load(db, id)?;
 		let mut password = String::new();
@@ -534,7 +573,7 @@ pub async fn proxy_set(State(app): State<Arc<App>>, Extension(ctx): Extension<Ct
 		let sealed = held.keys.as_ref().expect("checked before the call").seal_secret(&user.record_id, PROXY_LABEL, password.as_bytes());
 		db.execute("update users set proxy_password = ? where id = ?", params![sealed, id])?;
 		audit(db, &ctx.actor, &ctx.source, if user.proxy {"proxy.regenerate"} else {"proxy.create"}, &format!("user:{id}"), &user.name);
-		dirty.store(true, Ordering::Relaxed);
+		dirty.set();
 		Ok(())
 	}).await??;
 	let node = push(&app).await;
@@ -544,12 +583,12 @@ pub async fn proxy_set(State(app): State<Arc<App>>, Extension(ctx): Extension<Ct
 }
 
 pub async fn proxy_remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
-	let dirty = app.node(LOCAL).dirty.clone();
+	let dirty = app.dirty_all();
 	app.db.call(move |db| -> Result<(), Failure> {
 		let user = UserRow::load(db, id)?;
 		db.execute("update users set proxy_password = null where id = ?", [id])?;
 		audit(db, &ctx.actor, &ctx.source, "proxy.remove", &format!("user:{id}"), &user.name);
-		dirty.store(true, Ordering::Relaxed);
+		dirty.set();
 		Ok(())
 	}).await??;
 	let node = push(&app).await;
@@ -580,7 +619,7 @@ pub struct LinkReset {pub link: Option<LinkView>, pub link_error: Option<String>
 /// Makes a new token for the user and returns it with the devices enrolled with the old one. The caller pushes to the node.
 async fn reset_link(app: &Arc<App>, ctx: &Ctx, id: i64, remove_devices: bool) -> Result<([u8; 16], Vec<DeviceRow>), Failure> {
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
-	let (token, held, cache, dirty) = (crypto::random::<16>(), app.clone(), app.settings.clone(), app.node(LOCAL).dirty.clone());
+	let (token, held, cache, dirty) = (crypto::random::<16>(), app.clone(), app.settings.clone(), app.dirty_all());
 	let (lookup, actor, source) = (keys.token_lookup(&token), ctx.actor.clone(), ctx.source.clone());
 	let old = app.db.call(move |db| -> Result<Vec<DeviceRow>, Failure> {
 		let keys = held.keys.as_ref().expect("checked before the lookup");
@@ -597,7 +636,7 @@ async fn reset_link(app: &Arc<App>, ctx: &Ctx, id: i64, remove_devices: bool) ->
 		audit(&tx, &actor, &source, "link.reset", &format!("user:{id}"), &format!("{} devices of the old link, removed: {}, Xray credentials made new", old.len(), remove_devices));
 		tx.commit()?;
 		crate::app::load_lookups(db, &held.lookups);
-		dirty.store(true, Ordering::Relaxed);
+		dirty.set();
 		Ok(old)
 	}).await??;
 	Ok((token, old))
