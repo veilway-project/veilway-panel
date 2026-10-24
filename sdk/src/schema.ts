@@ -2278,10 +2278,15 @@ export interface components {
              */
             lifetime?: number | null;
             /**
-             * @description A reverse link only.
+             * @description A reverse link and a managed link: this node's link address, one for each family of `dialler`.
              * @default []
              */
             listener: string[];
+            /**
+             * @description This node manages the other node through the link. The other node is told so before it agrees, and `listener` is then required.
+             * @default false
+             */
+            managed: boolean;
             /** Format: uint16 */
             mtu?: number | null;
             name: string;
@@ -2307,6 +2312,11 @@ export interface components {
             /** @description Must be true: the operator has seen where this node would dial and agrees. */
             accept: boolean;
             code: string;
+            /**
+             * @description True when the offer makes this node the one that manages the other node. It must say what the offer says.
+             * @default false
+             */
+            managed: boolean;
             /** @description The tag the link gets in this node's config. */
             tag: string;
         };

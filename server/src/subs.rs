@@ -1,5 +1,5 @@
 //! The subscription side: the link, the signed document, and the public endpoint that answers a valid token and nothing else.
-use crate::{app::{bucket, App, Endpoint, Node, SigningEntry, LOCAL}, auth, crypto::{self, now}, gateway, mirrors, statics};
+use crate::{app::{bucket, App, Endpoint, Node, SigningEntry, LOCAL}, auth, crypto::{self, now}, gateway, mirrors, statics, usage};
 use axum::{body::Body, extract::{Request, State}, http::{header::{CACHE_CONTROL, CONTENT_TYPE}, HeaderValue, Method, StatusCode}, response::Response};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
@@ -7,7 +7,7 @@ use ipnet::Ipv4Net;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde_json::{json, Value};
 use std::{collections::HashSet, net::Ipv4Addr, sync::Arc};
-use veilway_proto::subscription::{envelope, exchange::{self, GatewayKey}, fetch::{Op, RequestError}, link::Link};
+use veilway_proto::subscription::{envelope, exchange::{self, GatewayKey}, fetch::{Op, RequestError}, link::Link, payload::PROFILES_MAX};
 
 pub const PENDING_PLACES: i64 = 2;
 pub const PENDING_LAPSE: i64 = 600;
@@ -128,13 +128,23 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 	let user_id = user.id;
 	let devices = app.db.call(move |db| DeviceRow::for_user(db, user_id)).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 	let secret = keys.open_secret(&user.record_id, &format!("transport_secret:{}", this.public_key), &this.transport_secret).ok_or("a transport secret does not open")?;
-	let mut device = json!({"public_key": this.public_key, "addresses": [this.address], "transport_secrets": [STANDARD.encode(secret)]});
+	let mut device = json!({"public_key": this.public_key, "addresses": [this.address], "transport_secrets": [STANDARD.encode(&secret)]});
 	if let Some(sealed) = &this.private_key {device["private_key"] = json!(STANDARD.encode(keys.open_secret(&user.record_id, &format!("private_key:{}", this.public_key), sealed).ok_or("a private key does not open")?));}
 	let groups: Vec<String> = serde_json::from_str(&user.groups).unwrap_or_default();
 	let reaching = crate::nodecfg::reaching(&settings.published_relays, Some((user.id, groups.as_slice())));
 	let (pooled, taken): (String, HashSet<String>) = app.db.call(|db| -> rusqlite::Result<_> {Ok((db.query_row("select pool_v4 from nodes where id = ?", [LOCAL.0], |row| row.get(0))?, db.prepare("select address from device_addresses where node_id = ?")?.query_map([LOCAL.0], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?))}).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 	let (pool, stored) = (pooled.parse::<Ipv4Net>().ok(), this.address.parse::<Ipv4Addr>().ok());
-	let profiles: Vec<Value> = settings.profiles.iter().cloned().filter_map(|mut profile| {
+	let device_id = this.id;
+	let (total, remote_nodes) = app.db.call(move |db| -> rusqlite::Result<_> {
+		let rows = db.prepare("select nodes.id, nodes.name, nodes.slug, nodes.uid, nodes.pool_v4, device_addresses.address, nodes.settings from nodes join device_addresses on device_addresses.node_id = nodes.id and device_addresses.device_id = ? where nodes.id != ? and nodes.applied_rev >= device_addresses.added_rev order by nodes.id")?.query_map(params![device_id, LOCAL.0], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+		let mut nodes = Vec::new();
+		for (id, name, slug, uid, pool, address, cache) in rows {
+			let taken: HashSet<String> = db.prepare("select address from device_addresses where node_id = ?")?.query_map([id], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+			nodes.push((id, name, slug, uid, pool, address, cache, taken));
+		}
+		Ok((usage::across(db, user_id, now())?, nodes))
+	}).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+	let mut profiles: Vec<Value> = settings.profiles.iter().cloned().filter_map(|mut profile| {
 		// A relays-only inbound is switched on at once, before the next publish: the node's own addresses of an older snapshot are dropped here, and a profile no relay reaches this account with is not given.
 		let only = profile["id"].as_str().and_then(|id| settings.relay_profiles.get(id)).is_some_and(|tag| crate::nodecfg::relays_only(&settings, tag)) || crate::xray::addresses(&profile).iter().any(|host| host == crate::nodecfg::NO_ADDRESS);
 		if let Some(tag) = profile["id"].as_str().and_then(|id| settings.relay_profiles.get(id)) {crate::nodecfg::carry(&mut profile, tag, &reaching, only);}
@@ -146,11 +156,35 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 		profile["device"] = own;
 		Some(profile)
 	}).collect();
+	let mut remote: Vec<Value> = Vec::new();
+	for (_, node_name, slug, uid, pool, address, cache, taken) in remote_nodes.into_iter().filter(|row| allowed(&user.nodes, Node(row.0))) {
+		let (Ok(pool), Ok(stored)) = (pool.parse::<Ipv4Net>(), address.parse::<Ipv4Addr>()) else {continue};
+		let transport = STANDARD.encode(crypto::node_secret(crypto::NODE_TRANSPORT_SALT, &uid, &secret));
+		for entry in serde_json::from_str::<Value>(&cache).ok().and_then(|cache| cache["profiles"].as_array().cloned()).unwrap_or_default() {
+			let mut own = device.clone();
+			own["addresses"] = json!([stored.to_string()]);
+			own["transport_secrets"] = json!([&transport]);
+			if let Some(range) = entry["range"].as_str().and_then(|range| range.parse::<Ipv4Net>().ok()) {
+				let Some(found) = address_in(pool, range, stored).filter(|found| *found == stored || !taken.contains(&found.to_string())) else {continue};
+				own["addresses"] = json!([found.to_string()]);
+			}
+			let mut profile = entry["profile"].clone();
+			profile["id"] = json!(format!("{slug}-{}", profile["id"].as_str().unwrap_or_default()));
+			profile["name"] = json!(format!("{node_name} · {}", profile["name"].as_str().unwrap_or_default()));
+			profile["device"] = own;
+			remote.push(profile);
+		}
+	}
+	let room = PROFILES_MAX.saturating_sub(profiles.len());
+	if remote.len() > room {tracing::warn!("user {}: {} profiles of other nodes are left out, a document holds {PROFILES_MAX} profiles at most", user.name, remote.len() - room)}
+	profiles.extend(remote.into_iter().take(room));
 	let profiles = app.names.resolve(profiles).await;
 	if profiles.is_empty() {return Err("no profile has an address that resolves".into())}
 	let at = now();
 	let (floor, device_id) = (at * 1000 + (crypto::random::<2>()[0] as i64 % 250), this.id);
 	let serial: i64 = app.db.call(move |db| db.query_row("update devices set last_serial = max(?, last_serial + 1) where id = ? returning last_serial", params![floor, device_id], |row| row.get::<_, i64>(0))).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+	let total = total.map(|across| json!({"used_bytes": across.total_bytes, "period_start": usage::bounds(user.quota_period.as_deref(), at).0}));
+	let used = total.as_ref().or(used);
 	let mut payload = json!({
 		"v": 1, "subscription_id": user.sub_id, "serial": serial, "issued_at": at, "expires_at": at + i64::from(settings.document_days) * 86_400,
 		"signing_keys": signing.iter().map(|entry| STANDARD.encode(entry.public())).collect::<Vec<_>>(),

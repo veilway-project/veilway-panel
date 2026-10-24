@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, net::IpAddr, sync::Arc};
-use veilway_proto::{pairing::{self, Agreed, Direction, Offer, Offers, Pastes, Terms, Unconfirmed}, NoRandom};
+use veilway_proto::{pairing::{self, Agreed, Direction, Manage, Offer, Offers, Pastes, Terms, Unconfirmed}, NoRandom};
 
 const TRIES: u8 = 5;
 const LIFETIME: u64 = 600;
@@ -68,8 +68,10 @@ pub struct OfferIn {
 	/// Needed when `transports` lists tls or ws.
 	pub transport_public_key: Option<String>,
 	pub dialler: Vec<IpAddr>,
-	/// A reverse link only.
+	/// A reverse link and a managed link: this node's link address, one for each family of `dialler`.
 	#[serde(default)] pub listener: Vec<IpAddr>,
+	/// This node manages the other node through the link. The other node is told so before it agrees, and `listener` is then required.
+	#[serde(default)] pub managed: bool,
 	pub mtu: Option<u16>,
 	/// The transports the other node is offered, in the shape of a profile's `transports`.
 	pub transports: Value,
@@ -85,7 +87,7 @@ pub async fn offer(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	if input.tag.is_empty() || input.tag.len() > 64 || document["links"].as_array().into_iter().flatten().any(|link| link["tag"] == input.tag.as_str()) {return Err(Failure::conflict("The link tag is empty, too long, or already in the config."))}
 	let transports = pairing::transports(&serde_json::to_vec(&input.transports).unwrap_or_default()).map_err(code_error)?;
 	let mtu = input.mtu.unwrap_or(if found["transports"].as_array().into_iter().flatten().any(|transport| transport["type"] == "udp-obfs") {1390} else {1420});
-	let terms = Terms {direction, name: input.name, inbound_public_key: key32(&input.inbound_public_key, "inbound_public_key")?, transport_public_key: input.transport_public_key.as_deref().map(|key| key32(key, "transport_public_key")).transpose()?, dialler: input.dialler, listener: input.listener, manage: None, mtu, transports};
+	let terms = Terms {direction, name: input.name, inbound_public_key: key32(&input.inbound_public_key, "inbound_public_key")?, transport_public_key: input.transport_public_key.as_deref().map(|key| key32(key, "transport_public_key")).transpose()?, dialler: input.dialler, listener: input.listener, manage: input.managed.then_some(Manage::Listener), mtu, transports};
 	let (at, lifetime) = (now() as u64, input.lifetime.unwrap_or(LIFETIME));
 	let (code, parsed) = {
 		let mut pairing = app.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -140,7 +142,7 @@ pub async fn paste(State(app): State<Arc<App>>, Body(input): Body<CodeIn>) -> Re
 	let offer = Offer::parse(input.code.trim()).map_err(code_error)?;
 	let (_, _, document) = nodecfg::running(&app, LOCAL).await?;
 	let reverse = offer.direction == Direction::Reverse;
-	ok(&json!({"id": id_text(&offer.id), "name": offer.name, "direction": offer.direction.word(), "half": if reverse {"exit"} else {"entry"}, "expires_at": offer.expires_at, "expired": offer.expired(now() as u64), "overlaps_pool": overlaps(&offer, &document), "dials": offer.dials().iter().map(|(address, private)| json!({"address": address.to_string(), "private": private})).collect::<Vec<_>>(), "transports": serde_json::from_str::<Value>(&pairing::transports_json(&offer.transports)).unwrap_or_default(), "ws_warning": offer.transports.iter().any(|transport| matches!(transport, veilway_proto::subscription::payload::Transport::Ws(_)))}))
+	ok(&json!({"id": id_text(&offer.id), "name": offer.name, "direction": offer.direction.word(), "half": if reverse {"exit"} else {"entry"}, "expires_at": offer.expires_at, "expired": offer.expired(now() as u64), "overlaps_pool": overlaps(&offer, &document), "dials": offer.dials().iter().map(|(address, private)| json!({"address": address.to_string(), "private": private})).collect::<Vec<_>>(), "transports": serde_json::from_str::<Value>(&pairing::transports_json(&offer.transports)).unwrap_or_default(), "ws_warning": offer.transports.iter().any(|transport| matches!(transport, veilway_proto::subscription::payload::Transport::Ws(_))), "manage": offer.manage.map(|manage| if manage == Manage::Dialler {"this_node"} else {"other_node"})}))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -151,12 +153,20 @@ pub struct PasteIn {
 	pub tag: String,
 	/// Must be true: the operator has seen where this node would dial and agrees.
 	pub accept: bool,
+	/// True when the offer makes this node the one that manages the other node. It must say what the offer says.
+	#[serde(default)] pub managed: bool,
 }
 
 pub async fn paste_answer(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<PasteIn>) -> Result<Response, Failure> {
 	if !input.accept {return Err(Failure::bad("The offer is answered only after its operator accepted the addresses."))}
 	let offer = Offer::parse(input.code.trim()).map_err(code_error)?;
 	let (_, _, document) = nodecfg::running(&app, LOCAL).await?;
+	match (offer.manage, input.managed) {
+		(Some(Manage::Listener), _) => return Err(Failure::conflict("The other node would manage this one. A node is paired here only as the one that manages, so this offer is refused.")),
+		(Some(Manage::Dialler), false) => return Err(Failure::bad("This offer makes this node the one that manages the other node: answer it with managed set to true.")),
+		(None, true) => return Err(Failure::bad("This offer does not make the other node managed: answer it without managed.")),
+		_ => {}
+	}
 	if overlaps(&offer, &document) {return Err(Failure::conflict("An address of this link lies inside an inbound pool of this node. The other operator has to take the link's addresses from a pool this node does not use."))}
 	if input.tag.is_empty() || input.tag.len() > 64 || document["links"].as_array().into_iter().flatten().any(|link| link["tag"] == input.tag.as_str()) {return Err(Failure::conflict("The link tag is empty, too long, or already in the config."))}
 	let (code, id, shown) = {
@@ -208,6 +218,8 @@ pub async fn confirm(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 	let texts = |addresses: &[IpAddr]| addresses.iter().map(IpAddr::to_string).collect::<Vec<_>>();
 	let mut entry = json!({"tag": meta.tag, "id": id_text(&offer.id), "direction": offer.direction.word(), "addresses": {"dialler": texts(&offer.dialler)}, "mtu": offer.mtu, "transport_secret": STANDARD.encode(paired.secret.expose())});
 	if !offer.listener.is_empty() {entry["addresses"]["listener"] = json!(texts(&offer.listener))}
+	// Node 1 manages the other side of a managed link it takes: an offer it made names it the listener, and an answer is taken only when the offer names it the dialler.
+	if offer.manage.is_some() {entry["manage"] = json!("peer")}
 	let reverse = offer.direction == Direction::Reverse;
 	let _turn = app.turn(LOCAL).await;
 	let (_, _, mut document) = nodecfg::running(&app, LOCAL).await?;

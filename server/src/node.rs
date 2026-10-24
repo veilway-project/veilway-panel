@@ -190,6 +190,7 @@ pub async fn sync(app: &Arc<App>, node: Node) -> Result<(), String> {
 	// Everything wanted up to here is in the document read next, so it is applied once the push worked.
 	let wanted: i64 = app.db.call(move |db| db.query_row("select wanted_rev from nodes where id = ?", [node.0], |row| row.get(0))).await.map_err(|error| error.to_string())?.map_err(|_| format!("node {} cannot be reached: the panel has no such node", node.0))?;
 	let mut version = None;
+	let mut profiles = None;
 	let result = async {
 		for _ in 0..3 {
 			let (status, body) = request(app, node, "GET", "/v1/config", None, None).await?;
@@ -207,6 +208,7 @@ pub async fn sync(app: &Arc<App>, node: Node) -> Result<(), String> {
 						let (status, body) = request(app, node, "GET", "/v1/status", None, None).await?;
 						if status != 200 {return Err(format!("the node answered {status} to the status after the push"))}
 						version = serde_json::from_slice::<Value>(&body).ok().and_then(|answer| answer["version"].as_str().map(str::to_string));
+						profiles = Some(crate::nodecfg::remote_profiles(app, node, &document).await?);
 						flush_resets(app, node).await?;
 					}
 					return Ok(())
@@ -220,7 +222,8 @@ pub async fn sync(app: &Arc<App>, node: Node) -> Result<(), String> {
 	*state.last_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(match &result {Ok(()) => format!("ok at {}", now()), Err(error) => format!("failed at {}: {error}", now())});
 	if result.is_err() {state.dirty.store(true, Ordering::Relaxed)}
 	let (seen, failure, applied) = (result.is_ok().then(now), result.as_ref().err().cloned(), result.is_ok().then_some(wanted));
-	let _ = app.db.call(move |db| db.execute("update nodes set config_rev = coalesce(?, config_rev), last_seen = coalesce(?, last_seen), last_error = ?, applied_rev = max(applied_rev, coalesce(?, applied_rev)), version = coalesce(?, version) where id = ?", params![pushed, seen, failure, applied, version, node.0])).await;
+	let cache = profiles.map(|profiles: Value| json!({"profiles": profiles}).to_string());
+	let _ = app.db.call(move |db| db.execute("update nodes set config_rev = coalesce(?, config_rev), last_seen = coalesce(?, last_seen), last_error = ?, applied_rev = max(applied_rev, coalesce(?, applied_rev)), version = coalesce(?, version), settings = coalesce(?, settings) where id = ?", params![pushed, seen, failure, applied, version, cache, node.0])).await;
 	if let Err(error) = &result {tracing::warn!("node {} was not updated: {error}", node.0)}
 	result
 }

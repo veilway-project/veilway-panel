@@ -1991,12 +1991,17 @@
           },
           "listener": {
             "default": [],
-            "description": "A reverse link only.",
+            "description": "A reverse link and a managed link: this node's link address, one for each family of `dialler`.",
             "items": {
               "format": "ip",
               "type": "string"
             },
             "type": "array"
+          },
+          "managed": {
+            "default": false,
+            "description": "This node manages the other node through the link. The other node is told so before it agrees, and `listener` is then required.",
+            "type": "boolean"
           },
           "mtu": {
             "format": "uint16",
@@ -2068,6 +2073,11 @@
           },
           "code": {
             "type": "string"
+          },
+          "managed": {
+            "default": false,
+            "description": "True when the offer makes this node the one that manages the other node. It must say what the offer says.",
+            "type": "boolean"
           },
           "tag": {
             "description": "The tag the link gets in this node's config.",

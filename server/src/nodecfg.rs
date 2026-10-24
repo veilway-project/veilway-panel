@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
-use std::{collections::{BTreeMap, BTreeSet}, net::{IpAddr, SocketAddr}, sync::{Arc, RwLock}};
+use std::{collections::{BTreeMap, BTreeSet}, net::{IpAddr, SocketAddr}, sync::{atomic::Ordering, Arc, RwLock}};
 use veilway_proto::subscription::{is_host, payload::{dialable, CANDIDATES_MAX}};
 
 /// `veilway schema` of the core, kept next to the manifest. The node's own validation stays the authority: this is for an editor.
@@ -142,6 +142,8 @@ pub(crate) async fn apply(app: &Arc<App>, node: Node, ctx: &Ctx, document: Value
 	match status {
 		200 => {
 			if node == LOCAL {node::clear_defaults(app, &document).await}
+			// A remote node's profiles follow its own config, which the next pass of its sync derives again.
+			if node != LOCAL {app.node(node).dirty.store(true, Ordering::Relaxed)}
 			let (kept, published) = (document.clone(), app.settings().profiles);
 			// A profile of a borrowed site that was published is made again from what the node runs now, or taken down when it can no longer be emitted, so that no document carries the key or the listener it had before. One that was never published, and one written by hand, stay as they are.
 			// The settings hold node 1's profiles and keys. Another node's document has no part in them.
@@ -453,6 +455,26 @@ pub async fn rated(settings: &Settings, document: &Value, relays: &[Relay], user
 pub async fn node_pins(app: &App, node: Node) -> BTreeMap<String, String> {
 	let Ok((200, body)) = call(app, node, "GET", "/v1/status", None, None).await else {return BTreeMap::new()};
 	body["certificates"].as_array().into_iter().flatten().filter_map(|made| Some((made["listen"].as_str()?.to_string(), made["pin"].as_str()?.to_string()))).collect()
+}
+
+/// The profiles a remote node offers, derived from its own config the way node 1's are, with the public keys and the public address the node reports. The caller keeps them with the node, so a node that is down keeps offering them, and each document gives a device its own address and secret at the node.
+pub(crate) async fn remote_profiles(app: &App, node: Node, document: &Value) -> Result<Value, String> {
+	let (status, body) = node::request(app, node, "GET", "/v1/inbounds", None, None).await?;
+	if status != 200 {return Err(format!("the node answered {status} to the inbounds"))}
+	let reported: Value = serde_json::from_slice(&body).map_err(|error| error.to_string())?;
+	let mut settings = Settings {node_host: reported["public_addresses"][0].as_str().unwrap_or_default().to_string(), ..Settings::default()};
+	for inbound in reported["inbounds"].as_array().into_iter().flatten() {
+		let tag = inbound["tag"].as_str().unwrap_or_default().to_string();
+		if let Some(key) = inbound["public_key"].as_str() {settings.inbound_keys.insert(tag.clone(), key.to_string());}
+		if let Some(key) = inbound["transport_public_key"].as_str() {settings.transport_keys.insert(tag, key.to_string());}
+	}
+	let templates = rated(&settings, document, &[], None, &[], node_pins(app, node).await, false).await;
+	Ok(Value::Array(templates.into_iter().filter(|template| template["kind"] != "faketls" && template["profile"]["transports"].as_array().is_some_and(|list| !list.is_empty())).filter_map(|template| {
+		let (tag, missing) = (template["inbound"].as_str().unwrap_or_default().to_string(), template["missing"].clone());
+		if !missing.as_array().is_some_and(Vec::is_empty) {tracing::warn!("node {}: the profile of inbound {tag} is left out, it still needs {missing}", node.0); return None}
+		let range = document["inbounds"].as_array().into_iter().flatten().find(|inbound| inbound["tag"] == tag.as_str()).and_then(crate::subs::range_of).map(|range| range.to_string());
+		Some(json!({"inbound": tag, "range": range, "profile": template["profile"]}))
+	}).collect()))
 }
 
 pub async fn derived_profiles(State(app): State<Arc<App>>) -> Result<Response, Failure> {

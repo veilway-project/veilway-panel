@@ -5,7 +5,8 @@ use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, time::{Duration, Instant}};
 use tower::ServiceExt;
-use veilway_panel::{app::{App, Node, LOCAL}, build, config::Config, crypto, node, router, upkeep_once, usage, Upkeep};
+use veilway_panel::{app::{App, Node, LOCAL}, build, config::Config, crypto, node, router, subs::{self, DeviceRow, Form, UserRow}, upkeep_once, usage, Upkeep};
+use veilway_proto::{pairing::{self, Direction, Manage, Offer, Offers, Pastes, Terms}, subscription::{envelope::{self, SigningKey}, BODY_MAX}};
 
 const PASSWORD: &str = "correct horse battery";
 
@@ -31,7 +32,7 @@ impl Fake {
 			("POST", "/v1/config/validate") => (200, json!({"valid": true, "report": {"errors": [], "warnings": []}})),
 			("GET", "/v1/status") => (200, json!({"version": "0.3.0", "uptime_secs": 5, "generation": *self.generation.lock().unwrap()})),
 			("GET", "/v1/users") => (200, json!({"users": self.users.lock().unwrap().clone()})),
-			("GET", "/v1/inbounds") => (200, json!({"inbounds": [], "public_addresses": []})),
+			("GET", "/v1/inbounds") => {let document = self.document.lock().unwrap().clone(); (200, json!({"inbounds": document["inbounds"].as_array().into_iter().flatten().map(|inbound| json!({"tag": inbound["tag"], "kind": inbound["type"], "enabled": true, "public_key": STANDARD.encode([9u8; 32]), "transport_public_key": null, "transports": []})).collect::<Vec<_>>(), "public_addresses": document["public_addresses"].clone()}))}
 			("GET", "/v1/exits") => (200, json!({"exits": []})),
 			("GET", "/v1/stats") => (200, json!({"users": [], "inbounds": [], "exits": [], "outbounds": []})),
 			("GET", "/v1/sessions") => (200, json!({"sessions": []})),
@@ -65,6 +66,7 @@ async fn relay(State(world): State<Arc<World>>, request: Request<Body>) -> Respo
 	if path == "/v1/links" {
 		let states = world.states.lock().unwrap().clone();
 		let mut links: Vec<Value> = states.iter().map(|(tag, state)| json!({"tag": tag, "id": format!("id-{tag}"), "manage": "peer", "state": state})).collect();
+		links.extend(world.local.document.lock().unwrap()["links"].as_array().into_iter().flatten().filter(|link| !states.contains_key(link["tag"].as_str().unwrap_or_default())).map(|link| json!({"tag": link["tag"], "id": link["id"], "manage": link["manage"], "state": "up"})));
 		links.sort_by_key(|link| link["tag"].as_str().unwrap().to_string());
 		return answer((200, json!({"links": links})));
 	}
@@ -156,6 +158,25 @@ impl Drop for Panel {
 }
 
 fn month_start() -> i64 {usage::bounds(Some("monthly"), crypto::now()).0}
+
+/// A profile of node 1 as a published one looks, reached at `address`.
+fn profile(id: &str, address: &str) -> Value {json!({"id": id, "name": id, "type": "veilway", "inbound_public_key": STANDARD.encode([7u8; 32]), "gateways": ["10.66.0.1"], "mtu": 1420, "transports": [{"type": "udp", "endpoints": [format!("{address}:51820")]}]})}
+
+/// The payload of the subscription document a device gets, read back through its signature.
+async fn signed_payload(panel: &Panel, user: i64, device: i64) -> Value {
+	let signing = panel.app.signing.lock().unwrap().entries.clone();
+	let held: Vec<SigningKey> = signing.iter().map(|entry| entry.proto()).collect();
+	let row = panel.app.db.call(move |db| UserRow::load(db, user)).await.unwrap().unwrap();
+	let devices = panel.app.db.call(move |db| DeviceRow::for_user(db, user)).await.unwrap().unwrap();
+	let text = subs::document(&panel.app, &row, devices.iter().find(|found| found.id == device).unwrap(), &signing, &signing[0], Form::Whole, None, None).await.unwrap();
+	serde_json::from_slice(envelope::verify(text.as_bytes(), &held, BODY_MAX).unwrap().payload()).unwrap()
+}
+
+/// The other node's side of a pairing, made the way its own operator makes it: its answer to an offer, and the groups it reads out.
+fn other_side(code: &str) -> (String, String) {
+	let (answer, agreed) = Pastes::default().answer(&Offer::parse(code).unwrap(), crypto::now() as u64, &mut crypto::fill).unwrap();
+	(answer, agreed.shown())
+}
 
 #[tokio::test]
 async fn two_nodes_get_the_users_with_their_own_names_secrets_and_addresses_and_node_1_keeps_its_own() {
@@ -402,4 +423,99 @@ fn the_names_and_secrets_of_a_node_are_made_for_it_alone() {
 	assert!(a != b && a != secret && b != secret);
 	assert_ne!(a, crypto::node_secret(crypto::NODE_PROXY_SALT, &one, &secret), "a transport secret and a proxy password of one node differ");
 	let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_remote_node_adds_its_profiles_once_it_has_the_device_and_keeps_them_while_it_is_down() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	remote.document.lock().unwrap()["public_addresses"] = json!(["192.0.2.20"]);
+	panel.app.update_settings(|settings| settings.profiles = vec![profile("main", "192.0.2.10")]).await.unwrap();
+	node::sync(&panel.app, Node(two)).await.unwrap();
+	remote.up.store(false, Ordering::Relaxed);
+	panel.world.states.lock().unwrap().insert("n2".into(), "ended");
+	let alice = panel.user("alice", json!({"quota_bytes": 1000, "quota_period": "monthly"})).await;
+	let made = panel.device(alice).await;
+	let id = made["id"].as_i64().unwrap();
+	let before = signed_payload(&panel, alice, id).await;
+	assert_eq!(before["profiles"].as_array().unwrap().len(), 1, "a node that has not taken the device gives no profile of its own");
+	remote.up.store(true, Ordering::Relaxed);
+	panel.world.states.lock().unwrap().insert("n2".into(), "up");
+	node::sync(&panel.app, Node(two)).await.unwrap();
+	let up = signed_payload(&panel, alice, id).await;
+	let profiles = up["profiles"].as_array().unwrap();
+	assert_eq!(profiles.len(), 2);
+	assert_eq!(profiles[0], before["profiles"][0], "node 1's profile is the same as before the node had the device");
+	let second = &profiles[1];
+	assert_eq!((second["id"].clone(), second["name"].clone()), (json!("frankfurt-main"), json!("Frankfurt · Main")));
+	assert_eq!(second["transports"], json!([{"type": "udp", "endpoints": ["192.0.2.20:51820"]}]));
+	assert_eq!((second["device"]["addresses"].clone(), second["device"]["public_key"].clone()), (json!(["10.67.0.2"]), made["public_key"].clone()), "the device's address at the node, and its one key");
+	let key = made["public_key"].as_str().unwrap().to_string();
+	let sealed = panel.query::<Vec<u8>>("select transport_secret from devices where public_key = ?", vec![key.clone().into()]).remove(0);
+	let secret = panel.app.keys.as_ref().unwrap().open_secret(&panel.record(alice), format!("transport_secret:{key}"), &sealed).unwrap();
+	assert_eq!(second["device"]["transport_secrets"], json!([STANDARD.encode(crypto::node_secret(crypto::NODE_TRANSPORT_SALT, &panel.uid(two), &secret))]), "the secret of the node, derived for it alone");
+	remote.up.store(false, Ordering::Relaxed);
+	panel.world.states.lock().unwrap().insert("n2".into(), "ended");
+	assert_eq!(signed_payload(&panel, alice, id).await["profiles"], up["profiles"], "a node that is down keeps its profiles");
+	remote.up.store(true, Ordering::Relaxed);
+	panel.world.states.lock().unwrap().insert("n2".into(), "up");
+	*panel.world.local.users.lock().unwrap() = vec![json!({"name": "alice", "used_bytes": 30, "period_start": month_start(), "traffic": {"up_bytes": 15, "down_bytes": 15}})];
+	*remote.users.lock().unwrap() = vec![json!({"name": panel.opaque(two, alice), "used_bytes": 50, "period_start": month_start(), "traffic": {"up_bytes": 25, "down_bytes": 25}})];
+	panel.upkeep().await;
+	assert_eq!(signed_payload(&panel, alice, id).await["usage"]["used_bytes"], 80, "the usage of a document is the total across the nodes");
+}
+
+#[tokio::test]
+async fn the_profiles_of_other_nodes_stop_at_the_cap_of_a_document_and_the_document_is_still_given() {
+	let panel = Panel::start().await;
+	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	let mut config = document("10.67.0.1/24", 51820, "exit2");
+	config["inbounds"] = json!((0..10).map(|i| json!({"tag": format!("In{i}"), "type": "veilway", "private_key": "<redacted>", "address": ["10.67.0.1/24"], "transports": [{"type": "udp", "listen": format!("0.0.0.0:{}", 51820 + i)}]})).collect::<Vec<_>>());
+	config["public_addresses"] = json!(["192.0.2.20"]);
+	*remote.document.lock().unwrap() = config;
+	panel.app.update_settings(|settings| settings.profiles = (0..60).map(|i| profile(&format!("p{i}"), "192.0.2.10")).collect()).await.unwrap();
+	let alice = panel.user("alice", json!({})).await;
+	let id = panel.device(alice).await["id"].as_i64().unwrap();
+	node::sync(&panel.app, Node(two)).await.unwrap();
+	let ids: Vec<String> = signed_payload(&panel, alice, id).await["profiles"].as_array().unwrap().iter().map(|profile| profile["id"].as_str().unwrap().to_string()).collect();
+	assert_eq!(ids.len(), 64, "a document holds 64 profiles at most");
+	assert_eq!(ids[..60].to_vec(), (0..60).map(|i| format!("p{i}")).collect::<Vec<_>>(), "node 1 is first and whole");
+	assert_eq!(ids[60..].iter().map(String::as_str).collect::<Vec<_>>(), ["frankfurt-in0", "frankfurt-in1", "frankfurt-in2", "frankfurt-in3"]);
+}
+
+#[tokio::test]
+async fn a_managed_link_is_offered_and_answered_through_the_api_and_the_node_on_it_is_added() {
+	let panel = Panel::start().await;
+	let mut managed = json!({"tag": "north", "inbound": "Main", "direction": "forward", "name": "North", "inbound_public_key": STANDARD.encode([3u8; 32]), "dialler": ["10.90.0.3"], "transports": [{"type": "udp", "endpoints": ["192.0.2.30:51820"]}], "managed": true});
+	assert_eq!(panel.refused(Method::POST, "/p/api/links/offers", Some(managed.clone())).await.0, StatusCode::BAD_REQUEST, "a managed link needs this node's link address");
+	managed["listener"] = json!(["10.90.0.2"]);
+	let code = panel.call(Method::POST, "/p/api/links/offers", Some(managed)).await["code"].as_str().unwrap().to_string();
+	let (answer, groups) = other_side(&code);
+	let taken = panel.call(Method::POST, "/p/api/links/offers/answer", Some(json!({"code": answer}))).await;
+	let revision = format!("rev{}", *panel.world.local.generation.lock().unwrap());
+	panel.call(Method::POST, &format!("/p/api/links/pairings/{}/confirm", taken["id"].as_str().unwrap()), Some(json!({"typed": groups, "revision": revision}))).await;
+	let links = panel.world.local.document.lock().unwrap()["links"].clone();
+	let entry = links.as_array().unwrap().iter().find(|link| link["tag"] == "north").unwrap().clone();
+	assert_eq!((entry["manage"].clone(), entry["addresses"]["listener"].clone()), (json!("peer"), json!(["10.90.0.2"])), "node 1 manages the link");
+	panel.world.remotes.lock().unwrap().insert("north".into(), Fake::new(document("10.67.0.1/24", 51820, "exit2")));
+	panel.world.states.lock().unwrap().insert("north".into(), "up");
+	let added = panel.call(Method::POST, "/p/api/nodes", Some(json!({"name": "North", "link": "north", "pool_v4": "10.67.0.0/24"}))).await;
+	assert_eq!((added["link"].clone(), added["link_state"].clone()), (json!("north"), json!("up")), "the node is added right after the pairing");
+	let mut theirs = Offers::default();
+	let edge = Terms {direction: Direction::Forward, name: "Edge".into(), inbound_public_key: [4u8; 32], transport_public_key: None, dialler: vec!["10.91.0.3".parse().unwrap()], listener: vec!["10.91.0.2".parse().unwrap()], manage: Some(Manage::Dialler), mtu: 1420, transports: pairing::transports(br#"[{"type": "udp", "endpoints": ["192.0.2.31:51820"]}]"#).unwrap()};
+	let code = theirs.issue(&edge, crypto::now() as u64, 600, &mut crypto::fill).unwrap();
+	assert_eq!(panel.call(Method::POST, "/p/api/links/paste", Some(json!({"code": code}))).await["manage"], "this_node");
+	let paste = json!({"code": code, "tag": "edge", "accept": true});
+	assert_eq!(panel.refused(Method::POST, "/p/api/links/paste/answer", Some(paste.clone())).await.0, StatusCode::BAD_REQUEST, "an offer that makes this node the manager is answered as managed");
+	let mut answered_managed = paste.clone();
+	answered_managed["managed"] = json!(true);
+	let answered = panel.call(Method::POST, "/p/api/links/paste/answer", Some(answered_managed)).await;
+	let agreed = theirs.answer(answered["answer"].as_str().unwrap(), crypto::now() as u64).unwrap();
+	let revision = format!("rev{}", *panel.world.local.generation.lock().unwrap());
+	panel.call(Method::POST, &format!("/p/api/links/pairings/{}/confirm", answered["id"].as_str().unwrap()), Some(json!({"typed": agreed.shown(), "revision": revision}))).await;
+	let links = panel.world.local.document.lock().unwrap()["links"].clone();
+	assert_eq!(links.as_array().unwrap().iter().find(|link| link["tag"] == "edge").unwrap()["manage"], "peer", "an answer that makes this node the manager is managed from it");
+	let refused = Offers::default().issue(&Terms {manage: Some(Manage::Listener), ..edge}, crypto::now() as u64, 600, &mut crypto::fill).unwrap();
+	assert_eq!(panel.call(Method::POST, "/p/api/links/paste", Some(json!({"code": refused}))).await["manage"], "other_node");
+	assert_eq!(panel.refused(Method::POST, "/p/api/links/paste/answer", Some(json!({"code": refused, "tag": "other", "accept": true, "managed": true}))).await.0, StatusCode::CONFLICT, "a node that would manage this one is not paired");
 }
