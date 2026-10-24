@@ -41,6 +41,8 @@ jobs:
           push: ${{ github.ref_type == 'tag' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # A release tag builds against the core's tag of the same version (see release.yml).
+          build-args: VEILWAY_REF=${{ github.ref_type == 'tag' && github.ref_name || 'main' }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha

@@ -23,6 +23,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           repository: veilway-project/veilway
+          # A release tag builds against the core's tag of the same version, so a hotfix of an older release does not meet the core's newer main.
+          ref: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'main' }}
           path: ws/veilway
       - uses: actions/checkout@v7
         with:
