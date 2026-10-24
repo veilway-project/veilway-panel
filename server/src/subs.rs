@@ -12,6 +12,8 @@ use veilway_proto::subscription::{envelope, exchange::{self, GatewayKey}, fetch:
 pub const PENDING_PLACES: i64 = 2;
 pub const PENDING_LAPSE: i64 = 600;
 const NODE_DEVICES_MAX: i64 = 16;
+/// The shortest refresh interval a document may ask for, used while a node does not hold the device yet.
+const UPDATE_SOONEST: u32 = 900;
 
 #[derive(Clone, Debug)]
 pub struct UserRow {pub id: i64, pub name: String, pub enabled: bool, pub groups: String, pub exits: String, pub quota_bytes: Option<i64>, pub quota_period: Option<String>, pub expires_at: Option<i64>, pub device_limit: i64, pub note: String, pub created: i64, pub record_id: [u8; 16], pub sub_id: String, pub token_copy: Option<Vec<u8>>, pub token_gen: i64, pub token_created: i64, pub default_exit: Option<String>, pub endpoint: Option<String>, pub proxy: bool, pub nodes: String}
@@ -160,14 +162,16 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 	let (pooled, taken): (String, HashSet<String>) = app.db.call(|db| -> rusqlite::Result<_> {Ok((db.query_row("select pool_v4 from nodes where id = ?", [LOCAL.0], |row| row.get(0))?, db.prepare("select address from device_addresses where node_id = ?")?.query_map([LOCAL.0], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?))}).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 	let (pool, stored) = (pooled.parse::<Ipv4Net>().ok(), this.address.parse::<Ipv4Addr>().ok());
 	let device_id = this.id;
-	let (total, remote_nodes) = app.db.call(move |db| -> rusqlite::Result<_> {
+	let (total, remote_nodes, waiting) = app.db.call(move |db| -> rusqlite::Result<_> {
 		let rows = db.prepare("select nodes.id, nodes.name, nodes.slug, nodes.uid, nodes.pool_v4, device_addresses.address, nodes.settings, nodes.relays from nodes join device_addresses on device_addresses.node_id = nodes.id and device_addresses.device_id = ? where nodes.id != ? and nodes.applied_rev >= device_addresses.added_rev order by nodes.id")?.query_map(params![device_id, LOCAL.0], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
 		let mut nodes = Vec::new();
 		for (id, name, slug, uid, pool, address, cache, relays) in rows {
 			let taken: HashSet<String> = db.prepare("select address from device_addresses where node_id = ?")?.query_map([id], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
 			nodes.push((id, name, slug, uid, pool, address, cache, serde_json::from_str::<Vec<crate::nodecfg::Relay>>(&relays).unwrap_or_default(), taken));
 		}
-		Ok((usage::across(db, user_id, now())?, nodes))
+		// A node that does not hold the device yet is left out of this document, and the app is asked back as soon as a document allows.
+		let waiting: bool = db.query_row("select exists (select 1 from device_addresses join nodes on nodes.id = device_addresses.node_id where device_addresses.device_id = ? and nodes.id != ? and nodes.applied_rev < device_addresses.added_rev)", params![device_id, LOCAL.0], |row| row.get(0))?;
+		Ok((usage::across(db, user_id, now())?, nodes, waiting))
 	}).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 	let mut profiles: Vec<Value> = settings.profiles.iter().cloned().filter_map(|mut profile| {
 		// A relays-only inbound is switched on at once, before the next publish: the node's own addresses of an older snapshot are dropped here, and a profile no relay reaches this account with is not given.
@@ -216,7 +220,7 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 	let mut payload = json!({
 		"v": 1, "subscription_id": user.sub_id, "serial": serial, "issued_at": at, "expires_at": at + i64::from(settings.document_days) * 86_400,
 		"signing_keys": signing.iter().map(|entry| STANDARD.encode(entry.public())).collect::<Vec<_>>(),
-		"provider": {"name": settings.provider_name}, "update_interval": settings.update_interval, "profiles": profiles,
+		"provider": {"name": settings.provider_name}, "update_interval": if waiting {UPDATE_SOONEST} else {settings.update_interval}, "profiles": profiles,
 		"devices": devices.iter().map(|other| json!({"name": other.name, "enrolled_at": other.confirmed_at.unwrap_or(other.created), "this": other.id == this.id, "pending": other.state == "pending"})).collect::<Vec<_>>(),
 	});
 	if form != Form::Static {payload["usage"] = json!({"used_bytes": used.and_then(|user| user.get("used_bytes")).and_then(Value::as_u64).unwrap_or(0), "quota_bytes": user.quota_bytes.unwrap_or(0), "period": user.quota_period.as_deref().unwrap_or("none"), "period_start": used.and_then(|user| user.get("period_start")).and_then(Value::as_i64).unwrap_or(0).max(0), "expires_at": user.expires_at.unwrap_or(0), "device_limit": user.device_limit});}

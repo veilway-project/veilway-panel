@@ -249,7 +249,7 @@ pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 		if let Some(links) = document["links"].as_array_mut() {links.retain(|link| link["manage"] != "by_peer");}
 		for inbound in document.get_mut("xray").and_then(|xray| xray.get_mut("inbounds")).and_then(Value::as_array_mut).into_iter().flatten() {inbound["clients"] = json!([]);}
 		let (status, body) = nodecfg::call(&app, node, "PUT", "/v1/config", Some(&revision), Some(&document)).await?;
-		if status != 200 {return Err(Failure::new(StatusCode::BAD_GATEWAY, "node_refused", format!("The node answered {status} when asked to empty itself: {}. If it was taken or is gone, remove it as taken.", body.to_string().chars().take(300).collect::<String>())))}
+		if status != 200 && status != 202 {return Err(Failure::new(StatusCode::BAD_GATEWAY, "node_refused", format!("The node answered {status} when asked to empty itself: {}. If it was taken or is gone, remove it as taken.", body.to_string().chars().take(300).collect::<String>())))}
 		// Kept, so that a removal that then fails at node 1 is retried without asking the node again: once emptied, it no longer serves management through its link.
 		app.db.call(move |db| db.execute("update nodes set emptied = 1 where id = ?", [id])).await??;
 	}
