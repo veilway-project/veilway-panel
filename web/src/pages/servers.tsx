@@ -103,7 +103,11 @@ function RemoveServer({node, onClose, onRemoved}: {node: NodeRow, onClose: () =>
 // Three steps: a managed link between this panel's node and the other server, what to call the server and where its devices get addresses, then the first sync.
 function AddServer({onClose}: {onClose: () => void}) {
 	const {t, number} = useP(), guard = useGuard(), {nodes} = useServers(), running = useRunning(), [step, setStep] = useState(0), [way, setWay] = useState("offer"), [pairing, setPairing] = useState<Compare | null>(null), [tag, setTag] = useState(""), [spare, setSpare] = useState("");
-	const [name, setName] = useState(""), [place, setPlace] = useState<number | "">(""), [pool, setPool] = useState(""), [added, setAdded] = useState<NodeRow | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
+	const [name, setName] = useState(""), [place, setPlace] = useState<number | "">(""), [pool, setPool] = useState(() => {
+			const taken = nodes.map((node): [number, number] => { const [address = "", bits = "32"] = node.pool_v4.split("/"), from = address.split(".").reduce((sum, part) => sum * 256 + Number(part), 0); return [from, from + 2 ** (32 - Number(bits)) - 1]; });
+			const first = Array.from({length: 189}, (_, i) => 67 + i).find(octet => { const start = 10 * 2 ** 24 + octet * 65536; return taken.every(([from, to]) => to < start || from > start + 255); });
+			return first === undefined ? "" : `10.${first}.0.0/24`;
+		}), [added, setAdded] = useState<NodeRow | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const names = [t("servers.step.link"), t("servers.step.details"), t("servers.step.done")];
 	// Links that node 1 manages and no server uses yet, for a pairing made on the command line.
 	const free = ((running.data?.document.links ?? []) as {tag: string, manage?: string}[]).filter(link => link.manage === "peer" && !nodes.some(node => node.link === link.tag)).map(link => link.tag);

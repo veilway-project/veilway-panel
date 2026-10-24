@@ -596,7 +596,7 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Removes a remote node: it is asked to empty itself and drop the managing link (unless `taken=true`), then the link leaves node 1's config and the node's addresses and counts go. Needs a recent re-authentication. */
+        /** Removes a remote node: it is asked to empty itself and drop the managing link (unless `taken=true`), then the link leaves node 1's config and the node's addresses and counts go. Query: taken. Needs a recent re-authentication. */
         delete: operations["removeNode"];
         options?: never;
         head?: never;
