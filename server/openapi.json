@@ -4392,7 +4392,7 @@
   "info": {
     "description": "HTTP and JSON under the panel's path prefix. A browser logs in and sends the CSRF token on every change. An integration sends an API token as a Bearer header. The x-access member of an operation says what it needs: read, users or full are token scopes, session and session-reauth are for a logged-in admin only, and public needs nothing.",
     "title": "Veilway panel API",
-    "version": "0.3.3"
+    "version": "0.3.4"
   },
   "openapi": "3.1.0",
   "paths": {
