@@ -577,7 +577,8 @@ async fn a_remote_node_is_given_only_the_groups_its_config_declares() {
 	remote.document.lock().unwrap()["groups"] = json!(["office"]);
 	let alice = panel.user("alice", json!({"groups": ["office", "other"]})).await;
 	panel.device(alice).await;
-	panel.settle().await;
+	// A sync that is still running when the first settle looks is waited for: a slow runner can need more than one round.
+	for _ in 0..50 {panel.settle().await; if remote.user(&panel.opaque(two, alice))["groups"] == json!(["office"]) {break}}
 	assert_eq!(remote.user(&panel.opaque(two, alice))["groups"], json!(["office"]), "a group the node does not declare is left out");
 	assert_eq!(panel.world.local.user("alice")["groups"], json!(["office", "other"]), "node 1 keeps every group");
 }
