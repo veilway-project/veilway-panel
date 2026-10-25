@@ -2589,7 +2589,8 @@ async fn a_theft_whose_request_is_dropped_still_marks_the_accounts() {
 		for _ in 0..10_000 {
 			std::future::poll_fn(|context| {let _ = request.as_mut().poll(context); std::task::Poll::Ready(())}).await;
 			if std::fs::read(&h.app.cfg.gateway).unwrap() != before {break}
-			tokio::task::yield_now().await;
+			// a sleep, not a yield: the switch runs on a blocking thread, which a slow runner may not reach in 10,000 bare polls
+			tokio::time::sleep(std::time::Duration::from_millis(1)).await;
 		}
 		assert_ne!(std::fs::read(&h.app.cfg.gateway).unwrap(), before, "the key file was switched");
 	}
