@@ -594,6 +594,27 @@ async fn setup_needs_the_terms_and_records_the_acceptance() {
 }
 
 #[tokio::test]
+async fn a_setup_through_a_domain_name_sets_the_node_address_and_the_endpoint_and_one_through_an_ip_address_does_not() {
+	for (host, filled) in [("panel.test", true), ("203.0.113.5:8480", false)] {
+		let dir = std::env::temp_dir().join(format!("vwpanel-{}", URL_SAFE_NO_PAD.encode(crypto::random::<9>())));
+		std::fs::create_dir_all(&dir).unwrap();
+		let cfg = Config {prefix: "/p".into(), sub_path: "/s".into(), database: dir.join("panel.db"), keys: dir.join("panel.keys"), signing: dir.join("signing.keys"), gateway: dir.join("gateway.keys"), gateway_next: dir.join("gateway.next"), node_socket: dir.join("none.sock"), ..Config::default()};
+		let app = build(cfg).unwrap();
+		let h = Harness {router: router(app.clone()), app, totp: Vec::new(), dir};
+		let token = h.app.setup_token.lock().unwrap().clone().unwrap();
+		let answer = h.send(Request::builder().method(Method::POST).uri("/p/api/setup").header(HOST, host).header(CONTENT_TYPE, "application/json"), Some(json!({"token": token, "username": "owner", "password": PASSWORD, "accepted_terms": true})), "10.0.0.1").await;
+		assert_eq!(answer.status, StatusCode::OK);
+		let settings = h.app.settings();
+		if filled {
+			assert_eq!(settings.node_host, "panel.test");
+			assert_eq!((settings.endpoints.len(), settings.endpoints[0].name.as_str(), settings.endpoints[0].url.as_str(), settings.default_endpoint.as_str()), (1, "main", "https://panel.test/s/main", "main"));
+		} else {
+			assert!(settings.node_host.is_empty() && settings.endpoints.is_empty());
+		}
+	}
+}
+
+#[tokio::test]
 async fn provider_terms_urls_are_https_and_checked_when_saved() {
 	let h = Harness::new().await;
 	let session = h.login("10.0.0.1").await;

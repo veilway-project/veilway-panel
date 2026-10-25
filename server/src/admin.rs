@@ -1,8 +1,8 @@
 //! Admin accounts: setup, login, TOTP, sessions, API tokens, the audit log, settings, signing keys and the node.
-use crate::{app::{bucket, publish_settings, store_settings, App, Settings, SigningEntry, LOCAL}, auth::{Agent, COOKIE_NAME, TOKEN_PREFIX}, crypto::{self, now, Keys}, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
+use crate::{app::{bucket, publish_settings, store_settings, App, Endpoint, Settings, SigningEntry, LOCAL}, auth::{Agent, COOKIE_NAME, TOKEN_PREFIX}, crypto::{self, now, Keys}, db::audit, http::{json, ok, Body, Ctx, Failure}, node};
 use veilway_proto::{control::{display, NOTICES_MAX, NOTICE_MAX}, subscription::{Tag, Url, TRANSLATIONS_MAX, URL_MAX}};
 use argon2::{password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString}, Argon2};
-use axum::{extract::{Path, Query, State}, http::{header::SET_COOKIE, HeaderName, HeaderValue, StatusCode}, response::Response, Extension};
+use axum::{extract::{Path, Query, State}, http::{header::{HOST, SET_COOKIE}, HeaderMap, HeaderName, HeaderValue, StatusCode}, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use data_encoding::BASE32_NOPAD;
 use ipnet::{IpNet, Ipv4Net};
@@ -96,7 +96,7 @@ pub struct Setup {pub token: String, pub username: String, pub password: String,
 /// The version of the Veilway terms the operator accepts at setup, kept with the acceptance.
 const TERMS_VERSION: &str = "2026-10-16";
 
-pub async fn setup(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<Setup>) -> Result<Response, Failure> {
+pub async fn setup(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, headers: HeaderMap, Body(input): Body<Setup>) -> Result<Response, Failure> {
 	if !app.limits.hit(&format!("setup:{}", bucket(&ctx.source, 64)), 5, 900) {return Err(Failure::new(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "Too many tries."))}
 	let expected = app.setup_token.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
 	if !expected.is_some_and(|expected| crypto::equal(expected.as_bytes(), input.token.as_bytes())) {return Err(Failure::new(StatusCode::FORBIDDEN, "bad_setup_token", "The setup token is wrong, or setup is done."))}
@@ -105,6 +105,7 @@ pub async fn setup(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	password_ok(&input.password)?;
 	let hash = hash_password(input.password.clone()).await?;
 	let (sealed, record, shown) = new_totp(&app, &input.username)?;
+	let (actor, source) = (format!("admin:{}", input.username), ctx.source.clone());
 	app.db.call(move |db| -> Result<(), Failure> {
 		if db.query_row("select count(*) from admins", [], |row| row.get::<_, i64>(0))? > 0 {return Err(Failure::conflict("Setup is done."))}
 		db.execute("insert into admins (username, password_hash, totp_secret, totp_record, created) values (?, ?, ?, ?, ?)", params![input.username, hash, sealed, record, now()])?;
@@ -113,6 +114,21 @@ pub async fn setup(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 		Ok(())
 	}).await??;
 	*app.setup_token.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+	// A setup reached through a domain name knows where apps find this server, so the node address and the endpoint main come from it and a domain install needs no trip to Settings. An IP address is left to the operator: its endpoint needs a pin.
+	let host = headers.get(HOST).and_then(|value| value.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
+	let name = host.rsplit_once(':').filter(|(_, port)| port.parse::<u16>().is_ok()).map_or(host.as_str(), |(name, _)| name).to_string();
+	if name.contains('.') && name.len() <= 253 && name.parse::<std::net::IpAddr>().is_err() && name.split('.').all(|label| !label.is_empty() && label.len() <= 63 && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')) {
+		let (url, detail) = (format!("https://{host}{}/main", app.cfg.sub_path), format!("node address {name} and endpoint main https://{host}{}/main, from the address of the setup", app.cfg.sub_path));
+		let filled = app.update_settings(move |settings| if settings.node_host.is_empty() && settings.endpoints.is_empty() {
+			settings.node_host = name;
+			settings.endpoints.push(Endpoint {name: "main".into(), url, pins: Vec::new()});
+			settings.default_endpoint = "main".into();
+		}).await;
+		match filled {
+			Ok(()) => app.db.audit(&actor, &source, "settings.update", "settings", &detail).await,
+			Err(error) => tracing::warn!("the node address and endpoint from the address of the setup were not kept: {error}"),
+		}
+	}
 	ok(&shown)
 }
 
@@ -335,6 +351,7 @@ pub async fn create_admin(State(app): State<Arc<App>>, Extension(ctx): Extension
 	password_ok(&input.password)?;
 	let hash = hash_password(input.password.clone()).await?;
 	let (sealed, record, shown) = new_totp(&app, &input.username)?;
+	let (actor, source) = (format!("admin:{}", input.username), ctx.source.clone());
 	app.db.call(move |db| -> Result<(), rusqlite::Error> {
 		db.execute("insert into admins (username, password_hash, totp_secret, totp_record, created) values (?, ?, ?, ?, ?)", params![input.username, hash, sealed, record, now()])?;
 		audit(db, &ctx.actor, &ctx.source, "admin.create", &input.username, "");
