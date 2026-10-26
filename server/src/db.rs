@@ -10,7 +10,7 @@ create table sessions (id text primary key, admin_id integer not null references
 create table api_tokens (id integer primary key, admin_id integer not null references admins(id) on delete cascade, name text not null, scope text not null, token_hash blob not null unique, prefix text not null, expires_at integer, sources text not null, created integer not null, last_used integer, revoked_at integer);
 create table audit (id integer primary key, at integer not null, actor text not null, source text not null, action text not null, target text not null, detail text not null);
 create table settings (key text primary key, value text not null);
-create table users (id integer primary key, name text not null unique, enabled integer not null default 1, groups text not null default '[]', exits text not null default '\"all\"', default_exit text, quota_bytes integer, quota_period text, expires_at integer, device_limit integer not null, note text not null default '', created integer not null, record_id blob not null, sub_id text not null unique, token_lookup blob not null unique, token_copy blob, token_gen integer not null default 1, token_created integer not null, endpoint text, proxy_password blob, nodes text not null default '\"all\"', cut_until integer, profile_order text);
+create table users (id integer primary key, name text not null unique, enabled integer not null default 1, groups text not null default '[]', exits text not null default '\"all\"', default_exit text, quota_bytes integer, quota_period text, expires_at integer, device_limit integer not null, note text not null default '', created integer not null, record_id blob not null, sub_id text not null unique, token_lookup blob not null unique, token_copy blob, token_gen integer not null default 1, token_created integer not null, endpoint text, proxy_password blob, nodes text not null default '\"all\"', cut_until integer, profile_order text, speed_up integer, speed_down integer);
 create table usage_buckets (res integer not null, at integer not null, kind text not null, name text not null, up integer not null default 0, down integer not null default 0, peak_up integer not null default 0, peak_down integer not null default 0, primary key (res, at, kind, name)) without rowid;
 create table counters (kind text not null, name text not null, up integer not null, down integer not null, primary key (kind, name)) without rowid;
 create table devices (id integer primary key, user_id integer not null references users(id) on delete cascade, name text not null, public_key text not null, secret_hash blob not null, transport_secret blob not null, private_key blob, state text not null, token_gen integer not null, created integer not null, confirmed_at integer, last_seen integer, mirror_name blob, mirror_key blob, mirror_gen integer, last_serial integer not null default 0);
@@ -31,7 +31,8 @@ insert into nodes (id, uid, name, slug, pool_v4, created) values (1, randomblob(
 /// Entry 3 records in `nodes.emptied` that a remote node was emptied before its link was taken out of node 1, so a removal that failed there is retried without asking the node again.
 /// Entry 4 keeps the relays of a remote node in `nodes.relays`, as the list that node 1 keeps in its settings.
 /// Entry 5 gives a user their own order of the profiles, a JSON list of profile ids, or null to follow the global order of the settings.
-pub const MIGRATIONS: &[&str] = &["alter table users add column proxy_password blob", NODES, SEVERAL, "alter table nodes add column emptied integer not null default 0", "alter table nodes add column relays text not null default '[]'", "alter table users add column profile_order text"];
+/// Entry 6 gives a user a rate cap in bytes per second up and down, or null for none, which the node keeps one bucket for per user.
+pub const MIGRATIONS: &[&str] = &["alter table users add column proxy_password blob", NODES, SEVERAL, "alter table nodes add column emptied integer not null default 0", "alter table nodes add column relays text not null default '[]'", "alter table users add column profile_order text", "alter table users add column speed_up integer;\nalter table users add column speed_down integer"];
 
 const NODES: &str = "create table if not exists nodes (id integer primary key, uid blob not null unique, name text not null unique, slug text not null unique, link_id text, place integer not null default 0, pool_v4 text not null, settings text not null default '{}', wanted_rev integer not null default 0, applied_rev integer not null default 0, config_rev text, last_seen integer, last_error text, version text, counted integer not null default 1, max_rate integer, created integer not null);
 insert or ignore into nodes (id, uid, name, slug, pool_v4, created) values (1, randomblob(16), 'Node 1', 'node-1', coalesce((select json_extract(value, '$.pool_v4') from settings where key = 'settings'), '10.66.0.0/16'), cast(strftime('%s', 'now') as integer));
@@ -174,8 +175,8 @@ mod tests {
 	fn a_fresh_database_gets_the_schema_and_version_1() {
 		let mut connection = memory();
 		migrate(&mut connection, MIGRATIONS).unwrap();
-		assert_eq!(SCHEMA_VERSION, 7);
-		assert_eq!(version(&connection), 7);
+		assert_eq!(SCHEMA_VERSION, 8);
+		assert_eq!(version(&connection), 8);
 		assert_eq!(connection.query_row("select count(*) from sqlite_master where type = 'table'", [], |row| row.get::<_, i64>(0)).unwrap(), 17);
 		assert_eq!(connection.query_row("select id, name, pool_v4 from nodes", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).unwrap(), (1, "Node 1".into(), "10.66.0.0/16".into()));
 	}
@@ -201,7 +202,7 @@ mod tests {
 		connection.execute("insert into users (id, name, device_limit, created, record_id, sub_id, token_lookup, token_created) values (1, 'a', 3, 1, x'00', 's', x'01', 1)", []).unwrap();
 		for (id, address) in [(1, "10.7.0.2"), (2, "10.7.0.9")] {connection.execute("insert into devices (id, user_id, name, public_key, secret_hash, address, transport_secret, state, token_gen, created) values (?, 1, 'd', ?, x'00', ?, x'00', 'enrolled', 1, 1)", params![id, format!("key{id}"), address]).unwrap();}
 		migrate(&mut connection, MIGRATIONS).unwrap();
-		assert_eq!(version(&connection), 7);
+		assert_eq!(version(&connection), 8);
 		assert_eq!(connection.query_row("select id, pool_v4, link_id, place, counted from nodes", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?))).unwrap(), (1, "10.7.0.0/24".into(), None, 0, 1));
 		let addresses: Vec<(i64, i64, String)> = connection.prepare("select node_id, device_id, address from device_addresses order by device_id").unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap().collect::<Result<_, _>>().unwrap();
 		assert_eq!(addresses, vec![(1, 1, "10.7.0.2".to_string()), (1, 2, "10.7.0.9".to_string())]);

@@ -452,7 +452,7 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 		if !only && !transports.is_empty() && (used.is_empty() || !used.iter().all(|host| reachable(host))) {missing.push("node_host")}
 		if profile["transports"].as_array().is_some_and(|list| list.iter().any(|transport| transport["type"] == "tls" || transport["type"] == "ws" || transport["type"] == "fronted-shaped")) && profile.get("transport_public_key").is_none() {missing.push("transport_public_key")}
 		if off {missing.clear()}
-		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES && !NOT_MEMBERS.contains(&key.as_str())).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed, "refused": refused, "pin": pin});
+		let own = json!({"inbound": tag, "profile": profile, "missing": missing, "overridden": settings.profile_overrides.get(&tag).and_then(Value::as_object).map(|edits| edits.keys().filter(|key| *key != crate::borrowed::ADDRESSES && !NOT_MEMBERS.contains(&key.as_str())).cloned().collect::<Vec<_>>()).unwrap_or_default(), "trimmed": trimmed, "refused": refused, "pin": pin, "link_pins": transports.iter().filter(|transport| transport["type"] == "tls").filter_map(|transport| {let listen = transport["listen"].as_str()?; Some((listen.rsplit_once(':')?.1.to_string(), json!(exposure.file_pins.get(listen)?)))}).collect::<serde_json::Map<String, Value>>()});
 		let faketls = crate::borrowed::template(settings, document, inbound, &gateways).map(|mut template| {
 			if only {template["profile"]["transports"] = json!([]); template["missing"] = json!([]); template["refused"] = json!([{"transport": "faketls", "code": "relays_only", "reason": "a relay cannot sit in front of the borrowed-site handshake, and the node's own address is not given to apps"}]);}
 			template
@@ -462,17 +462,18 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 }
 
 /// The templates with each profile's rating decided by the Xray inbounds it shares an address with. The names the profiles carry are looked up first, so the derivation itself does no lookup.
-pub async fn rated(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, hosts: &[(String, String)], pins: BTreeMap<String, String>, skeleton: bool) -> Vec<Value> {
+pub async fn rated(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, hosts: &[(String, String)], pins: (BTreeMap<String, String>, BTreeMap<String, String>), skeleton: bool) -> Vec<Value> {
 	let names: Vec<String> = derive(settings, document, relays, user, &Exposure::default(), skeleton).iter().flat_map(|template| addresses(&template["profile"])).collect();
 	let mut exposure = xray::exposure(document, hosts, &settings.node_host, names).await;
-	exposure.pins = pins;
+	(exposure.pins, exposure.file_pins) = pins;
 	derive(settings, document, relays, user, &exposure, skeleton)
 }
 
-/// The pin of each self-signed `tls` certificate the node made, by listen address, as its status reports them. The pin is the hash of the certificate's key, which the node keeps when it renews the certificate, so it changes only when the node makes a new key. A node that does not answer gives none, and the templates are made without.
-pub async fn node_pins(app: &App, node: Node) -> BTreeMap<String, String> {
-	let Ok((200, body)) = call(app, node, "GET", "/v1/status", None, None).await else {return BTreeMap::new()};
-	body["certificates"].as_array().into_iter().flatten().filter_map(|made| Some((made["listen"].as_str()?.to_string(), made["pin"].as_str()?.to_string()))).collect()
+/// The pin of each `tls` certificate, by listen address, as the node's status reports them: the self-signed ones the node made first, then the ones read from a `cert` file. The pin is the hash of the certificate's key. A self-signed key is kept across renewals, so its pin changes only when the node makes a new key. Only a self-signed pin may stand alone in a profile's candidate; a file certificate's pin is a second condition after the chain and goes only into link offers. A status without `self_signed` comes from a node that listed self-signed certificates alone. A node that does not answer gives none, and the templates are made without.
+pub async fn node_pins(app: &App, node: Node) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+	let Ok((200, body)) = call(app, node, "GET", "/v1/status", None, None).await else {return Default::default()};
+	let (made, file): (Vec<_>, Vec<_>) = body["certificates"].as_array().into_iter().flatten().filter_map(|made| Some((made["self_signed"].as_bool().unwrap_or(true), made["listen"].as_str()?.to_string(), made["pin"].as_str()?.to_string()))).partition(|(own, _, _)| *own);
+	(made.into_iter().map(|(_, listen, pin)| (listen, pin)).collect(), file.into_iter().map(|(_, listen, pin)| (listen, pin)).collect())
 }
 
 /// The profiles a remote node offers, derived from its own config the way node 1's are, with the public keys and the public address the node reports. The caller keeps them with the node, so a node that is down keeps offering them, and each document gives a device its own address and secret at the node.
@@ -1024,7 +1025,23 @@ mod tests {
 		exposure
 	}
 
+	fn with_file_pin(pin: &str) -> Exposure {
+		let mut exposure = Exposure::default();
+		exposure.file_pins.insert("0.0.0.0:443".into(), pin.into());
+		exposure
+	}
+
 	fn tls_candidates(template: &Value) -> Value {template["profile"]["transports"].as_array().unwrap().iter().find(|transport| transport["type"] == "tls").unwrap()["candidates"].clone()}
+
+	#[test]
+	fn a_file_certificates_pin_never_reaches_a_profile_candidate_and_is_offered_to_links_by_port() {
+		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
+		let template = derive(&settings, &document(), &[], None, &with_file_pin("pinF"), false).remove(0);
+		assert_eq!(tls_candidates(&template), json!([{"address": "192.0.2.10:443", "sni": "node.example.org", "host": "node.example.org"}]), "a CA candidate stays a CA candidate");
+		assert_eq!((template["pin"]["source"].clone(), template["link_pins"].clone()), (Value::Null, json!({"443": "pinF"})));
+		let plain = derive(&settings, &document(), &[], None, &Exposure::default(), false).remove(0);
+		assert_eq!(plain["link_pins"], json!({}));
+	}
 
 	#[test]
 	fn the_nodes_pin_fills_a_tls_candidate_that_has_none_and_comes_from_the_node() {

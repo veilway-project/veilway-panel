@@ -98,11 +98,11 @@ pub(crate) async fn fill(app: &Arc<App>, node: Node, document: &mut Value) -> Re
 		let mut taken: HashSet<String> = db.prepare("select address from device_addresses where node_id = ?").and_then(|mut statement| statement.query_map([node.0], |row| row.get(0))?.collect()).map_err(|error| error.to_string())?;
 		taken.extend(document["links"].as_array().into_iter().flatten().flat_map(|link| ["dialler", "listener"].map(|side| link["addresses"][side].clone())).flat_map(|list| list.as_array().cloned().unwrap_or_default()).filter_map(|address| Some(address.as_str()?.split('/').next()?.to_string())));
 		subs::expire_pending(db, now()).map_err(|error| error.to_string())?;
-		let mut statement = db.prepare("select id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, record_id, default_exit, nodes, cut_until from users order by id").map_err(|error| error.to_string())?;
-		let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<i64>>(7)?, row.get::<_, Vec<u8>>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, String>(10)?, row.get::<_, Option<i64>>(11)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+		let mut statement = db.prepare("select id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, record_id, default_exit, nodes, cut_until, speed_up, speed_down from users order by id").map_err(|error| error.to_string())?;
+		let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, Option<i64>>(7)?, row.get::<_, Vec<u8>>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, String>(10)?, row.get::<_, Option<i64>>(11)?, row.get::<_, Option<i64>>(12)?, row.get::<_, Option<i64>>(13)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
 		let (mut out, mut present) = (Vec::new(), Vec::new());
 		let at = now();
-		for (id, name, enabled, groups, exits, quota, period, expires, record, exit, allowed, cut) in rows {
+		for (id, name, enabled, groups, exits, quota, period, expires, record, exit, allowed, cut, speed_up, speed_down) in rows {
 			if !subs::allowed(&allowed, node) {continue}
 			let record: [u8; 16] = record.try_into().map_err(|_| "a user record id is not 16 bytes")?;
 			let mut devices = db.prepare("select devices.id, devices.public_key, device_addresses.address, devices.transport_secret from devices join device_addresses on device_addresses.device_id = devices.id and device_addresses.node_id = ? where devices.user_id = ? and devices.state = 'enrolled' order by devices.id").map_err(|error| error.to_string())?;
@@ -131,6 +131,7 @@ pub(crate) async fn fill(app: &Arc<App>, node: Node, document: &mut Value) -> Re
 			};
 			if let Some(quota) = quota {user["quota_bytes"] = json!(quota);}
 			if let (Some(_), Some(period)) = (quota, period) {user["quota_period"] = json!(period);}
+			for (key, speed) in [("speed_up", speed_up), ("speed_down", speed_down)] {if let Some(speed) = speed {user[key] = json!(speed);}}
 			if let Some(expires) = expires {user["expires_at"] = json!(OffsetDateTime::from_unix_timestamp(expires).map_err(|error| error.to_string())?.format(&Rfc3339).map_err(|error| error.to_string())?);}
 			if let Some(sealed) = proxy {
 				let password = keys.open_secret(&record, "proxy_password", &sealed).ok_or("a proxy password does not open")?;

@@ -35,6 +35,16 @@ pub fn problems(document: &Value, running: &Value) -> Vec<String> {
 		if link["peer"].is_null() {found.push(format!("{at}: only a link this node dials can go through an outbound"))}
 		else if let Err(reason) = chain(outbounds, &gone, vec![], via) {found.push(format!("{at}: {reason}"))}
 	}
+	let backend_of = |tag: &str| document["exits"].as_array().into_iter().flatten().find(|exit| exit["tag"] == tag).and_then(|exit| exit["backend"]["type"].as_str());
+	for (i, link) in links.iter().enumerate() {
+		for (j, tag) in link["exits"].as_array().into_iter().flatten().filter_map(Value::as_str).enumerate() {
+			match backend_of(tag) {
+				Some("upstream") => found.push(format!("links[{i}].exits[{j}]: an upstream is another provider's account, not for the users of a third node")),
+				Some("chain") if link["allow_chain"] != true => found.push(format!("links[{i}].exits[{j}]: a link leaves through another link only with allow_chain on")),
+				_ => {}
+			}
+		}
+	}
 	let chained = |tag: &str| outbounds.iter().any(|item| item["tag"] == tag && !item["via"].is_null());
 	for (i, exit) in document["exits"].as_array().into_iter().flatten().enumerate() {
 		let (backend, Some(tag)) = (&exit["backend"], exit["backend"]["outbound"].as_str()) else {continue};
@@ -94,6 +104,15 @@ mod tests {
 		assert_eq!(found.len(), 2);
 		assert!(found[0].starts_with("exits[0].backend.unsupported.udp: an Xray outbound"));
 		assert!(found[1].starts_with("exits[1].backend.unsupported.udp: an Xray outbound"));
+	}
+
+	#[test]
+	fn a_link_leaves_through_a_chain_exit_only_with_allow_chain_and_never_through_an_upstream() {
+		let exits = json!([{"tag": "own", "backend": {"type": "netstack"}}, {"tag": "onward", "backend": {"type": "chain", "links": ["l2"]}}, {"tag": "theirs", "backend": {"type": "upstream", "upstream": "u"}}]);
+		let link = |list: Value, chain: Value| json!({"tag": "l", "exits": list, "allow_chain": chain});
+		assert!(problems(&json!({"exits": exits, "links": [link(json!(["own", "onward"]), json!(true))]}), &json!({})).is_empty());
+		assert_eq!(problems(&json!({"exits": exits, "links": [link(json!(["own", "onward"]), Value::Null)]}), &json!({})), vec!["links[0].exits[1]: a link leaves through another link only with allow_chain on".to_string()]);
+		assert_eq!(problems(&json!({"exits": exits, "links": [link(json!(["theirs"]), json!(true))]}), &json!({})).len(), 1);
 	}
 
 	#[test]

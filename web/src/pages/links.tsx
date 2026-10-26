@@ -9,13 +9,22 @@ import {TunnelCards, TunnelPreset} from "./tunnels.tsx";
 export type Compare = {id: string, fingerprint: string, name: string};
 type Side = "entry" | "exit";
 // A link as the config holds it. Keys, secrets and transports are the pairing's and are kept as they are.
-type LinkConfig = {tag: string, direction: string, inbound?: string, peer?: unknown, enabled?: boolean, exit?: string, exits?: string[], allow_private?: boolean, max_flows?: number, quota_bytes?: number, quota_period?: string, expires_at?: string, mtu?: number, [key: string]: unknown};
+type LinkConfig = {tag: string, direction: string, inbound?: string, peer?: unknown, enabled?: boolean, exit?: string, exits?: string[], allow_private?: boolean, allow_chain?: boolean, max_flows?: number, quota_bytes?: number, quota_period?: string, expires_at?: string, mtu?: number, [key: string]: unknown};
 const GB = 1024 ** 3;
-const STATE_TONE: Record<string, "success" | "info" | "warning" | "danger" | undefined> = {up: "success", connecting: "warning", unreachable: "danger", refused: "danger"};
+const STATE_TONE: Record<string, "success" | "info" | "warning" | "danger" | undefined> = {up: "success", connecting: "warning", unreachable: "danger", refused: "danger", pin_mismatch: "danger"};
+
+// The tls transports whose certificate key changed lately, which the node reports with the port they listen on.
+export const useKeyChanges = () => useLoad(() => api("get", "/links/inbounds"), []).data?.key_changes ?? [];
+
+export function KeyBanners({changes}: {changes: {inbound: string, port: number}[]}) {
+	const {t} = useP();
+	return <>{changes.map(change => <Banner key={change.inbound + change.port} tone="warning" title={t("links.keyChanged", {port: change.port})}>{t("links.keyChangedBody")}</Banner>)}</>;
+}
 
 // This node and every node it is linked to, one card each, with the pairing steps for a new link.
 export function NodesPage({status, reachable, online}: {status: {version?: string, generation?: number, uptime_secs?: number, public_addresses?: string[]} | null, reachable: boolean, online: number | undefined}) {
 	const {t, bytes, time, number} = useP(), say = useSay(), toast = useToast(), guard = useGuard(), [restarting, setRestarting] = useState<"node" | "panel" | null>(null), [checking, setChecking] = useState(false), links = useLoad(() => api("get", "/links") as Promise<{links: NodeLink[] | null}>, []), pairings = useLoad(() => api("get", "/links/pairings") as Promise<Pairings>, []);
+	const keyChanges = useKeyChanges();
 	const [flow, setFlow] = useState<"offer" | "paste" | null>(null), [preset, setPreset] = useState<{side: Side | null, direction: string} | null>(null), [tunnelPreset, setTunnelPreset] = useState<"tcp" | "udp" | null>(null), [compare, setCompare] = useState<Compare | null>(null), [answering, setAnswering] = useState<string | null>(null);
 	const running = useRunning(), configured = (running.data?.document.links ?? []) as LinkConfig[], [editing, setEditing] = useState<LinkConfig | null>(null), [removing, setRemoving] = useState<LinkConfig | null>(null), [proposed, setProposed] = useState<{value: LinkConfig[], summary: string} | null>(null);
 	const manage = (tag: string) => { const found = configured.find(link => link.tag === tag); return found && <span className="p-cluster"><Button size="sm" variant="quiet" onClick={() => setEditing(found)}>{t("links.manage")}</Button><Button size="sm" variant="quiet" onClick={() => setRemoving(found)}>{t("common.remove")}</Button></span>; };
@@ -32,6 +41,7 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 			<Button variant={flow === "paste" ? "primary" : "secondary"} onClick={() => setFlow(flow === "paste" ? null : "paste")}>{t("links.paste")}</Button>
 			<Button variant={flow === "offer" ? "secondary" : "primary"} icon="plus" onClick={() => setFlow(flow === "offer" ? null : "offer")}>{t("links.offer")}</Button>
 		</PageHead>
+		<KeyBanners changes={keyChanges}/>
 		{flow === "offer" && <OfferFlow onCompare={toCompare} onClose={() => { setFlow(null); pairings.reload(); }}/>}
 		{flow === "paste" && <PasteFlow onCompare={toCompare} onClose={() => setFlow(null)}/>}
 		{answering && <AnswerStep id={answering} onCompare={toCompare} onClose={() => setAnswering(null)}/>}
@@ -58,11 +68,14 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 				<span className="p-cluster"><Button size="sm" variant="quiet" icon="refresh" onClick={() => setRestarting("node")}>{t("nodes.restartNode")}</Button><Button size="sm" variant="quiet" icon="refresh" onClick={() => setRestarting("panel")}>{t("nodes.restartPanel")}</Button><Button size="sm" variant="quiet" icon="download" disabled={checking} onClick={() => { setChecking(true); void guard(() => api("post", "/update/check")).then(found => { window.dispatchEvent(new Event("veilway:update")); toast(found.latest || found.node_latest ? {tone: "info", title: t("nodes.updatesFound"), body: [found.latest ? t("nodes.updatePanel", {version: found.latest}) : "", found.node_latest ? t("nodes.updateNode", {version: found.node_latest}) : ""].filter(Boolean).join(" ")} : {tone: "success", title: t("nodes.upToDate")}); }, failure => toast({tone: "danger", title: say(failure)})).finally(() => setChecking(false)); }}>{t("nodes.checkUpdates")}</Button></span>
 			</Glass>
 			{(links.data?.links ?? []).map(l => <Glass key={l.id} className="p-node-card">
-				<div className="p-sheet-head"><div><strong className="vw-h3"><bdi className="vw-code" dir="ltr">{l.tag}</bdi></strong><span className="vw-small vw-muted" title={t(l.half === "exit" ? "links.half.exit" : "links.half.entry")}>{t(l.half === "exit" ? "nodes.half.exit" : "nodes.half.entry")}</span></div><Mark tone={STATE_TONE[l.state]}>{["up", "connecting", "unreachable", "refused", "ended"].includes(l.state) ? t(`links.state.${l.state as "up"}`) : l.state}</Mark></div>
+				<div className="p-sheet-head"><div><strong className="vw-h3"><bdi className="vw-code" dir="ltr">{l.tag}</bdi></strong><span className="vw-small vw-muted" title={t(l.half === "exit" ? "links.half.exit" : "links.half.entry")}>{t(l.half === "exit" ? "nodes.half.exit" : "nodes.half.entry")}</span></div><Mark tone={STATE_TONE[l.state]}>{["up", "connecting", "unreachable", "refused", "pin_mismatch", "ended"].includes(l.state) ? t(`links.state.${l.state as "up"}`) : l.state}</Mark></div>
+				{l.state === "pin_mismatch" && <p className="vw-small">{t("links.pinMismatch")}</p>}
+				{l.role === "listener" && keyChanges.length > 0 && <p className="vw-small">{t("links.keyChangedLink")}</p>}
 				<dl>
 					<div><dt>{t(l.state === "up" ? "nodes.upFor" : "nodes.stateFor")}</dt><dd className="vw-num">{span(l.state_secs)}</dd></div>
 					<div><dt>{t("links.col.traffic")}</dt><dd className="vw-num">{bytes(l.traffic.up_bytes + l.traffic.down_bytes).text}</dd></div>
 					<div><dt>{t("nodes.flows")}</dt><dd className="vw-num">{number(l.flows)}</dd></div>
+					{l.half === "exit" && <div><dt>{t("links.chained")}</dt><dd className="vw-num" title={t("links.chainedHint")}>{number(l.chained ?? 0)}</dd></div>}
 				</dl>
 				{manage(l.tag)}
 			</Glass>)}
@@ -73,7 +86,7 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 		</div>
 		{running.data && !flow && !answering && <TunnelCards running={running.data} onChanged={running.reload} onAdd={() => setTunnelPreset("tcp")}/>}
 		{links.data && !(links.data.links ?? []).length && !flow && <Glass className="p-panel"><StateBlock kind="empty" title={t("links.empty")} action={<Button variant="primary" icon="plus" onClick={() => setFlow("offer")}>{t("links.offer")}</Button>}>{t("links.emptyBody")}</StateBlock></Glass>}
-		{editing && <LinkDialog link={editing} exits={((running.data?.document.exits ?? []) as {tag: string, backend?: {type?: string}}[]).filter(exit => exit.backend?.type !== "chain").map(exit => exit.tag)} outbounds={(running.data?.document.outbounds ?? []) as Record<string, unknown>[]} onClose={() => setEditing(null)} onSave={changed => { setEditing(null); setProposed({value: configured.map(link => link.tag === changed.tag ? changed : link), summary: t("links.summaryEdit", {name: changed.tag})}); }}/>}
+		{editing && <LinkDialog link={editing} exits={((running.data?.document.exits ?? []) as {tag: string, backend?: {type?: string}}[]).filter(exit => exit.backend?.type !== "upstream").map(exit => ({tag: exit.tag, chain: exit.backend?.type === "chain"}))} outbounds={(running.data?.document.outbounds ?? []) as Record<string, unknown>[]} onClose={() => setEditing(null)} onSave={changed => { setEditing(null); setProposed({value: configured.map(link => link.tag === changed.tag ? changed : link), summary: t("links.summaryEdit", {name: changed.tag})}); }}/>}
 		<ConfirmDialog open={restarting !== null} onOpenChange={open => { if (!open) setRestarting(null); }} danger={restarting === "node"} title={t(restarting === "panel" ? "nodes.restartPanelTitle" : "nodes.restartNodeTitle")} body={t(restarting === "panel" ? "nodes.restartPanelBody" : "nodes.restartNodeBody")} confirmLabel={t(restarting === "panel" ? "nodes.restartPanel" : "nodes.restartNode")} onConfirm={() => {
 			const part = restarting!;
 			setRestarting(null);
@@ -104,18 +117,21 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 const exitHalf = (link: LinkConfig) => (link.inbound !== undefined) === (link.direction === "forward");
 
 // What can change on a link after pairing: whether it runs, and on the exit half what it may use. The keys and the transports stay as the pairing made them.
-function LinkDialog({link, exits, outbounds, onClose, onSave}: {link: LinkConfig, exits: string[], outbounds: Record<string, unknown>[], onClose: () => void, onSave: (link: LinkConfig) => void}) {
-	const {t} = useP(), exitSide = exitHalf(link), [enabled, setEnabled] = useState(link.enabled ?? true), [exit, setExit] = useState(link.exit ?? ""), [allowed, setAllowed] = useState(link.exits ?? []), [allowPrivate, setAllowPrivate] = useState(link.allow_private ?? false);
+function LinkDialog({link, exits: offered, outbounds, onClose, onSave}: {link: LinkConfig, exits: {tag: string, chain: boolean}[], outbounds: Record<string, unknown>[], onClose: () => void, onSave: (link: LinkConfig) => void}) {
+	const {t} = useP(), exitSide = exitHalf(link), [enabled, setEnabled] = useState(link.enabled ?? true), [exit, setExit] = useState(link.exit ?? ""), [allowed, setAllowed] = useState(link.exits ?? []), [allowPrivate, setAllowPrivate] = useState(link.allow_private ?? false), [chain, setChain] = useState(link.allow_chain ?? false);
 	const [flows, setFlows] = useState<number | "">(link.max_flows ?? ""), [quota, setQuota] = useState<number | "">(link.quota_bytes ? Math.round(link.quota_bytes / GB * 100) / 100 : ""), [period, setPeriod] = useState(link.quota_period ?? "none"), [day, setDay] = useState(link.expires_at ? link.expires_at.slice(0, 10) : ""), [mtu, setMtu] = useState<number | "">(link.mtu ?? "");
 	const [through, setThrough] = useState((link.via as string | undefined) ?? ""), dials = link.peer !== undefined, socks = outbounds.filter(item => item.type === "socks5").map(item => String(item.tag)), viaWrong = dials && through ? viaProblem("", through, outbounds) : undefined;
+	// An exit that continues into another link is offered only while the switch is on, and an upstream never is.
+	const exits = offered.filter(item => chain || !item.chain).map(item => item.tag);
 	const save = () => {
 		if (viaWrong) return;
 		const made: LinkConfig = {...link};
-		for (const key of ["enabled", "exit", "exits", "allow_private", "max_flows", "quota_bytes", "quota_period", "expires_at", "mtu", "via"]) delete made[key];
+		for (const key of ["enabled", "exit", "exits", "allow_private", "max_flows", "quota_bytes", "quota_period", "expires_at", "mtu", "via", "allow_chain"]) delete made[key];
 		if (dials && through) made.via = through;
 		if (!enabled) made.enabled = false;
-		if (exitSide && exit) made.exit = exit;
-		if (exitSide && allowed.length) made.exits = allowed;
+		if (exitSide && exit && exits.includes(exit)) made.exit = exit;
+		if (exitSide && chain) made.allow_chain = true;
+		if (exitSide && allowed.some(tag => exits.includes(tag))) made.exits = allowed.filter(tag => exits.includes(tag));
 		if (exitSide && allowPrivate) made.allow_private = true;
 		if (exitSide && flows !== "") made.max_flows = flows;
 		if (exitSide && quota !== "") made.quota_bytes = Math.round(quota * GB);
@@ -129,7 +145,8 @@ function LinkDialog({link, exits, outbounds, onClose, onSave}: {link: LinkConfig
 			<Switch label={t("links.enabled")} hint={t("links.enabledHint")} checked={enabled} onChange={setEnabled}/>
 			{dials && <SelectField label={t("links.via")} hint={t("links.viaHint") + " " + t("via.plain")} value={through} onChange={setThrough} error={viaWrong ? t(viaWrong) : undefined} options={[{value: "", label: t("config.viaDirect")}, ...[...socks, ...(through && !socks.includes(through) ? [through] : [])].map(tag => ({value: tag, label: tag}))]}/>}
 			{exitSide && <>
-				<SelectField label={t("links.exit")} hint={t("links.exitHint")} value={exit} onChange={setExit} options={[{value: "", label: t("links.exitDefault")}, ...exits.map(tag => ({value: tag, label: tag}))]}/>
+				<Switch label={t("links.allowChain")} hint={t("links.allowChainHint")} checked={chain} onChange={setChain}/>
+				<SelectField label={t("links.exit")} hint={t("links.exitHint")} value={exits.includes(exit) ? exit : ""} onChange={setExit} options={[{value: "", label: t("links.exitDefault")}, ...exits.map(tag => ({value: tag, label: tag}))]}/>
 				<div className="vw-field"><span className="vw-label">{t("links.exits")}</span><p className="vw-note">{t("links.exitsHint")}</p><ul className="p-row-list p-exit-list">{exits.map(tag => <li key={tag}><label className="p-exit"><input type="checkbox" className="p-check" checked={allowed.includes(tag)} onChange={event => setAllowed(event.target.checked ? [...allowed, tag] : allowed.filter(held => held !== tag))}/><span className="p-row-text"><strong className="vw-code">{tag}</strong></span><span/></label></li>)}</ul></div>
 				<Switch label={t("links.privateRules")} hint={t("links.privateHint")} checked={allowPrivate} onChange={setAllowPrivate}/>
 				<NumberField label={t("links.flows")} hint={t("links.flowsHint")} unit={t("links.unitFlows")} min={1} max={65536} value={flows} onChange={setFlows} optional/>
@@ -150,9 +167,9 @@ function LinkDialog({link, exits, outbounds, onClose, onSave}: {link: LinkConfig
 const LINK_TYPES = ["udp", "udp-obfs", "tls", "ws"];
 const TYPE_LABEL = {udp: "config.transport.udp", "udp-obfs": "config.transport.udp-obfs", tls: "config.transport.tls", ws: "config.transport.ws", fronted: "config.transport.fronted", "fronted-shaped": "config.transport.fronted-shaped", faketls: "config.transport.faketls", "ws-plain": "config.transport.ws-plain"} as const;
 const TYPE_NOTE = {udp: "links.pick.note.udp", "udp-obfs": "links.pick.note.udp-obfs", tls: "links.pick.note.tls", ws: "links.pick.note.ws"} as const;
-type Picked = {type?: string, path?: string, endpoints?: string[], candidates?: {address?: string, sni?: string, verify_name?: string, ech?: string, self_signed?: boolean}[]};
+type Picked = {type?: string, path?: string, endpoints?: string[], candidates?: {address?: string, sni?: string, verify_name?: string, ech?: string, self_signed?: boolean, pins?: string[]}[]};
 // Why a link cannot carry a transport, or null. The node refuses the same ones when it reads the offer.
-const linkRefusal = (transport: Picked): "links.pick.refusedType" | "links.pick.refusedEch" | "links.pick.refusedSelfSigned" | null => !LINK_TYPES.includes(transport.type ?? "") ? "links.pick.refusedType" : (transport.candidates ?? []).some(candidate => candidate.ech) ? "links.pick.refusedEch" : (transport.candidates ?? []).some(candidate => candidate.self_signed) ? "links.pick.refusedSelfSigned" : null;
+const linkRefusal = (transport: Picked): "links.pick.refusedType" | "links.pick.refusedEch" | "links.pick.refusedSelfSigned" | null => !LINK_TYPES.includes(transport.type ?? "") ? "links.pick.refusedType" : (transport.candidates ?? []).some(candidate => candidate.ech) ? "links.pick.refusedEch" : transport.type !== "tls" && (transport.candidates ?? []).some(candidate => candidate.self_signed) ? "links.pick.refusedSelfSigned" : null;
 
 // Step 1 on the node that offers: the terms the other node will see, made into a code that holds no secret.
 export function OfferFlow({onCompare, onClose, fixed, managed: managedStart}: {onCompare: (pairing: Compare) => void, onClose: () => void, fixed?: string, managed?: boolean}) {
@@ -162,7 +179,7 @@ export function OfferFlow({onCompare, onClose, fixed, managed: managedStart}: {o
 	const [offered, setOffered] = useState<Picked[]>([]), [off, setOff] = useState<number[]>([]), [manual, setManual] = useState(false), [showJson, setShowJson] = useState(false);
 	const [made, setMade] = useState<{id: string, code: string, expires_at: number} | null>(null), [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false);
 	const reportedOf = (tagOf: string) => nodeInbounds.data?.inbounds.find(found => found.tag === tagOf);
-	const pick = (tagOf: string) => { const profile = derived.data?.templates.find(template => template.inbound === tagOf)?.profile, reported = reportedOf(tagOf); setInbound(tagOf); setKey(reported?.public_key ?? ""); setTransportKey(reported?.transport_public_key ?? ""); if (profile) { const list = (profile.transports ?? []) as Picked[], refused = list.flatMap((transport, k) => linkRefusal(transport) ? [k] : []); setOffered(list); setOff(refused); setManual(false); setTransports(JSON.stringify(list.filter((_, k) => !refused.includes(k)), null, 2)); } };
+	const pick = (tagOf: string) => { const profile = derived.data?.templates.find(template => template.inbound === tagOf)?.profile, reported = reportedOf(tagOf); setInbound(tagOf); setKey(reported?.public_key ?? ""); setTransportKey(reported?.transport_public_key ?? ""); if (profile) { const filePins = derived.data?.templates.find(template => template.inbound === tagOf)?.link_pins ?? {}, list = ((profile.transports ?? []) as Picked[]).map(transport => transport.type !== "tls" ? transport : {...transport, candidates: transport.candidates?.map(candidate => { const pin = filePins[candidate.address?.split(":").pop() ?? ""]; return pin && !candidate.pins && !candidate.self_signed ? {...candidate, pins: [pin]} : candidate; })}), refused = list.flatMap((transport, k) => linkRefusal(transport) ? [k] : []); setOffered(list); setOff(refused); setManual(false); setTransports(JSON.stringify(list.filter((_, k) => !refused.includes(k)), null, 2)); } };
 	const choose = (next: number[]) => { setOff(next); setTransports(JSON.stringify(offered.filter((_, k) => !next.includes(k)), null, 2)); };
 	const kept = offered.filter((_, k) => !off.includes(k)).length;
 	const offer = async () => {
@@ -410,7 +427,7 @@ function EntryUse({link, running, onReload, onApplied, onSkip}: {link: string, r
 
 // The last step on the exit: which of this node's exits the link's traffic may leave through. Private networks stay closed unless the operator opens them on purpose.
 function ExitUse({link, running, onReload, onApplied, onSkip}: {link: string, running: Running, onReload: () => void, onApplied: (changes: string[]) => void, onSkip: () => void}) {
-	const {t} = useP(), configured = (running.document.links ?? []) as LinkConfig[], found = configured.find(held => held.tag === link), exits = ((running.document.exits ?? []) as {tag: string, name?: string, backend?: {type?: string}}[]).filter(exit => exit.backend?.type !== "chain");
+	const {t} = useP(), configured = (running.document.links ?? []) as LinkConfig[], found = configured.find(held => held.tag === link), exits = ((running.document.exits ?? []) as {tag: string, name?: string, backend?: {type?: string}}[]).filter(exit => exit.backend?.type !== "chain" && exit.backend?.type !== "upstream");
 	const [allowed, setAllowed] = useState(found?.exits ?? []), [open, setOpen] = useState(found?.allow_private ?? false), [review, setReview] = useState(false);
 	if (!found) return <StateBlock kind="error" title={t("preset.linkMissing")} action={<Button icon="refresh" onClick={onReload}>{t("action.retry")}</Button>}>{t("preset.linkMissingBody", {link})}</StateBlock>;
 	const made: LinkConfig = {...found, exits: allowed, allow_private: open};

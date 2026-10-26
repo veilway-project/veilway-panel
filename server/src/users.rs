@@ -28,7 +28,7 @@ pub(crate) fn name_ok(name: &str, dots: bool) -> bool {
 	name.len() <= 64 && bytes.next().is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit()) && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'_' || (dots && byte == b'.'))
 }
 
-fn double<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {Ok(Some(Option::deserialize(d)?))}
+pub(crate) fn double<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {Ok(Some(Option::deserialize(d)?))}
 
 #[derive(Serialize, JsonSchema)]
 pub struct UserOut {
@@ -40,7 +40,9 @@ pub struct UserOut {
 	/// The endpoint given to the user by name, null when the group's or the default applies. The one in use is at `/users/{id}/endpoint`.
 	pub endpoint: Option<String>,
 	pub quota_bytes: Option<i64>, pub quota_period: Option<String>, pub expires_at: Option<i64>,
-	/// 0 is no limit beyond the node's own 16.
+	/// The most the user sends and receives through each node, in bytes per second over all their devices. Null is no cap.
+	pub speed_up: Option<i64>, pub speed_down: Option<i64>,
+	/// 0 is no limit beyond the node's own 64.
 	pub device_limit: i64, pub note: String, pub created: i64, pub subscription_id: String,
 	pub devices: i64, pub pending_devices: i64,
 	/// Whether the user has a proxy password. The password itself is only at `/users/{id}/proxy/show`.
@@ -58,7 +60,7 @@ pub struct UserOut {
 }
 
 fn out(user: &UserRow, devices: i64, pending: i64, node: Option<Value>) -> UserOut {
-	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), endpoint: user.endpoint.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, proxy_login: user.proxy, node, nodes: serde_json::from_str(&user.nodes).ok(), profile_order: user.profile_order.as_deref().and_then(|text| serde_json::from_str(text).ok()), usage: None}
+	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), endpoint: user.endpoint.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, speed_up: user.speed_up, speed_down: user.speed_down, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, proxy_login: user.proxy, node, nodes: serde_json::from_str(&user.nodes).ok(), profile_order: user.profile_order.as_deref().and_then(|text| serde_json::from_str(text).ok()), usage: None}
 }
 
 async fn counts(app: &App, id: i64) -> Result<(i64, i64), Failure> {
@@ -113,6 +115,8 @@ pub struct UserIn {
 	/// The name of one of the settings' endpoints, or null for the group's or the default.
 	pub endpoint: Option<String>,
 	pub quota_bytes: Option<u64>,
+	/// Bytes per second, 16384 to 12500000000. Left out or null: no cap.
+	pub speed_up: Option<u64>, pub speed_down: Option<u64>,
 	/// "daily", "weekly" or "monthly". Needs quota_bytes.
 	pub quota_period: Option<String>,
 	/// Unix seconds.
@@ -133,6 +137,9 @@ pub struct UserPatch {
 	#[serde(default, deserialize_with = "double")] pub endpoint: Option<Option<String>>,
 	#[serde(default, deserialize_with = "double")] pub quota_bytes: Option<Option<u64>>,
 	#[serde(default, deserialize_with = "double")] pub quota_period: Option<Option<String>>,
+	/// Bytes per second, 16384 to 12500000000, or null for no cap.
+	#[serde(default, deserialize_with = "double")] pub speed_up: Option<Option<u64>>,
+	#[serde(default, deserialize_with = "double")] pub speed_down: Option<Option<u64>>,
 	#[serde(default, deserialize_with = "double")] pub expires_at: Option<Option<i64>>,
 	pub device_limit: Option<u16>, pub note: Option<String>,
 	/// The ids of the nodes the user may use, at least one, or null for every node. A node taken out frees the addresses of the user's devices in its pool.
@@ -150,6 +157,11 @@ async fn nodes_check(app: &App, nodes: &[i64]) -> Result<(), Failure> {
 
 /// Whether `exit` may be the default of a user with these exits. Whether the node has it is decided at the next sync.
 fn default_ok(exits: &Value, exit: &str) -> bool {name_ok(exit, false) && (exits == &json!("all") || exits.as_array().is_some_and(|tags| tags.iter().any(|tag| tag == exit)))}
+
+/// The rate cap the node takes, in bytes per second.
+const SPEED: std::ops::RangeInclusive<u64> = 16_384..=12_500_000_000;
+
+fn speeds_ok(speeds: [Option<u64>; 2]) -> Result<(), Failure> {if speeds.iter().flatten().any(|speed| !SPEED.contains(speed)) {return Err(Failure::bad("speed_up and speed_down are 16384 to 12500000000 bytes per second, or null for no cap."))} Ok(())}
 
 const DEFAULT_REFUSED: &str = "exit is one of the user's exits, or null for the node's default.";
 
@@ -187,6 +199,7 @@ pub struct Created {pub user: UserOut, pub link: Option<LinkView>, pub link_erro
 pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<UserIn>) -> Result<Response, Failure> {
 	if !name_ok(&input.name, true) {return Err(Failure::bad("name is 1 to 64 characters of a-z, 0-9, dot, dash and underscore, starting with a letter or digit."))}
 	check(input.groups.as_ref(), input.exits.as_ref(), input.quota_bytes, input.quota_period.as_deref())?;
+	speeds_ok([input.speed_up, input.speed_down])?;
 	if let Some(nodes) = &input.nodes {nodes_check(&app, nodes).await?}
 	if input.exit.as_deref().is_some_and(|exit| !default_ok(input.exits.as_ref().unwrap_or(&json!("all")), exit)) {return Err(Failure::bad(DEFAULT_REFUSED))}
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing, so no account can be made."))?;
@@ -200,7 +213,7 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	let id = app.db.call(move |db| -> rusqlite::Result<i64> {
 		let once = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).show_links_once;
 		let copy = (!once).then(|| held.keys.as_ref().expect("checked before the lookup").seal_copy(&record, &token));
-		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created, default_exit, endpoint, nodes, profile_order) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, lookup.as_slice(), copy, now(), input.exit, input.endpoint, nodes_text, order_text])?;
+		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created, default_exit, endpoint, nodes, profile_order, speed_up, speed_down) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, lookup.as_slice(), copy, now(), input.exit, input.endpoint, nodes_text, order_text, input.speed_up.map(|speed| speed as i64), input.speed_down.map(|speed| speed as i64)])?;
 		let id = db.last_insert_rowid();
 		crate::app::load_lookups(db, &held.lookups);
 		audit(db, &ctx.actor, &ctx.source, "user.create", &format!("user:{id}"), &input.name);
@@ -219,6 +232,8 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	let quota = input.quota_bytes.unwrap_or(user.quota_bytes.map(|quota| quota as u64));
 	let period = input.quota_period.unwrap_or(user.quota_period.clone());
 	check(input.groups.as_ref(), input.exits.as_ref(), quota, period.as_deref())?;
+	let (speed_up, speed_down) = (input.speed_up.unwrap_or(user.speed_up.map(|speed| speed as u64)), input.speed_down.unwrap_or(user.speed_down.map(|speed| speed as u64)));
+	speeds_ok([speed_up, speed_down])?;
 	if let Some(Some(nodes)) = &input.nodes {nodes_check(&app, nodes).await?}
 	let exits = input.exits.clone().unwrap_or_else(|| serde_json::from_str(&user.exits).unwrap_or(json!("all")));
 	if input.exit.as_ref().is_some_and(|exit| exit.as_deref().is_some_and(|exit| !default_ok(&exits, exit))) {return Err(Failure::bad(DEFAULT_REFUSED))}
@@ -231,7 +246,7 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	if nodes_text != user.nodes {subs::profiles_fit(&app, &nodes_text).await?}
 	let order_text = match input.profile_order.clone() {Some(Some(order)) => Some(subs::order_checked(order)?).filter(|order| !order.is_empty()).and_then(|order| serde_json::to_string(&order).ok()), Some(None) => None, None => user.profile_order.clone()};
 	app.db.call(move |db| -> rusqlite::Result<()> {
-		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ?, default_exit = ?, endpoint = ?, nodes = ?, profile_order = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), serde_json::to_string(&exits).unwrap_or_default(), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), exit, endpoint, nodes_text, order_text, id])?;
+		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ?, default_exit = ?, endpoint = ?, nodes = ?, profile_order = ?, speed_up = ?, speed_down = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), serde_json::to_string(&exits).unwrap_or_default(), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), exit, endpoint, nodes_text, order_text, speed_up.map(|speed| speed as i64), speed_down.map(|speed| speed as i64), id])?;
 		// The addresses follow the nodes the user may use: new ones are taken, the ones of a node taken away are freed.
 		db.execute("delete from device_addresses where device_id in (select id from devices where user_id = ?1) and node_id in (select id from nodes where id != ?2 and ?3 != '\"all\"' and not exists (select 1 from json_each(?3) where value = nodes.id))", params![id, LOCAL.0, nodes_text])?;
 		subs::add_addresses(db, Some(id))?;
@@ -275,9 +290,9 @@ pub async fn remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 #[serde(deny_unknown_fields)]
 pub struct Bulk {
 	pub ids: Vec<i64>,
-	/// enable, disable, delete, reset_usage, reset_links, add_group, remove_group, set_quota, set_expiry, set_device_limit or set_exits.
+	/// enable, disable, delete, reset_usage, reset_links, add_group, remove_group, set_quota, set_speed, set_expiry, set_device_limit or set_exits.
 	pub action: String,
-	/// The group name, the quota (an object with quota_bytes and quota_period), the expiry in Unix seconds or null, the device limit, or the exits ("all" or a list of exit tags). A default exit the new exits leave out is cleared.
+	/// The group name, the quota (an object with quota_bytes and quota_period), the rate cap (an object with speed_up and speed_down in bytes per second, each null for no cap), the expiry in Unix seconds or null, the device limit, or the exits ("all" or a list of exit tags). A default exit the new exits leave out is cleared.
 	pub value: Option<Value>,
 	/// For reset_links: remove the devices that were enrolled with the old links.
 	#[serde(default)] pub remove_devices: bool,
@@ -321,6 +336,12 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 					check(None, None, quota, period).map_err(|error| error.message)?;
 					let period = period.filter(|_| quota.is_some()).map(str::to_owned);
 					app.db.call(move |db| db.execute("update users set quota_bytes = ?, quota_period = ? where id = ?", params![quota.map(|quota| quota as i64), period, id]).inspect(|_| dirty.set())).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+				}
+				"set_speed" => {
+					let speed = |key: &str| value.as_ref().and_then(|value| value.get(key)).and_then(Value::as_u64);
+					let (up, down) = (speed("speed_up"), speed("speed_down"));
+					speeds_ok([up, down]).map_err(|error| error.message)?;
+					app.db.call(move |db| db.execute("update users set speed_up = ?, speed_down = ? where id = ?", params![up.map(|speed| speed as i64), down.map(|speed| speed as i64), id]).inspect(|_| dirty.set())).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 				}
 				"set_expiry" => {let expiry = value.as_ref().and_then(Value::as_i64); app.db.call(move |db| db.execute("update users set expires_at = ? where id = ?", params![expiry, id]).inspect(|_| dirty.set())).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
 				"set_device_limit" => {let limit = value.as_ref().and_then(Value::as_u64).filter(|limit| *limit <= 65535).ok_or("value is a number from 0 to 65535")?; app.db.call(move |db| db.execute("update users set device_limit = ? where id = ?", params![limit, id]).inspect(|_| dirty.set())).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;}
@@ -399,7 +420,7 @@ pub async fn make_device(State(app): State<Arc<App>>, Extension(ctx): Extension<
 		let keys = held.keys.as_ref().expect("checked before the lookup");
 		let user = UserRow::load(db, id)?;
 		let total: i64 = db.query_row("select count(*) from devices where user_id = ?", [id], |row| row.get(0))?;
-		if total >= if user.device_limit == 0 {16} else {user.device_limit.min(16)} {return Err(Failure::conflict("Every device place of this account is taken."))}
+		if total >= if user.device_limit == 0 {64} else {user.device_limit.min(64)} {return Err(Failure::conflict("Every device place of this account is taken."))}
 		let address = subs::allocate(db, LOCAL).ok_or_else(|| Failure::conflict("The address pool is full."))?;
 		db.execute("insert into devices (user_id, name, public_key, secret_hash, transport_secret, private_key, state, token_gen, created, confirmed_at) values (?, ?, ?, ?, ?, ?, 'enrolled', ?, ?, ?)", params![id, veilway_proto::control::display(&input.name, 32, 128), public_key, keys.device_secret_hash(&crypto::random::<16>()).as_slice(), keys.seal_secret(&user.record_id, &format!("transport_secret:{public_key}"), &crypto::random::<32>()), keys.seal_secret(&user.record_id, &format!("private_key:{public_key}"), &secret), user.token_gen, now(), now()])?;
 		db.execute("insert into device_addresses (node_id, device_id, address) values (?, last_insert_rowid(), ?)", params![LOCAL.0, address])?;

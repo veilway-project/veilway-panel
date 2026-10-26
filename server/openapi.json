@@ -52,7 +52,7 @@
             ]
           },
           "profile": {
-            "description": "The profile of the provider to use. Left out: the first one the node would use.",
+            "description": "The profile of the provider to use. Left out: automatic, every profile the node would use is tried in the provider's order.",
             "type": [
               "string",
               "null"
@@ -61,6 +61,13 @@
           "tag": {
             "description": "The tag of the upstream in the node's config, and of the exit that leaves through it: 1 to 64 of a-z, 0-9, - and _.",
             "type": "string"
+          },
+          "transport": {
+            "description": "The transport type to connect over, one the profile lists (or, with no profile named, one a usable profile lists). Left out: automatic.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -193,7 +200,7 @@
         "additionalProperties": false,
         "properties": {
           "action": {
-            "description": "enable, disable, delete, reset_usage, reset_links, add_group, remove_group, set_quota, set_expiry, set_device_limit or set_exits.",
+            "description": "enable, disable, delete, reset_usage, reset_links, add_group, remove_group, set_quota, set_speed, set_expiry, set_device_limit or set_exits.",
             "type": "string"
           },
           "ids": {
@@ -209,7 +216,7 @@
             "type": "boolean"
           },
           "value": {
-            "description": "The group name, the quota (an object with quota_bytes and quota_period), the expiry in Unix seconds or null, the device limit, or the exits (\"all\" or a list of exit tags). A default exit the new exits leave out is cleared."
+            "description": "The group name, the quota (an object with quota_bytes and quota_period), the rate cap (an object with speed_up and speed_down in bytes per second, each null for no cap), the expiry in Unix seconds or null, the device limit, or the exits (\"all\" or a list of exit tags). A default exit the new exits leave out is cleared."
           }
         },
         "required": [
@@ -310,6 +317,100 @@
         },
         "required": [
           "part"
+        ],
+        "type": "object"
+      },
+      "Choice2": {
+        "description": "What the config chooses on an upstream. Null is automatic.",
+        "properties": {
+          "exit": {
+            "description": "The exit of the provider that is asked for now.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failover": {
+            "type": "boolean"
+          },
+          "profile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "transport": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "failover"
+        ],
+        "type": "object"
+      },
+      "ChooseIn": {
+        "additionalProperties": false,
+        "properties": {
+          "exit": {
+            "default": null,
+            "description": "The tag of the provider's exit, or null for the provider's default.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failover": {
+            "default": null,
+            "description": "Whether the other profiles are tried when the named one cannot be used. Null is false.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "profile": {
+            "default": null,
+            "description": "The profile of the provider's document, or null for every profile in turn.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "transport": {
+            "default": null,
+            "description": "One of udp, udp-obfs, tls, ws, ws-plain, fronted, fronted-shaped, or null for automatic.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "Chosen": {
+        "properties": {
+          "generation": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "live": {
+            "type": "boolean"
+          },
+          "revision": {
+            "type": "string"
+          },
+          "tag": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag",
+          "revision",
+          "generation",
+          "live"
         ],
         "type": "object"
       },
@@ -798,6 +899,38 @@
         ],
         "type": "object"
       },
+      "ExitState": {
+        "description": "An exit the provider offers, with its name as plain text.",
+        "properties": {
+          "all_protocols": {
+            "type": "boolean"
+          },
+          "country": {
+            "description": "Two uppercase letters.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "selected": {
+            "description": "This node's device has this exit selected at the provider.",
+            "type": "boolean"
+          },
+          "tag": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tag",
+          "name",
+          "all_protocols",
+          "selected"
+        ],
+        "type": "object"
+      },
       "Exported": {
         "properties": {
           "file": {
@@ -1155,6 +1288,14 @@
               "$ref": "#/components/schemas/Inbound"
             },
             "type": "array"
+          },
+          "key_changes": {
+            "default": [],
+            "description": "The `tls` transports whose key changed lately, with the port they listen on.",
+            "items": {
+              "$ref": "#/components/schemas/KeyChange"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -1188,6 +1329,36 @@
         "required": [
           "host",
           "fingerprint"
+        ],
+        "type": "object"
+      },
+      "KeyChange": {
+        "description": "A `tls` transport whose certificate key is not the one the node served before. A link or a profile that pins the old key fails until it is paired or refreshed again.",
+        "properties": {
+          "changed_at": {
+            "description": "Unix seconds: when the node found the new key.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "inbound": {
+            "type": "string"
+          },
+          "port": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "previous_pin": {
+            "description": "The pin served before, for 30 days after the change.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "inbound",
+          "port",
+          "changed_at",
+          "previous_pin"
         ],
         "type": "object"
       },
@@ -1990,6 +2161,22 @@
         ],
         "type": "object"
       },
+      "Notice": {
+        "description": "A notice of the provider with the severity it gave: \"information\" or \"warning\".",
+        "properties": {
+          "severity": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "severity",
+          "text"
+        ],
+        "type": "object"
+      },
       "NoticeKind": {
         "enum": [
           "info",
@@ -2342,6 +2529,31 @@
         ],
         "type": "object"
       },
+      "ProfileState": {
+        "description": "A profile of the provider's document and whether the node can use it now.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "reason": {
+            "description": "Plain words for why not. Empty when it is usable.",
+            "type": "string"
+          },
+          "usable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "usable",
+          "reason"
+        ],
+        "type": "object"
+      },
       "ProxyChanged": {
         "properties": {
           "node": {
@@ -2376,10 +2588,47 @@
       },
       "Quota": {
         "properties": {
+          "account_expires_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "down_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "period": {
+            "description": "What the provider's control channel adds once it is open: how often the quota starts over (\"none\", \"daily\", \"weekly\" or \"monthly\"), when the period began and when the account ends (Unix seconds), and the device's own bytes.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "period_start": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "quota_bytes": {
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "up_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "used_bytes": {
             "format": "uint64",
@@ -3701,14 +3950,49 @@
       "Upstream": {
         "description": "What the node is doing for one upstream.",
         "properties": {
+          "choice": {
+            "$ref": "#/components/schemas/Choice2",
+            "default": {
+              "exit": null,
+              "failover": false,
+              "profile": null,
+              "transport": null
+            }
+          },
+          "connected_secs": {
+            "default": null,
+            "description": "Seconds the tunnel has been connected.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "counters": {
             "$ref": "#/components/schemas/Counters"
+          },
+          "engine_state": {
+            "default": null,
+            "description": "What the tunnel says: connecting, reconnecting, connected, stopped:<reason> or failed. Null while there is none.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "exit": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "exits": {
+            "default": [],
+            "description": "The exits the provider offers by name, once the control channel is open.",
+            "items": {
+              "$ref": "#/components/schemas/ExitState"
+            },
+            "type": "array"
           },
           "expires_at": {
             "format": "int64",
@@ -3759,11 +4043,27 @@
               "null"
             ]
           },
+          "profiles": {
+            "default": [],
+            "description": "Every profile the document holds in the order they are tried, and whether each is usable.",
+            "items": {
+              "$ref": "#/components/schemas/ProfileState"
+            },
+            "type": "array"
+          },
           "provider": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "provider_notices": {
+            "default": [],
+            "description": "The same notices with the severity the provider gave them.",
+            "items": {
+              "$ref": "#/components/schemas/Notice"
+            },
+            "type": "array"
           },
           "quota": {
             "anyOf": [
@@ -3809,6 +4109,14 @@
               "string",
               "null"
             ]
+          },
+          "transports": {
+            "default": [],
+            "description": "The transport types the profile in use lists.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           }
         },
         "required": [
@@ -4023,6 +4331,23 @@
               "string",
               "null"
             ]
+          },
+          "speed_down": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "speed_up": {
+            "description": "Bytes per second, 16384 to 12500000000. Left out or null: no cap.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -4037,7 +4362,7 @@
             "type": "integer"
           },
           "device_limit": {
-            "description": "0 is no limit beyond the node's own 16.",
+            "description": "0 is no limit beyond the node's own 64.",
             "format": "int64",
             "type": "integer"
           },
@@ -4130,6 +4455,21 @@
           "quota_period": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "speed_down": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "speed_up": {
+            "description": "The most the user sends and receives through each node, in bytes per second over all their devices. Null is no cap.",
+            "format": "int64",
+            "type": [
+              "integer",
               "null"
             ]
           },
@@ -4264,6 +4604,25 @@
             "default": null,
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "speed_down": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "speed_up": {
+            "default": null,
+            "description": "Bytes per second, 16384 to 12500000000, or null for no cap.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
               "null"
             ]
           }
@@ -7845,6 +8204,91 @@
         },
         "summary": "Removes an upstream from this server, as removeUpstream does, and the exits that use it. Needs a recent re-authentication.",
         "x-access": "session-reauth"
+      },
+      "patch": {
+        "operationId": "chooseNodeUpstream",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "tag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChooseIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Chosen"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Changes what this server chooses on one of its upstreams, as chooseUpstream does.",
+        "x-access": "full"
       }
     },
     "/nodes/{id}/upstreams/{tag}/confirm": {
@@ -10413,6 +10857,83 @@
         },
         "summary": "Tells the provider the device left (up to ten seconds), then applies the config without the upstream and the exits that use it. The config without them is checked first. Needs a recent re-authentication.",
         "x-access": "session-reauth"
+      },
+      "patch": {
+        "operationId": "chooseUpstream",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tag",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChooseIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Chosen"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Changes what the node chooses on an upstream: the profile (null: every profile in turn), failover to the other profiles, the transport (null: automatic) and the exit of the provider (null: its default). A field left out stays. The node checks the change like a config and applies it; only an exit change is taken on the running tunnel, and anything else makes the tunnel start again. The link, the keys and what the node may dial cannot be changed here.",
+        "x-access": "full"
       }
     },
     "/upstreams/{tag}/confirm": {

@@ -624,8 +624,8 @@
       "type": "string"
     },
     "IpEntry": {
-      "description": "a network such as 10.7.0.0/24 with no host bits set, geoip:private, tunnel:users or tunnel:<inbound tag>",
-      "pattern": "^([0-9A-Fa-f:.]+/(0|[1-9][0-9]{0,2})|geoip:private|tunnel:[a-z0-9][a-z0-9_-]{0,63})$",
+      "description": "a network such as 10.7.0.0/24 with no host bits set, geoip:private, host:self, tunnel:users or tunnel:<inbound tag>",
+      "pattern": "^([0-9A-Fa-f:.]+/(0|[1-9][0-9]{0,2})|geoip:private|host:self|tunnel:[a-z0-9][a-z0-9_-]{0,63})$",
       "type": "string"
     },
     "Key": {
@@ -657,6 +657,10 @@
         "addresses": {
           "$ref": "#/$defs/LinkAddresses"
         },
+        "allow_chain": {
+          "description": "On the exit half: whether the link may continue through a `chain` exit of this node, into another link. Defaults to false. The node the traffic leaves from then sees this node's link address, and the entry is not told.",
+          "type": "boolean"
+        },
         "allow_private": {
           "description": "On the exit half: whether private networks are decided by the rules for this link. Defaults to false, which refuses them whatever the rules say.",
           "type": "boolean"
@@ -686,7 +690,7 @@
           "type": "string"
         },
         "exits": {
-          "description": "On the exit half, where it is needed: the exits the link may leave through. None of them is a `chain` exit.",
+          "description": "On the exit half, where it is needed: the exits the link may leave through. A `chain` exit is among them only with `allow_chain`, and an `upstream` exit never.",
           "items": {
             "not": {
               "enum": [
@@ -729,6 +733,10 @@
           },
           "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
           "type": "string"
+        },
+        "manage": {
+          "$ref": "#/$defs/LinkManage",
+          "description": "Set when the link is managed: `peer` on the node that manages the other, `by_peer` on the node that is managed. A managed link has both `addresses` in either direction. A node has at most one `by_peer` link, and a node with one has no `peer` link. Absent, the link carries traffic only."
         },
         "max_flows": {
           "description": "On the exit half: the flows the link may have at once. Defaults to 16384.",
@@ -828,7 +836,7 @@
           "uniqueItems": true
         },
         "listener": {
-          "description": "The link address of the node that is dialled, in a reverse link and in no other: one for each family of `dialler`.",
+          "description": "The link address of the node that is dialled, in a reverse link and in a link with `manage`, and in no other: one for each family of `dialler`.",
           "items": {
             "$ref": "#/$defs/Ip"
           },
@@ -857,7 +865,7 @@
           "type": "string"
         },
         "pins": {
-          "description": "Needed by a `tls` candidate. The certificate chain is always validated, and a pin is a second condition.",
+          "description": "Needed by a `tls` candidate. The certificate chain is validated and a pin is a second condition, unless `self_signed` is true: then the pins are the only check.",
           "items": {
             "$ref": "#/$defs/Pin"
           },
@@ -865,6 +873,10 @@
           "minItems": 1,
           "type": "array",
           "uniqueItems": true
+        },
+        "self_signed": {
+          "description": "Only on a `tls` candidate, with 1 to 4 pins and no `verify_name`: the certificate is trusted through its pins alone, with no chain, name or date checked. Absent means false.",
+          "type": "boolean"
         },
         "sni": {
           "description": "The server name that is shown, or empty for none.",
@@ -897,6 +909,21 @@
       "description": "the id of a link: 22 characters of base64url without padding",
       "pattern": "^[A-Za-z0-9_-]{21}[AQgw]$",
       "type": "string"
+    },
+    "LinkManage": {
+      "description": "Whether this node manages the other node of a link, or is managed by it: the side that manages may call the other node's control API through the link. Pairing fixes it and both operators agreed to it, and it holds only while this node's own config says so.",
+      "oneOf": [
+        {
+          "const": "peer",
+          "description": "This node manages the other one.",
+          "type": "string"
+        },
+        {
+          "const": "by_peer",
+          "description": "The other node manages this one.",
+          "type": "string"
+        }
+      ]
     },
     "LinkPeer": {
       "additionalProperties": false,
@@ -2026,6 +2053,10 @@
           "type": "array",
           "uniqueItems": true
         },
+        "outbound": {
+          "description": "The tag of one of the node's `outbounds`. Every connection the node makes to the site (strangers, probes, a user's early connection) then leaves through it, as a connection of an exit with that outbound does, and not from the node's own address. When the outbound is down those connections fail and are said in the log; none goes around it. Without it they leave from the node's own address.",
+          "type": "string"
+        },
         "port": {
           "description": "The site's port. Defaults to 443.",
           "format": "uint16",
@@ -2699,6 +2730,10 @@
           "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
           "type": "string"
         },
+        "failover": {
+          "description": "Whether the node goes on to the other profiles of the document when `profile` is unreachable or cannot be used. Defaults to false: a `profile` that is named is the only one used. Without a `profile` every profile is tried whatever this says.",
+          "type": "boolean"
+        },
         "link": {
           "description": "A native `veilway://sub/` link of the provider. It holds the account's token, so it is a secret. Carried, file, legacy and plain links are not accepted.",
           "maxLength": 2048,
@@ -2709,7 +2744,7 @@
           "description": "The WireGuard private key this node made for its device with the provider."
         },
         "profile": {
-          "description": "The profile of the provider's document to use. Without it the first one.",
+          "description": "The profile of the provider's document to use. Without it every profile is tried in the document's order, starting with the last one that carried (automatic).",
           "not": {
             "enum": [
               "all",
@@ -2745,6 +2780,11 @@
             ]
           },
           "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "type": "string"
+        },
+        "transport": {
+          "description": "The type of transport to connect over, one of `udp`, `udp-obfs`, `tls`, `ws`, `ws-plain`, `fronted`, `fronted-shaped`. Without it the engine picks from every transport of the profile, as the apps do (automatic). A transport of a class that `allow` does not list is refused.",
+          "maxLength": 16,
           "type": "string"
         },
         "via": {
@@ -2812,7 +2852,7 @@
           "items": {
             "$ref": "#/$defs/Device"
           },
-          "maxItems": 16,
+          "maxItems": 64,
           "type": "array",
           "uniqueItems": true
         },
@@ -2869,6 +2909,20 @@
         },
         "quota_period": {
           "$ref": "#/$defs/QuotaPeriod"
+        },
+        "speed_down": {
+          "description": "The same for what the user receives.",
+          "format": "uint64",
+          "maximum": 12500000000,
+          "minimum": 16384,
+          "type": "integer"
+        },
+        "speed_up": {
+          "description": "The most the user sends through this node, in bytes per second, over all their devices and proxy logins together. Per node: the same user on several nodes has the limit on each of them. TCP through a `netstack` exit and through the proxy inbounds is slowed down, everything else over the rate is dropped. DNS and the control channel are never dropped.",
+          "format": "uint64",
+          "maximum": 12500000000,
+          "minimum": 16384,
+          "type": "integer"
         }
       },
       "required": [

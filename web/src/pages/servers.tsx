@@ -4,15 +4,15 @@ import {api, type NodePatch, type NodeRow, type Relay} from "../api.ts";
 import {ago, ErrorNote, Mark, PageHead, useGuard, useP, useSay} from "../kit.tsx";
 import {offline, useServers} from "../servers.tsx";
 import {useRunning} from "./apply.tsx";
-import {type Compare, Fingerprints, OfferFlow, PasteFlow} from "./links.tsx";
+import {type Compare, Fingerprints, KeyBanners, OfferFlow, PasteFlow, useKeyChanges} from "./links.tsx";
 import {RelaysEditor} from "./relays.tsx";
 
-const STATE_TONE: Record<string, "success" | "warning" | "danger" | undefined> = {up: "success", connecting: "warning", unreachable: "danger", refused: "danger"};
+const STATE_TONE: Record<string, "success" | "warning" | "danger" | undefined> = {up: "success", connecting: "warning", unreachable: "danger", refused: "danger", pin_mismatch: "danger"};
 const RATE = 1_000_000;
 
 // Every server this panel controls, one card each. Server 1 is the one the panel runs next to; the others are reached through managed links.
 export function ServersPage() {
-	const {t, number} = useP(), say = useSay(), toast = useToast(), guard = useGuard(), {nodes, reload} = useServers(), [adding, setAdding] = useState(false), [editing, setEditing] = useState<NodeRow | null>(null), [removing, setRemoving] = useState<NodeRow | null>(null), [busy, setBusy] = useState<number | null>(null);
+	const {t, number} = useP(), say = useSay(), toast = useToast(), guard = useGuard(), {nodes, reload} = useServers(), [adding, setAdding] = useState(false), [editing, setEditing] = useState<NodeRow | null>(null), [removing, setRemoving] = useState<NodeRow | null>(null), [busy, setBusy] = useState<number | null>(null), keyChanges = useKeyChanges();
 	const span = (seconds: number) => { const found = ago(seconds); return t(found.key, {count: found.count}); }, now = Date.now() / 1000;
 	const sync = (node: NodeRow) => { setBusy(node.id); void api("post", "/nodes/{id}/sync", {params: {id: node.id}}).then(answer => { toast(answer.synced ? {tone: "success", title: t("servers.synced", {name: node.name})} : {tone: "danger", title: t("servers.syncFailed", {name: node.name}), body: answer.error ?? undefined}); reload(); }, failure => toast({tone: "danger", title: say(failure)})).finally(() => setBusy(null)); };
 	const count = (node: NodeRow, counted: boolean) => void guard(() => api("patch", "/nodes/{id}", {params: {id: node.id}, body: {counted} as NodePatch})).then(reload, failure => toast({tone: "danger", title: say(failure)}));
@@ -21,11 +21,12 @@ export function ServersPage() {
 		<PageHead title={t("nav.servers")} lead={t("servers.lead")}>
 			<Button variant="primary" icon="plus" onClick={() => setAdding(true)}>{t("servers.add")}</Button>
 		</PageHead>
+		<KeyBanners changes={keyChanges}/>
 		{nodes.length === 0 && <StateBlock kind="loading" title={t("common.loading")}/>}
 		<div className="p-columns p-node-cards">
 			{nodes.map(node => <Glass key={node.id} className={node.id === 1 ? "p-node-card p-sheet-new" : "p-node-card"}>
 				<div className="p-sheet-head"><div><strong className="vw-h3">{node.id === 1 ? t("servers.this") : node.name}</strong><span className="vw-small vw-muted">{node.id === 1 ? node.name : node.link ? t("servers.viaLink", {link: node.link}) : ""}</span></div>
-					{node.id === 1 ? <Mark tone="success">{t("servers.state.up")}</Mark> : <Mark tone={STATE_TONE[node.link_state ?? ""] ?? "muted"}>{["up", "connecting", "unreachable", "refused", "ended"].includes(node.link_state ?? "") ? t(`links.state.${node.link_state as "up"}`) : t("servers.state.unknown")}</Mark>}
+					{node.id === 1 ? <Mark tone="success">{t("servers.state.up")}</Mark> : <Mark tone={STATE_TONE[node.link_state ?? ""] ?? "muted"}>{["up", "connecting", "unreachable", "refused", "pin_mismatch", "ended"].includes(node.link_state ?? "") ? t(`links.state.${node.link_state as "up"}`) : t("servers.state.unknown")}</Mark>}
 				</div>
 				{offline(node) && node.down_since && <p className="vw-small vw-muted">{t("servers.downFor", {time: span(Math.max(0, now - node.down_since))})}</p>}
 				<dl>

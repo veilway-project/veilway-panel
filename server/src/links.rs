@@ -43,14 +43,41 @@ pub struct Inbound {
 	pub transport_public_key: Option<String>,
 }
 
+/// A `tls` transport whose certificate key is not the one the node served before. A link or a profile that pins the old key fails until it is paired or refreshed again.
 #[derive(Serialize, Deserialize, JsonSchema)]
-pub struct Inbounds {pub inbounds: Vec<Inbound>}
+pub struct KeyChange {
+	pub inbound: String,
+	pub port: u16,
+	/// Unix seconds: when the node found the new key.
+	pub changed_at: i64,
+	/// The pin served before, for 30 days after the change.
+	pub previous_pin: String,
+}
 
-/// The node's inbounds with their public keys, which an offer needs. Only the public keys are read from the node's answer.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct Inbounds {
+	pub inbounds: Vec<Inbound>,
+	/// The `tls` transports whose key changed lately, with the port they listen on.
+	#[serde(default)]
+	pub key_changes: Vec<KeyChange>,
+}
+
+/// The node's inbounds with their public keys, which an offer needs, and the `tls` transports whose key changed. Only those are read from the node's answer.
 pub async fn inbounds(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let (status, body) = crate::node::request(&app, LOCAL, "GET", "/v1/inbounds", None, None).await.map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", error))?;
 	if status != 200 {return Err(Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", format!("the node answered {status} to the inbounds")))}
-	ok(&serde_json::from_slice::<Inbounds>(&body).map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", format!("the node's inbounds: {error}")))?)
+	let reported: Value = serde_json::from_slice(&body).map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", format!("the node's inbounds: {error}")))?;
+	let mut found = serde_json::from_value::<Inbounds>(reported.clone()).map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_unreachable", format!("the node's inbounds: {error}")))?;
+	// The node lists an inbound's transports in the order its config has them, and only the config holds the listen address.
+	let document = nodecfg::running(&app, LOCAL).await.map_or(Value::Null, |(_, _, document)| document);
+	for inbound in reported["inbounds"].as_array().into_iter().flatten() {
+		let configured = document["inbounds"].as_array().into_iter().flatten().find(|held| held["tag"] == inbound["tag"]);
+		for (at, transport) in inbound["transports"].as_array().into_iter().flatten().enumerate() {
+			let port = configured.and_then(|held| held["transports"][at]["listen"].as_str()).and_then(|listen| listen.rsplit_once(':')?.1.parse().ok());
+			if let (Some(changed_at), Some(previous_pin), Some(port)) = (transport["key_changed_at"].as_i64(), transport["previous_pin"].as_str(), port) {found.key_changes.push(KeyChange {inbound: inbound["tag"].as_str().unwrap_or_default().to_string(), port, changed_at, previous_pin: previous_pin.to_string()})}
+		}
+	}
+	ok(&found)
 }
 
 #[derive(Deserialize, JsonSchema)]

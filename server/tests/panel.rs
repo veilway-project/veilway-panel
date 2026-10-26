@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 use axum::{body::Body, extract::{ConnectInfo, Path, State}, http::{header::{CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE}, HeaderMap, Method, Request, StatusCode}, routing::{delete, get, post}, Json, Router};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use http_body_util::BodyExt;
@@ -478,6 +479,36 @@ async fn users_are_pushed_to_the_node() {
 }
 
 #[tokio::test]
+async fn speed_caps_are_checked_stored_cleared_by_null_and_pushed_to_the_node_and_a_user_may_hold_more_than_16_devices() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/16")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"pool_v4": "10.66.0.0/16"})).await;
+	for wrong in [json!({"speed_up": 100}), json!({"speed_down": 12_500_000_001u64}), json!({"speed_up": 0})] {
+		let mut body = json!({"name": "bad"});
+		body.as_object_mut().unwrap().extend(wrong.as_object().unwrap().clone());
+		assert_eq!(h.call(Method::POST, "/p/api/users", Some(&session), Some(body), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	}
+	let (id, _) = h.user(&session, "ann", json!({"speed_up": 125_000, "speed_down": 1_250_000, "device_limit": 0})).await;
+	let pushed = |fake: &Fake| fake.applied.lock().unwrap().last().cloned().unwrap();
+	for number in 0..17 {
+		let made = h.call(Method::POST, &format!("/p/api/users/{id}/devices"), Some(&session), Some(json!({"name": format!("phone {number}")})), "10.0.0.1").await;
+		assert_eq!(made.status, StatusCode::OK, "device {number}: {}", String::from_utf8_lossy(&made.body));
+	}
+	assert_eq!((pushed(&fake)["users"][0]["speed_up"].clone(), pushed(&fake)["users"][0]["speed_down"].clone(), pushed(&fake)["users"][0]["devices"].as_array().unwrap().len()), (json!(125_000), json!(1_250_000), 17));
+	let path = format!("/p/api/users/{id}");
+	assert_eq!(h.call(Method::PATCH, &path, Some(&session), Some(json!({"speed_up": 5})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	let patched = h.call(Method::PATCH, &path, Some(&session), Some(json!({"speed_up": null, "note": "kept"})), "10.0.0.1").await;
+	assert_eq!((patched.status, patched.json()["user"]["speed_up"].clone(), patched.json()["user"]["speed_down"].clone()), (StatusCode::OK, Value::Null, json!(1_250_000)), "null clears one cap and a field left out stays");
+	assert!(pushed(&fake)["users"][0].get("speed_up").is_none() && pushed(&fake)["users"][0]["speed_down"] == 1_250_000);
+	let bulk = |value: Value| h.call(Method::POST, "/p/api/users/bulk", Some(&session), Some(json!({"ids": [id], "action": "set_speed", "value": value})), "10.0.0.1");
+	assert_eq!(bulk(json!({"speed_up": 20_000, "speed_down": null})).await.json()["done"], 1);
+	let listed = h.call(Method::GET, &path, Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((listed["speed_up"].clone(), listed["speed_down"].clone()), (json!(20_000), Value::Null), "a bulk set replaces both");
+	assert_eq!(bulk(json!({"speed_up": 1})).await.json()["failed"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn a_proxy_password_is_sealed_pushed_only_when_set_and_shown_only_on_its_route() {
 	let mut document = node_document("10.66.0.1/24");
 	let proxy = json!({"tag": "local-socks", "type": "mixed", "listen": "127.0.0.1:1080", "groups": ["office"], "udp": false, "limits": {"connections": 512}});
@@ -836,7 +867,7 @@ impl Fake {
 			.route("/v1/config/validate", post(|Json(document): Json<Value>| async move {Json(json!({"valid": document.get("invalid").is_none(), "report": {"errors": [], "warnings": []}}))}))
 			.route("/v1/config/diff", post(|Json(_): Json<Value>| async move {Json(json!({"valid": true, "report": {}, "diff": {"inbounds": {"added": ["x"]}}}))}))
 			.route("/v1/status", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.status.lock().unwrap().clone())}))
-			.route("/v1/inbounds", get(|State(fake): State<Arc<Fake>>| async move {Json(json!({"inbounds": fake.document.lock().unwrap()["inbounds"].as_array().into_iter().flatten().map(|inbound| json!({"tag": inbound["tag"], "kind": inbound["type"], "public_key": STANDARD.encode([9u8; 32]), "transport_public_key": null, "transports": []})).collect::<Vec<_>>(), "public_addresses": []}))}))
+			.route("/v1/inbounds", get(|State(fake): State<Arc<Fake>>| async move {Json(json!({"inbounds": fake.document.lock().unwrap()["inbounds"].as_array().into_iter().flatten().map(|inbound| json!({"tag": inbound["tag"], "kind": inbound["type"], "public_key": STANDARD.encode([9u8; 32]), "transport_public_key": null, "transports": inbound["transports"].as_array().into_iter().flatten().map(|transport| json!({"transport": transport["type"], "enabled": true, "rating": "protected", "pin": transport["_pin"], "previous_pin": transport["_previous_pin"], "key_changed_at": transport["_changed_at"]})).collect::<Vec<_>>()})).collect::<Vec<_>>(), "public_addresses": []}))}))
 			.route("/v1/stats", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.stats.lock().unwrap().clone())}))
 			.route("/v1/sessions", get(|State(fake): State<Arc<Fake>>| async move {Json(fake.sessions.lock().unwrap().clone())}))
 			.route("/v1/exits", get(|| async {Json(json!({"exits": [{"tag": "main", "udp": true}]}))}))
@@ -861,6 +892,10 @@ impl Fake {
 				let before = fake.applied.lock().unwrap().len();
 				fake.calls.lock().unwrap().push(("leave".into(), json!({"tag": tag, "applied_before": before})));
 				Json(json!({"tag": tag, "confirmed": true}))
+			}).patch(|State(fake): State<Arc<Fake>>, Path(tag): Path<String>, Json(body): Json<Value>| async move {
+				fake.calls.lock().unwrap().push(("choose".into(), body.clone()));
+				if body["exit"] == "bad" {return (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": {"code": "config_invalid", "message": "The document has 1 errors and nothing was changed.", "details": [{"path": "upstreams[0].exit", "message": "expected an exit the provider offers"}]}})))}
+				(StatusCode::OK, Json(json!({"tag": tag, "revision": "rev9", "generation": 4, "live": body["exit"].is_string()})))
 			}))
 			.route("/v1/upstreams/{tag}/confirm", post(|State(fake): State<Arc<Fake>>, Path(tag): Path<String>, body: axum::body::Bytes| async move {
 				fake.calls.lock().unwrap().push(("confirm".into(), json!({"tag": tag, "body": String::from_utf8_lossy(&body)})));
@@ -1405,6 +1440,28 @@ async fn stats_are_recorded_per_bucket_and_survive_a_node_restart() {
 	h.app.db.call(|db| veilway_panel::stats::prune(db, crypto::now())).await.unwrap();
 	let left: i64 = h.app.db.call(|db| db.query_row("select count(*) from usage_buckets where res = 60", [], |row| row.get(0)).unwrap()).await.unwrap();
 	assert_eq!(left, 0, "minutes older than a day are pruned");
+}
+
+#[tokio::test]
+async fn a_link_offer_takes_a_self_signed_tls_candidate_with_its_pin_and_a_changed_key_is_reported_with_its_port() {
+	let mut document = node_document("10.66.0.1/24");
+	document["inbounds"][0]["transports"] = json!([{"type": "udp", "listen": "0.0.0.0:51820"}, {"type": "tls", "listen": "0.0.0.0:8443", "tls": {"self_signed": true, "name": "node.example.org"}, "_pin": "pinB", "_previous_pin": "pinA", "_changed_at": 1893456000}, {"type": "tls", "listen": "0.0.0.0:443", "tls": {"cert": "/etc/ssl/node.pem", "key": "/etc/ssl/node.key"}, "_pin": "pinC"}]);
+	let (_fake, socket) = Fake::start(document).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	let public = base64::engine::general_purpose::STANDARD.encode(x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from([3u8; 32])).as_bytes());
+	let pin = STANDARD.encode([8u8; 32]);
+	let offer = |transports: Value| h.call(Method::POST, "/p/api/links/offers", Some(&session), Some(json!({"tag": "to-b", "inbound": "Main", "direction": "forward", "name": "north exit", "inbound_public_key": public, "transport_public_key": public, "dialler": ["10.9.0.2"], "transports": transports})), "10.0.0.1");
+	let tls = |extra: Value| {let mut candidate = json!({"address": "192.0.2.10:8443", "sni": "", "host": "node.example.org", "pins": [pin]}); candidate.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone()); json!([{"type": "tls", "path": "/a-long-enough-path", "candidates": [candidate]}])};
+	let own = offer(tls(json!({"self_signed": true}))).await;
+	assert_eq!(own.status, StatusCode::OK, "{}", String::from_utf8_lossy(&own.body));
+	let ca = offer(tls(json!({"sni": "node.example.org"}))).await;
+	assert_eq!(ca.status, StatusCode::OK, "{}", String::from_utf8_lossy(&ca.body));
+	assert_eq!(offer(tls(json!({"self_signed": true, "sni": "node.example.org", "verify_name": "node.example.org"}))).await.status, StatusCode::BAD_REQUEST, "a self-signed candidate has no name to check");
+	assert_eq!(offer(tls(json!({"self_signed": true, "pins": []}))).await.status, StatusCode::BAD_REQUEST, "a self-signed candidate needs its pin");
+	assert_eq!(offer(json!([{"type": "ws", "path": "/a-long-enough-path", "candidates": [{"address": "192.0.2.10:8443", "sni": "", "host": "node.example.org", "verify_name": "node.example.org", "self_signed": true}]}])).await.status, StatusCode::BAD_REQUEST, "only a tls candidate can be pin only");
+	let listed = h.call(Method::GET, "/p/api/links/inbounds", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(listed["key_changes"], json!([{"inbound": "Main", "port": 8443, "changed_at": 1893456000, "previous_pin": "pinA"}]), "{listed}");
 }
 
 #[tokio::test]
@@ -3347,6 +3404,26 @@ async fn a_ws_plain_transport_keeps_its_own_public_key_and_rotates_it_every_seve
 }
 
 #[tokio::test]
+async fn an_upstream_is_added_with_automatic_profile_and_a_transport_one_usable_profile_lists() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let (_, Link::Native(native)) = h.user(&session, "ann", json!({})).await else {panic!("not native")};
+	let preview = || async {h.call(Method::POST, "/p/api/upstreams/previews", Some(&session), Some(json!({"link": native.veilway()})), "10.0.0.1").await.json()["id"].as_str().unwrap().to_string()};
+	let id = preview().await;
+	let (harness, signed) = (&h, &session);
+	let confirm = |id: String, body: Value| async move {harness.call(Method::POST, &format!("/p/api/upstreams/previews/{id}/confirm"), Some(signed), Some(body), "10.0.0.1").await};
+	for wrong in [json!({"tag": "auto", "transport": "carrier"}), json!({"tag": "auto", "profile": "main", "transport": "ws"}), json!({"tag": "auto", "transport": "ws"})] {
+		assert_eq!(confirm(id.clone(), wrong.clone()).await.status, StatusCode::BAD_REQUEST, "{wrong}");
+	}
+	let added = confirm(id.clone(), json!({"tag": "auto", "transport": "tls", "exit": "de"})).await;
+	assert_eq!(added.status, StatusCode::OK, "{}", String::from_utf8_lossy(&added.body));
+	let entry = fake.applied.lock().unwrap().last().unwrap()["upstreams"][0].clone();
+	assert_eq!((entry.get("profile").is_none(), entry["transport"].clone(), entry["exit"].clone()), (true, json!("tls"), json!("de")), "no profile means automatic");
+}
+
+#[tokio::test]
 async fn another_providers_subscription_is_read_fetched_confirmed_and_removed_with_the_device_kept_on_the_panel() {
 	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
 	let h = Harness::with_socket(Some(socket)).await;
@@ -3408,11 +3485,25 @@ async fn another_providers_subscription_is_read_fetched_confirmed_and_removed_wi
 	let mut changed = document.clone();
 	changed["upstreams"][0]["enabled"] = json!(false);
 	assert_eq!(h.bearer(Method::PUT, "/p/api/config", &full, Some(json!({"revision": "rev3", "document": changed})), "10.1.1.1").await.status, StatusCode::FORBIDDEN, "no token changes upstreams through the whole config");
-	*fake.upstreams.lock().unwrap() = json!({"upstreams": [{"tag": "far", "state": "up", "reason": "", "state_secs": 12, "provider": "Far Net", "profile": "lan", "transport": "udp", "exit": "de", "offered_exits": ["de"], "notices": ["Maintenance on Friday"], "quota": {"used_bytes": 10, "quota_bytes": 1000}, "expires_at": 1893456000, "refreshed_at": 1893400000, "refresh_error": null, "mtu": 1300, "pending_move": "203.0.113.9:443", "pending_hosts": [], "private_key": "LEAKED", "counters": {"sent": 1, "unsent": 0, "refused": 2, "dropped": 3, "state_flips": 0, "starts": 1, "refreshes": 1, "refresh_failures": 0, "traffic": {"up_bytes": 5, "up_packets": 1, "down_bytes": 6, "down_packets": 1}}}]});
+	*fake.upstreams.lock().unwrap() = json!({"upstreams": [{"tag": "far", "state": "up", "reason": "", "state_secs": 12, "provider": "Far Net", "profile": "lan", "transport": "udp", "exit": "de", "offered_exits": ["de"], "exits": [{"tag": "de", "name": "Germany", "country": "DE", "all_protocols": true, "selected": true}], "notices": ["Maintenance on Friday"], "provider_notices": [{"severity": "warning", "text": "Maintenance on Friday"}], "engine_state": "connected", "connected_secs": 11, "transports": ["udp", "tls"], "profiles": [{"id": "lan", "name": "LAN", "usable": false, "reason": "needs a class the node was not told to allow"}], "choice": {"profile": null, "failover": false, "transport": null, "exit": "de"}, "quota": {"used_bytes": 10, "quota_bytes": 1000, "period": "monthly", "account_expires_at": 1893456000}, "expires_at": 1893456000, "refreshed_at": 1893400000, "refresh_error": null, "mtu": 1300, "pending_move": "203.0.113.9:443", "pending_hosts": [], "private_key": "LEAKED", "counters": {"sent": 1, "unsent": 0, "refused": 2, "dropped": 3, "state_flips": 0, "starts": 1, "refreshes": 1, "refresh_failures": 0, "traffic": {"up_bytes": 5, "up_packets": 1, "down_bytes": 6, "down_packets": 1}}}]});
 	let listed = h.bearer(Method::GET, "/p/api/upstreams", &read_token, None, "10.1.1.1").await;
 	assert_eq!((listed.status, listed.json()["upstreams"][0]["pending_move"].clone(), listed.json()["upstreams"][0]["counters"]["traffic"]["down_bytes"].clone(), String::from_utf8_lossy(&listed.body).contains("LEAKED")), (StatusCode::OK, json!("203.0.113.9:443"), json!(6), false), "only the named fields pass");
+	let first = listed.json()["upstreams"][0].clone();
+	assert_eq!((first["exits"][0]["name"].clone(), first["provider_notices"][0]["severity"].clone(), first["profiles"][0]["reason"].clone(), first["choice"]["exit"].clone(), first["quota"]["period"].clone(), first["connected_secs"].clone()), (json!("Germany"), json!("warning"), json!("needs a class the node was not told to allow"), json!("de"), json!("monthly"), json!(11)));
 	assert_eq!(h.bearer(Method::POST, "/p/api/upstreams/far/retry", &read_token, None, "10.1.1.1").await.status, StatusCode::FORBIDDEN);
 	assert_eq!(h.bearer(Method::POST, "/p/api/upstreams/far/retry", &full, None, "10.1.1.1").await.status, StatusCode::OK);
+	assert_eq!(h.bearer(Method::PATCH, "/p/api/upstreams/far", &read_token, Some(json!({"exit": "de"})), "10.1.1.1").await.status, StatusCode::FORBIDDEN);
+	let chose = h.bearer(Method::PATCH, "/p/api/upstreams/far", &full, Some(json!({"profile": null, "failover": true, "exit": "de"})), "10.1.1.1").await;
+	assert_eq!((chose.status, chose.json()["live"].clone(), chose.json()["generation"].clone()), (StatusCode::OK, json!(true), json!(4)), "{}", String::from_utf8_lossy(&chose.body));
+	assert_eq!(fake.calls.lock().unwrap().iter().rev().find(|(name, _)| name == "choose").unwrap().1, json!({"profile": null, "failover": true, "exit": "de"}), "a field left out is not sent, null is");
+	for wrong in [json!({}), json!({"transport": "carrier-pigeon"}), json!({"exit": ""}), json!({"exit": "has space"}), json!({"link": "x"})] {
+		assert_eq!(h.bearer(Method::PATCH, "/p/api/upstreams/far", &full, Some(wrong), "10.1.1.1").await.status, StatusCode::BAD_REQUEST);
+	}
+	let refused = h.bearer(Method::PATCH, "/p/api/upstreams/far", &full, Some(json!({"exit": "bad"})), "10.1.1.1").await;
+	assert_eq!((refused.status, refused.json()["error"]["code"].clone()), (StatusCode::UNPROCESSABLE_ENTITY, json!("invalid_config")));
+	assert!(refused.json()["error"]["message"].as_str().unwrap().contains("upstreams[0].exit expected an exit the provider offers"), "{}", String::from_utf8_lossy(&refused.body));
+	assert_eq!(h.bearer(Method::PATCH, "/p/api/upstreams/%2e%2e", &full, Some(json!({"exit": "de"})), "10.1.1.1").await.status, StatusCode::NOT_FOUND);
+	assert!(String::from_utf8_lossy(&h.call(Method::GET, "/p/api/audit?limit=1000", Some(&session), None, "10.0.0.1").await.body).contains("upstream.choose"));
 	assert_eq!(h.bearer(Method::POST, "/p/api/upstreams/far/confirm", &full, Some(json!({"move": true})), "10.1.1.1").await.status, StatusCode::FORBIDDEN, "confirming a move is a person's act");
 	let moved = h.call(Method::POST, "/p/api/upstreams/far/confirm", Some(&session), Some(json!({"move": true})), "10.0.0.1").await;
 	assert_eq!((moved.status, moved.json()["moved"].clone()), (StatusCode::OK, json!(true)));
@@ -3550,6 +3641,31 @@ async fn the_nodes_pin_reaches_the_published_profile_and_a_new_key_marks_it_stal
 	assert_eq!(h.call(Method::POST, "/p/api/profiles/publish", Some(&session), None, "10.0.0.1").await.status, StatusCode::OK);
 	let after = template().await;
 	assert_eq!((after["pin"]["stale"].clone(), after["pin"]["published"].clone()), (json!(false), json!(["pinB"])));
+}
+
+#[tokio::test]
+async fn a_file_certificates_pin_stays_out_of_the_profile_and_is_offered_to_links_while_a_self_signed_one_stands_alone() {
+	let mut document = node_document("10.66.0.1/24");
+	document["inbounds"][0]["transports"].as_array_mut().unwrap().push(json!({"type": "tls", "listen": "0.0.0.0:443", "tls": {"cert": "/etc/ssl/node.pem", "key": "/etc/ssl/node.key", "name": "node.example.org"}, "decoy": "127.0.0.1:8443", "path": "/a-long-enough-path"}));
+	document["inbounds"][0]["transport_keys"] = json!([STANDARD.encode([5u8; 32])]);
+	let (fake, socket) = Fake::start(document).await;
+	let certificate = |own: bool| json!({"version": "0.0.0", "uptime_secs": 5, "generation": 1, "certificates": [{"listen": "0.0.0.0:443", "pin": "pinF", "self_signed": own, "not_before": 1, "not_after": 2}]});
+	*fake.status.lock().unwrap() = certificate(false);
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({"node_host": "192.0.2.10", "profiles": []})).await;
+	let applied = h.call(Method::GET, "/p/api/config", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(h.call(Method::PUT, "/p/api/config", Some(&session), Some(json!({"revision": applied["revision"], "document": applied["document"]})), "10.0.0.1").await.status, StatusCode::OK);
+	assert_eq!(h.call(Method::PUT, "/p/api/profiles/overrides/Main", Some(&session), Some(json!({"set": {"inbound_public_key": STANDARD.encode([7u8; 32]), "transport_public_key": STANDARD.encode([6u8; 32])}})), "10.0.0.1").await.status, StatusCode::OK);
+	let template = || async {h.call(Method::GET, "/p/api/profiles/derived", Some(&session), None, "10.0.0.1").await.json()["templates"][0].clone()};
+	let ca = template().await;
+	let candidate = ca["profile"]["transports"].as_array().unwrap().iter().find(|transport| transport["type"] == "tls").unwrap()["candidates"][0].clone();
+	assert!(candidate.get("pins").is_none() && candidate.get("self_signed").is_none(), "a CA candidate stays one: {candidate}");
+	assert_eq!((ca["pin"]["source"].clone(), ca["link_pins"].clone()), (Value::Null, json!({"443": "pinF"})));
+	*fake.status.lock().unwrap() = certificate(true);
+	let own = template().await;
+	let candidate = own["profile"]["transports"].as_array().unwrap().iter().find(|transport| transport["type"] == "tls").unwrap()["candidates"][0].clone();
+	assert_eq!((candidate["pins"].clone(), candidate["self_signed"].clone(), own["link_pins"].clone()), (json!(["pinF"]), json!(true), json!({})));
 }
 
 #[tokio::test]

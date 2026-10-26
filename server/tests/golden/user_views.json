@@ -55,6 +55,8 @@
       "proxy_login": true,
       "quota_bytes": 5000000000,
       "quota_period": "monthly",
+      "speed_down": null,
+      "speed_up": null,
       "subscription_id": "sub-alice"
     }
   },
@@ -123,6 +125,8 @@
       "proxy_login": false,
       "quota_bytes": null,
       "quota_period": null,
+      "speed_down": null,
+      "speed_up": null,
       "subscription_id": "sub-bob"
     }
   },
@@ -149,6 +153,8 @@
       "proxy_login": false,
       "quota_bytes": null,
       "quota_period": null,
+      "speed_down": null,
+      "speed_up": null,
       "subscription_id": "sub-carol"
     }
   }

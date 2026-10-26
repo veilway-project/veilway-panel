@@ -3,6 +3,7 @@
   "templates": [
     {
       "inbound": "Main",
+      "link_pins": {},
       "missing": [
         "inbound_public_key"
       ],
@@ -39,6 +40,7 @@
     },
     {
       "inbound": "Second",
+      "link_pins": {},
       "missing": [
         "inbound_public_key"
       ],

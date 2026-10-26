@@ -6,6 +6,15 @@ import {en, type PanelKey} from "./locales/en.ts";
 
 export const useP = () => useI18n<PanelKey>();
 
+/** Speed caps are bytes per second on the wire and Mbit/s on screen. */
+export const MBIT = 125000;
+
+/** The words for a user's caps, or null when there are none. */
+export function useSpeed() {
+	const {t, number} = useP();
+	return (up?: number | null, down?: number | null) => [up ? t("users.speedUp", {value: number(up / MBIT)}) : "", down ? t("users.speedDown", {value: number(down / MBIT)}) : ""].filter(Boolean).join(", ") || null;
+}
+
 // Server messages are English only, so a code the pack knows is said in the reader's language. bad_request and conflict carry a rule the server words best.
 export function useSay() {
 	const {t} = useP();

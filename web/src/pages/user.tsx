@@ -1,7 +1,7 @@
 import {Banner, Button, Checkbox, ConfirmDialog, DataTable, Dialog, Glass, Icon, IconButton, RadioGroup, SecretField, StatRow, StatTile, StateBlock, TextField, useToast} from "@veilway/ui";
 import {useEffect, useState} from "react";
 import {api, type Device, type LinkView, type NodeState, type NodeUser, type UserPatch, type WireguardConfig, type XrayLink} from "../api.ts";
-import {Copyable, ErrorNote, Mark, NodeNote, Qr, useCopy, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {Copyable, ErrorNote, Mark, NodeNote, Qr, useCopy, useGuard, useLoad, useP, useSay, useSpeed} from "../kit.tsx";
 import {offline, useServers} from "../servers.tsx";
 import {useSettings} from "../settings.ts";
 import {EndpointPick, PlainNote} from "./endpoints.tsx";
@@ -11,7 +11,7 @@ import {ExitPicker, type Exits, handoff, keptExits, keptFallback, useExits, useE
 import {XrayLinksDialog} from "./xray.tsx";
 
 export function UserPage({id}: {id: number}) {
-	const {t, date, time, bytes, number, percent} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings(), copy = useCopy(), {nodes} = useServers();
+	const {t, date, time, bytes, number, percent} = useP(), toast = useToast(), say = useSay(), guard = useGuard(), expiry = useExpiry(), settings = useSettings(), copy = useCopy(), speed = useSpeed(), {nodes} = useServers();
 	const page = useLoad(() => Promise.all([api("get", "/users/{id}", {params: {id}}), api("get", "/users/{id}/devices", {params: {id}}), api("get", "/users/{id}/subscription", {params: {id}}), api("get", "/users/{id}/endpoint", {params: {id}})]), [id]);
 	const [editing, setEditing] = useState(false), [dialog, setDialog] = useState<"delete" | "usage" | "link" | "device" | "xray" | "sealed" | null>(null), [removing, setRemoving] = useState<Device | null>(null);
 	const [totals, setTotals] = useState(false), [removeOld, setRemoveOld] = useState(false), [deviceName, setDeviceName] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [linkError, setLinkError] = useState<unknown>(null), [sealPass, setSealPass] = useState(""), [sealAgain, setSealAgain] = useState(""), [sealTried, setSealTried] = useState(false);
@@ -23,7 +23,7 @@ export function UserPage({id}: {id: number}) {
 	useEffect(() => { if (shown) document.getElementById("link-title")?.scrollIntoView({block: "nearest"}); }, [shown]);
 	if (page.error && !page.data) return <StateBlock kind="error" title={t("common.loadFailed")} action={<Button icon="refresh" onClick={page.reload}>{t("action.retry")}</Button>}>{say(page.error)}</StateBlock>;
 	if (!page.data) return <StateBlock kind="loading" title={t("common.loading")}/>;
-	const [user, {devices}, sub, where] = page.data, usage = user.node as NodeUser | null, current = devices.filter(d => d.token_gen === sub.token_generation);
+	const [user, {devices}, sub, where] = page.data, usage = user.node as NodeUser | null, current = devices.filter(d => d.token_gen === sub.token_generation), limited = usage?.limited ?? {}, throttled = (limited.up_packets ?? 0) + (limited.down_packets ?? 0) + (limited.paced_ms ?? 0) > 0;
 	const fresh = new Set((usage?.devices ?? []).filter(d => typeof d.handshake_age_secs === "number" && d.handshake_age_secs < 180).map(d => d.public_key)), online = devices.filter(d => fresh.has(d.public_key)).length;
 	const act = async (work: () => Promise<unknown>, after?: () => void) => {
 		setBusy(true);
@@ -141,6 +141,7 @@ export function UserPage({id}: {id: number}) {
 						<StatTile label={t("form.period")} value={t(`form.period.${(user.quota_period ?? "none") as "none"}`)}/>
 						<StatTile label={t("form.expiry")} value={user.expires_at ? date(new Date(user.expires_at * 1000)) : t("users.noExpiry")} detail={user.expires_at ? expiry(user.expires_at) : undefined}/>
 						{total !== null && <StatTile label={t("user.totalLabel")} value={bytes(total).text}/>}
+						<StatTile label={t("user.speed")} value={speed(user.speed_up, user.speed_down) ?? t("users.noSpeedLimit")} detail={throttled ? t("user.speedHeld", {dropped: number((limited.up_packets ?? 0) + (limited.down_packets ?? 0)), seconds: number(Math.round((limited.paced_ms ?? 0) / 1000))}) : undefined}/>
 						<StatTile label={t("users.col.groups")} value={user.groups.length ? user.groups.join(", ") : t("common.none")}/>
 					</StatRow></div>
 					{across && <DataTable caption={t("user.perServer")} rows={across.nodes} rowKey={row => String(row.node)} columns={[

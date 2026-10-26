@@ -1,5 +1,5 @@
 //! Another provider's subscription as an exit of the node ("upstream"). The panel only parses the pasted link, makes the device the node enrolls with, and writes the config entry once the operator has read what the provider sent and said yes again. The node does the fetching, so the provider sees the node's address and never the panel's. Previews wait in memory with the device key and secret, which are in no answer, no log and no audit line, and a restart drops them.
-use crate::{app::{App, Node, LOCAL}, crypto::{now, random}, http::{ok, Body, Ctx, Failure}, node, nodecfg};
+use crate::{app::{App, Node, LOCAL}, crypto::{now, random}, http::{ok, Body, Ctx, Failure}, node, nodecfg, users::double};
 use axum::{extract::{Path, State}, http::StatusCode, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use schemars::JsonSchema;
@@ -15,9 +15,24 @@ const PENDING_MAX: usize = 4;
 const FETCH: Duration = Duration::from_secs(90);
 /// The classes of transports besides `cover`, which is always allowed.
 const CLASSES: [&str; 3] = ["no_cover", "exposed", "plain"];
+const TRANSPORTS: [&str; 7] = ["udp", "udp-obfs", "tls", "ws", "ws-plain", "fronted", "fronted-shaped"];
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
-pub struct Quota {pub used_bytes: u64, pub quota_bytes: u64}
+pub struct Quota {
+	pub used_bytes: u64,
+	pub quota_bytes: u64,
+	/// What the provider's control channel adds once it is open: how often the quota starts over ("none", "daily", "weekly" or "monthly"), when the period began and when the account ends (Unix seconds), and the device's own bytes.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub period: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub period_start: Option<i64>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub account_expires_at: Option<i64>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub up_bytes: Option<u64>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub down_bytes: Option<u64>,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone)]
 pub struct ProfileExit {pub tag: String, pub name: String}
@@ -64,6 +79,42 @@ pub struct Review {
 	pub host: String,
 }
 
+/// An exit the provider offers, with its name as plain text.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ExitState {
+	pub tag: String,
+	pub name: String,
+	/// Two uppercase letters.
+	pub country: Option<String>,
+	pub all_protocols: bool,
+	/// This node's device has this exit selected at the provider.
+	pub selected: bool,
+}
+
+/// A notice of the provider with the severity it gave: "information" or "warning".
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct Notice {pub severity: String, pub text: String}
+
+/// A profile of the provider's document and whether the node can use it now.
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ProfileState {
+	pub id: String,
+	pub name: String,
+	pub usable: bool,
+	/// Plain words for why not. Empty when it is usable.
+	pub reason: String,
+}
+
+/// What the config chooses on an upstream. Null is automatic.
+#[derive(Default, Serialize, Deserialize, JsonSchema)]
+pub struct Choice {
+	pub profile: Option<String>,
+	pub failover: bool,
+	pub transport: Option<String>,
+	/// The exit of the provider that is asked for now.
+	pub exit: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct Bytes {pub up_bytes: u64, pub down_bytes: u64}
 
@@ -84,9 +135,29 @@ pub struct Upstream {
 	pub transport: Option<String>,
 	pub exit: Option<String>,
 	pub offered_exits: Vec<String>,
+	/// The exits the provider offers by name, once the control channel is open.
+	#[serde(default)]
+	pub exits: Vec<ExitState>,
 	/// What the provider says to the device, as plain text.
 	pub notices: Vec<String>,
+	/// The same notices with the severity the provider gave them.
+	#[serde(default)]
+	pub provider_notices: Vec<Notice>,
 	pub quota: Option<Quota>,
+	/// What the tunnel says: connecting, reconnecting, connected, stopped:<reason> or failed. Null while there is none.
+	#[serde(default)]
+	pub engine_state: Option<String>,
+	/// Seconds the tunnel has been connected.
+	#[serde(default)]
+	pub connected_secs: Option<u64>,
+	/// The transport types the profile in use lists.
+	#[serde(default)]
+	pub transports: Vec<String>,
+	/// Every profile the document holds in the order they are tried, and whether each is usable.
+	#[serde(default)]
+	pub profiles: Vec<ProfileState>,
+	#[serde(default)]
+	pub choice: Choice,
 	pub expires_at: Option<i64>,
 	pub refreshed_at: Option<i64>,
 	pub refresh_error: Option<String>,
@@ -121,6 +192,8 @@ fn refused(status: u16, body: &Value) -> Failure {
 		Some("preview_not_found") => Failure::new(StatusCode::NOT_FOUND, "preview_gone", message),
 		Some("upstream_not_found") => Failure::new(StatusCode::NOT_FOUND, "not_found", message),
 		Some("body_invalid") => Failure::bad(message),
+		Some("config_invalid") => Failure::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", format!("{message} {} {}", body["error"]["details"][0]["path"].as_str().unwrap_or_default(), body["error"]["details"][0]["message"].as_str().unwrap_or_default()).trim().to_string()),
+		Some("stale_revision") => Failure::conflict(message),
 		_ => Failure::new(StatusCode::BAD_GATEWAY, "node_refused", format!("The node answered {status}: {message}")),
 	}
 }
@@ -245,10 +318,12 @@ pub struct AddIn {
 	pub tag: String,
 	/// The exit's display name. Defaults to the tag.
 	pub name: Option<String>,
-	/// The profile of the provider to use. Left out: the first one the node would use.
+	/// The profile of the provider to use. Left out: automatic, every profile the node would use is tried in the provider's order.
 	pub profile: Option<String>,
 	/// The provider's exit to leave through. Left out: the provider's default.
 	pub exit: Option<String>,
+	/// The transport type to connect over, one the profile lists (or, with no profile named, one a usable profile lists). Left out: automatic.
+	pub transport: Option<String>,
 	/// The classes besides `cover` that the operator allows: no_cover, exposed, plain.
 	#[serde(default)]
 	pub allow: Vec<String>,
@@ -269,8 +344,11 @@ pub async fn add(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, pa
 	let profile = input.profile.as_deref().filter(|profile| !profile.is_empty());
 	let chosen = match profile {Some(profile) => review.profiles.iter().find(|found| found.id == profile), None => review.profiles.iter().find(|found| found.refused.is_none())};
 	let Some(chosen) = chosen.filter(|chosen| chosen.refused.is_none()) else {return Err(Failure::bad("The provider has no profile this node would use. Allow private addresses, or ask the provider for another."))};
+	let pool: Vec<&Profile> = if profile.is_some() {vec![chosen]} else {review.profiles.iter().filter(|found| found.refused.is_none()).collect()};
 	let exit = input.exit.as_deref().filter(|exit| !exit.is_empty());
-	if exit.is_some_and(|exit| !chosen.exits.iter().any(|found| found.tag == exit)) {return Err(Failure::bad("The profile does not offer that exit."))}
+	if exit.is_some_and(|exit| !pool.iter().any(|found| found.exits.iter().any(|offered| offered.tag == exit))) {return Err(Failure::bad("The profile does not offer that exit."))}
+	let transport = input.transport.as_deref().filter(|transport| !transport.is_empty());
+	if transport.is_some_and(|transport| !TRANSPORTS.contains(&transport) || !pool.iter().any(|found| found.transports.iter().any(|listed| listed == transport))) {return Err(Failure::bad("The profile does not list that transport."))}
 	if input.allow.iter().any(|class| !CLASSES.contains(&class.as_str()) || !review.classes.contains(class)) {return Err(Failure::bad("A class of transports is not one the provider lists."))}
 	let _turn = app.turn(node).await;
 	let (revision, _, mut document) = nodecfg::running(&app, node).await?;
@@ -279,6 +357,7 @@ pub async fn add(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, pa
 	let mut entry = json!({"tag": tag, "link": link, "signing_key": review.fingerprint, "private_key": private_key, "device_secret": device_secret});
 	if profile.is_some() {entry["profile"] = json!(chosen.id)}
 	if let Some(exit) = exit {entry["exit"] = json!(exit)}
+	if let Some(transport) = transport {entry["transport"] = json!(transport)}
 	if let Some(via) = via {entry["via"] = json!(via)}
 	if !input.allow.is_empty() {entry["allow"] = json!(CLASSES.iter().filter(|class| input.allow.iter().any(|allowed| allowed == *class)).collect::<Vec<_>>())}
 	if review.allow_private {entry["allow_private"] = json!(true)}
@@ -326,6 +405,42 @@ pub async fn confirm_move(State(app): State<Arc<App>>, Extension(ctx): Extension
 	let moved = serde_json::from_value::<Moved>(answer).map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_refused", format!("The node's answer does not read: {error}")))?;
 	app.db.audit(&ctx.actor, &ctx.source, "upstream.confirm", tag, &format!("move {}, hosts {}", moved.moved, moved.hosts)).await;
 	ok(&moved)
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ChooseIn {
+	/// The profile of the provider's document, or null for every profile in turn.
+	#[serde(default, deserialize_with = "double")] pub profile: Option<Option<String>>,
+	/// Whether the other profiles are tried when the named one cannot be used. Null is false.
+	#[serde(default, deserialize_with = "double")] pub failover: Option<Option<bool>>,
+	/// One of udp, udp-obfs, tls, ws, ws-plain, fronted, fronted-shaped, or null for automatic.
+	#[serde(default, deserialize_with = "double")] pub transport: Option<Option<String>>,
+	/// The tag of the provider's exit, or null for the provider's default.
+	#[serde(default, deserialize_with = "double")] pub exit: Option<Option<String>>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct Chosen {pub tag: String, pub revision: String, pub generation: u64, pub live: bool}
+
+/// Changes what the node chooses on an upstream: a field left out stays, null is automatic. The node checks the change like a config and applies it, and takes only an exit change on the running tunnel.
+pub async fn choose(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, path: Option<Path<HashMap<String, String>>>, Body(input): Body<ChooseIn>) -> Result<Response, Failure> {
+	let (node, names) = scope(&app, path)?;
+	if node != LOCAL {crate::nodes::require_up(&app, node).await?}
+	let tag = segment(names.get("tag").map_or("", String::as_str))?;
+	if [&input.profile, &input.transport, &input.exit].into_iter().any(|text| text.as_ref().is_some_and(|text| text.as_deref().is_some_and(|text| text.is_empty() || text.len() > 64 || !text.bytes().all(|byte| byte.is_ascii_graphic())))) {return Err(Failure::bad("profile, transport and exit are 1 to 64 characters with no spaces, or null."))}
+	if input.transport.as_ref().is_some_and(|transport| transport.as_deref().is_some_and(|transport| !TRANSPORTS.contains(&transport))) {return Err(Failure::bad("transport is one of udp, udp-obfs, tls, ws, ws-plain, fronted, fronted-shaped, or null."))}
+	let mut body = serde_json::Map::new();
+	if let Some(profile) = &input.profile {body.insert("profile".into(), json!(profile));}
+	if let Some(failover) = &input.failover {body.insert("failover".into(), json!(failover));}
+	if let Some(transport) = &input.transport {body.insert("transport".into(), json!(transport));}
+	if let Some(exit) = &input.exit {body.insert("exit".into(), json!(exit));}
+	if body.is_empty() {return Err(Failure::bad("Name at least one of profile, failover, transport and exit."))}
+	let (status, answer) = nodecfg::call(&app, node, "PATCH", &format!("/v1/upstreams/{tag}"), None, Some(&Value::Object(body.clone()))).await?;
+	if status != 200 {return Err(refused(status, &answer))}
+	let chosen = serde_json::from_value::<Chosen>(answer).map_err(|error| Failure::new(StatusCode::BAD_GATEWAY, "node_refused", format!("The node's answer does not read: {error}")))?;
+	app.db.audit(&ctx.actor, &ctx.source, "upstream.choose", tag, &body.iter().map(|(key, value)| format!("{key} {}", if value.is_null() {"automatic".to_string()} else {value.to_string().trim_matches('"').to_string()})).collect::<Vec<_>>().join(", ")).await;
+	ok(&chosen)
 }
 
 #[derive(Serialize, JsonSchema)]

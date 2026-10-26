@@ -142,9 +142,9 @@ pub fn addresses(profile: &Value) -> Vec<String> {
 	found
 }
 
-/// Where the Xray inbounds answer, for the rating of the profiles, and the node's certificate pins by listen address, which profiles are made with: every profile when one listens on every address, otherwise the listen IPs and the host names the inbounds' links carry. `resolved` holds what the profiles' names looked up to. A name with no answer counts as shared, since an unknown address is treated as shared.
+/// Where the Xray inbounds answer, for the rating of the profiles, and the node's certificate pins by listen address (`pins` of its own self-signed certificates, which profiles are made with, and `file_pins` of the certificates read from files, which only link offers use): every profile when one listens on every address, otherwise the listen IPs and the host names the inbounds' links carry. `resolved` holds what the profiles' names looked up to. A name with no answer counts as shared, since an unknown address is treated as shared.
 #[derive(Default)]
-pub struct Exposure {all: bool, ips: Vec<IpAddr>, names: Vec<String>, resolved: HashMap<String, Vec<IpAddr>>, pub pins: BTreeMap<String, String>}
+pub struct Exposure {all: bool, ips: Vec<IpAddr>, names: Vec<String>, resolved: HashMap<String, Vec<IpAddr>>, pub pins: BTreeMap<String, String>, pub file_pins: BTreeMap<String, String>}
 
 impl Exposure {
 	/// Whether a profile that names these addresses shares one with an Xray inbound.

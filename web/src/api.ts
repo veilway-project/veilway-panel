@@ -36,6 +36,8 @@ export type NodePatch = Schemas["NodePatch"];
 export type Across = Schemas["Across"];
 export type Upstream = Schemas["Upstream"];
 export type Review = Schemas["Review"];
+/** A field left out stays as it is and null is automatic, so every field is optional. */
+export type UpstreamChoice = Partial<Schemas["ChooseIn"]>;
 export type Inspected = Schemas["Inspected"];
 // The routes below hand on the node's own answers, which the schema leaves open. Only the fields the panel reads are named.
 export type Problem = {path: string, message: string};
@@ -43,12 +45,12 @@ export type Report = {errors: Problem[], warnings: Problem[], more_errors: numbe
 export type Changes = {added: string[], changed: string[], removed: string[]};
 export type Diff = {[kind in "inbounds" | "outbounds" | "exits" | "rules" | "users"]?: Changes} & {routing_default?: boolean, rules_reordered?: boolean, inbound_changes?: {tag: string, restart: boolean}[], user_changes?: {name: string, lost_access?: boolean}[]};
 export type Running = {revision: string, generation: number, document: Record<string, unknown>};
-export type Template = {inbound: string, profile: Record<string, unknown>, missing: string[], overridden: string[], pin?: {source: "node" | "override" | null, pins: string[], published: string[], stale: boolean} | null, trimmed?: {transport: string, relay: string}[], kind?: "faketls", refused?: {transport: string, code: string, reason: string}[]};
+export type Template = {inbound: string, profile: Record<string, unknown>, missing: string[], overridden: string[], pin?: {source: "node" | "override" | null, pins: string[], published: string[], stale: boolean} | null, link_pins?: Record<string, string>, trimmed?: {transport: string, relay: string}[], kind?: "faketls", refused?: {transport: string, code: string, reason: string}[]};
 export type Pairings = {offers: {id: string, name: string, direction: string, expires_at: number}[], answered: {id: string, name: string, direction: string, expires_at: number, fingerprint: string, tries: number, role: string}[]};
-export type NodeLink = {tag: string, id: string, half: string, role: string, state: string, state_secs: number, flows: number, traffic: {up_bytes: number, down_bytes: number}};
+export type NodeLink = {tag: string, id: string, half: string, role: string, state: string, state_secs: number, flows: number, chained: number, traffic: {up_bytes: number, down_bytes: number}};
 export type Pasted = {id: string, name: string, direction: string, half: string, expires_at: number, expired: boolean, overlaps_pool: boolean, dials: {address: string, private: boolean}[], transports: {type: string}[], ws_warning: boolean, manage?: "this_node" | "other_node" | null};
 /** What the node reports for a user. The schema leaves it open, so only the fields the panel reads are named. */
-export type NodeUser = {used_bytes?: number, period_start?: number, denied?: "disabled" | "expired" | "quota" | null, traffic?: {up_bytes?: number, down_bytes?: number}, devices?: {public_key?: string, handshake_age_secs?: number | null}[]};
+export type NodeUser = {used_bytes?: number, limited?: {up_packets?: number, down_packets?: number, paced_ms?: number}, period_start?: number, denied?: "disabled" | "expired" | "quota" | null, traffic?: {up_bytes?: number, down_bytes?: number}, devices?: {public_key?: string, handshake_age_secs?: number | null}[]};
 
 type Method = "get" | "post" | "put" | "patch" | "delete";
 type Operation<P extends keyof paths, M extends Method> = NonNullable<paths[P][M]>;

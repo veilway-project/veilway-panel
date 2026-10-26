@@ -754,7 +754,8 @@ export interface paths {
         delete: operations["removeNodeUpstream"];
         options?: never;
         head?: never;
-        patch?: never;
+        /** Changes what this server chooses on one of its upstreams, as chooseUpstream does. */
+        patch: operations["chooseNodeUpstream"];
         trace?: never;
     };
     "/nodes/{id}/upstreams/{tag}/confirm": {
@@ -1369,7 +1370,8 @@ export interface paths {
         delete: operations["removeUpstream"];
         options?: never;
         head?: never;
-        patch?: never;
+        /** Changes what the node chooses on an upstream: the profile (null: every profile in turn), failover to the other profiles, the transport (null: automatic) and the exit of the provider (null: its default). A field left out stays. The node checks the change like a config and applies it; only an exit change is taken on the running tunnel, and anything else makes the tunnel start again. The link, the keys and what the node may dial cannot be changed here. */
+        patch: operations["chooseUpstream"];
         trace?: never;
     };
     "/upstreams/{tag}/confirm": {
@@ -1776,10 +1778,12 @@ export interface components {
             exit?: string | null;
             /** @description The exit's display name. Defaults to the tag. */
             name?: string | null;
-            /** @description The profile of the provider to use. Left out: the first one the node would use. */
+            /** @description The profile of the provider to use. Left out: automatic, every profile the node would use is tried in the provider's order. */
             profile?: string | null;
             /** @description The tag of the upstream in the node's config, and of the exit that leaves through it: 1 to 64 of a-z, 0-9, - and _. */
             tag: string;
+            /** @description The transport type to connect over, one the profile lists (or, with no profile named, one a usable profile lists). Left out: automatic. */
+            transport?: string | null;
         };
         Added: {
             /** Format: uint64 */
@@ -1820,7 +1824,7 @@ export interface components {
             target: string;
         };
         Bulk: {
-            /** @description enable, disable, delete, reset_usage, reset_links, add_group, remove_group, set_quota, set_expiry, set_device_limit or set_exits. */
+            /** @description enable, disable, delete, reset_usage, reset_links, add_group, remove_group, set_quota, set_speed, set_expiry, set_device_limit or set_exits. */
             action: string;
             ids: number[];
             /**
@@ -1828,7 +1832,7 @@ export interface components {
              * @default false
              */
             remove_devices: boolean;
-            /** @description The group name, the quota (an object with quota_bytes and quota_period), the expiry in Unix seconds or null, the device limit, or the exits ("all" or a list of exit tags). A default exit the new exits leave out is cleared. */
+            /** @description The group name, the quota (an object with quota_bytes and quota_period), the rate cap (an object with speed_up and speed_down in bytes per second, each null for no cap), the expiry in Unix seconds or null, the device limit, or the exits ("all" or a list of exit tags). A default exit the new exits leave out is cleared. */
             value?: unknown;
         };
         BulkFailure: {
@@ -1860,6 +1864,43 @@ export interface components {
         /** @description The body of an update request. */
         Choice: {
             part: components["schemas"]["Part"];
+        };
+        /** @description What the config chooses on an upstream. Null is automatic. */
+        Choice2: {
+            /** @description The exit of the provider that is asked for now. */
+            exit?: string | null;
+            failover: boolean;
+            profile?: string | null;
+            transport?: string | null;
+        };
+        ChooseIn: {
+            /**
+             * @description The tag of the provider's exit, or null for the provider's default.
+             * @default null
+             */
+            exit: string | null;
+            /**
+             * @description Whether the other profiles are tried when the named one cannot be used. Null is false.
+             * @default null
+             */
+            failover: boolean | null;
+            /**
+             * @description The profile of the provider's document, or null for every profile in turn.
+             * @default null
+             */
+            profile: string | null;
+            /**
+             * @description One of udp, udp-obfs, tls, ws, ws-plain, fronted, fronted-shaped, or null for automatic.
+             * @default null
+             */
+            transport: string | null;
+        };
+        Chosen: {
+            /** Format: uint64 */
+            generation: number;
+            live: boolean;
+            revision: string;
+            tag: string;
         };
         CodeIn: {
             code: string;
@@ -2021,6 +2062,16 @@ export interface components {
             code: string;
             message: string;
         };
+        /** @description An exit the provider offers, with its name as plain text. */
+        ExitState: {
+            all_protocols: boolean;
+            /** @description Two uppercase letters. */
+            country?: string | null;
+            name: string;
+            /** @description This node's device has this exit selected at the provider. */
+            selected: boolean;
+            tag: string;
+        };
         Exported: {
             /** @description The same as the content of a file the client imports. */
             file: string;
@@ -2136,6 +2187,11 @@ export interface components {
         };
         Inbounds: {
             inbounds: components["schemas"]["Inbound"][];
+            /**
+             * @description The `tls` transports whose key changed lately, with the port they listen on.
+             * @default []
+             */
+            key_changes: components["schemas"]["KeyChange"][];
         };
         InspectIn: {
             link: string;
@@ -2145,6 +2201,19 @@ export interface components {
             fingerprint: string;
             /** @description The host and port of the provider's endpoint. This is where the node will connect. */
             host: string;
+        };
+        /** @description A `tls` transport whose certificate key is not the one the node served before. A link or a profile that pins the old key fails until it is paired or refreshed again. */
+        KeyChange: {
+            /**
+             * Format: int64
+             * @description Unix seconds: when the node found the new key.
+             */
+            changed_at: number;
+            inbound: string;
+            /** Format: uint16 */
+            port: number;
+            /** @description The pin served before, for 30 days after the change. */
+            previous_pin: string;
         };
         KeyOut: {
             /** Format: int64 */
@@ -2427,6 +2496,11 @@ export interface components {
             /** Format: uint16 */
             status: number;
         };
+        /** @description A notice of the provider with the severity it gave: "information" or "warning". */
+        Notice: {
+            severity: string;
+            text: string;
+        };
         /** @enum {string} */
         NoticeKind: "info" | "warning";
         OfferIn: {
@@ -2546,6 +2620,14 @@ export interface components {
             /** @description At most 64 profile ids. One that names no profile is ignored, and a repeat is dropped. */
             order: string[];
         };
+        /** @description A profile of the provider's document and whether the node can use it now. */
+        ProfileState: {
+            id: string;
+            name: string;
+            /** @description Plain words for why not. Empty when it is usable. */
+            reason: string;
+            usable: boolean;
+        };
         ProxyChanged: {
             node: components["schemas"]["NodeState"];
             user: components["schemas"]["UserOut"];
@@ -2557,8 +2639,18 @@ export interface components {
             username: string;
         };
         Quota: {
+            /** Format: int64 */
+            account_expires_at?: number | null;
+            /** Format: uint64 */
+            down_bytes?: number | null;
+            /** @description What the provider's control channel adds once it is open: how often the quota starts over ("none", "daily", "weekly" or "monthly"), when the period began and when the account ends (Unix seconds), and the device's own bytes. */
+            period?: string | null;
+            /** Format: int64 */
+            period_start?: number | null;
             /** Format: uint64 */
             quota_bytes: number;
+            /** Format: uint64 */
+            up_bytes?: number | null;
             /** Format: uint64 */
             used_bytes: number;
         };
@@ -3155,8 +3247,33 @@ export interface components {
         };
         /** @description What the node is doing for one upstream. */
         Upstream: {
+            /**
+             * @default {
+             *       "exit": null,
+             *       "failover": false,
+             *       "profile": null,
+             *       "transport": null
+             *     }
+             */
+            choice: components["schemas"]["Choice2"];
+            /**
+             * Format: uint64
+             * @description Seconds the tunnel has been connected.
+             * @default null
+             */
+            connected_secs: number | null;
             counters: components["schemas"]["Counters"];
+            /**
+             * @description What the tunnel says: connecting, reconnecting, connected, stopped:<reason> or failed. Null while there is none.
+             * @default null
+             */
+            engine_state: string | null;
             exit?: string | null;
+            /**
+             * @description The exits the provider offers by name, once the control channel is open.
+             * @default []
+             */
+            exits: components["schemas"]["ExitState"][];
             /** Format: int64 */
             expires_at?: number | null;
             /** Format: uint16 */
@@ -3169,7 +3286,17 @@ export interface components {
             /** @description A move of the provider's endpoint that waits for the operator. */
             pending_move?: string | null;
             profile?: string | null;
+            /**
+             * @description Every profile the document holds in the order they are tried, and whether each is usable.
+             * @default []
+             */
+            profiles: components["schemas"]["ProfileState"][];
             provider?: string | null;
+            /**
+             * @description The same notices with the severity the provider gave them.
+             * @default []
+             */
+            provider_notices: components["schemas"]["Notice"][];
             quota?: components["schemas"]["Quota"] | null;
             /** @description Plain words for why the state is what it is. Empty while it is up. */
             reason: string;
@@ -3182,6 +3309,11 @@ export interface components {
             state_secs: number;
             tag: string;
             transport?: string | null;
+            /**
+             * @description The transport types the profile in use lists.
+             * @default []
+             */
+            transports: string[];
         };
         Upstreams: {
             upstreams: components["schemas"]["Upstream"][];
@@ -3237,13 +3369,20 @@ export interface components {
             quota_bytes?: number | null;
             /** @description "daily", "weekly" or "monthly". Needs quota_bytes. */
             quota_period?: string | null;
+            /** Format: uint64 */
+            speed_down?: number | null;
+            /**
+             * Format: uint64
+             * @description Bytes per second, 16384 to 12500000000. Left out or null: no cap.
+             */
+            speed_up?: number | null;
         };
         UserOut: {
             /** Format: int64 */
             created: number;
             /**
              * Format: int64
-             * @description 0 is no limit beyond the node's own 16.
+             * @description 0 is no limit beyond the node's own 64.
              */
             device_limit: number;
             /** Format: int64 */
@@ -3275,6 +3414,13 @@ export interface components {
             /** Format: int64 */
             quota_bytes?: number | null;
             quota_period?: string | null;
+            /** Format: int64 */
+            speed_down?: number | null;
+            /**
+             * Format: int64
+             * @description The most the user sends and receives through each node, in bytes per second over all their devices. Null is no cap.
+             */
+            speed_up?: number | null;
             subscription_id: string;
             /** @description What the nodes counted together, in a panel with more than one node. Only on one user's answer. */
             usage?: components["schemas"]["Across"] | null;
@@ -3319,6 +3465,17 @@ export interface components {
             quota_bytes: number | null;
             /** @default null */
             quota_period: string | null;
+            /**
+             * Format: uint64
+             * @default null
+             */
+            speed_down: number | null;
+            /**
+             * Format: uint64
+             * @description Bytes per second, 16384 to 12500000000, or null for no cap.
+             * @default null
+             */
+            speed_up: number | null;
         };
         UsersOut: {
             users: components["schemas"]["UserOut"][];
@@ -6275,6 +6432,69 @@ export interface operations {
             };
         };
     };
+    chooseNodeUpstream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+                tag: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChooseIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Chosen"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     confirmNodeUpstreamMove: {
         parameters: {
             query?: never;
@@ -8497,6 +8717,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Removed2"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    chooseUpstream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tag: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChooseIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Chosen"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */

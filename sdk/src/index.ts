@@ -31,6 +31,9 @@ export type LinkInbounds = Schemas["Inbounds"];
 export type Upstreams = Schemas["Upstreams"];
 export type Upstream = Schemas["Upstream"];
 export type Retried = Schemas["Retried"];
+/** Each field is optional: one left out stays, null is automatic. */
+export type UpstreamChoice = Partial<Schemas["ChooseIn"]>;
+export type UpstreamChosen = Schemas["Chosen"];
 /** One section of the node's config, such as `exits` or `routing`. The generated schema leaves `value` open, so it is `unknown` here. */
 export interface ConfigSection {revision: string, generation: number, value: unknown}
 /** The exits section of the node's config. */
@@ -161,6 +164,9 @@ export class Client {
 
 	/** Asks an upstream to connect again now. Needs a token of scope full. */
 	retryUpstream(tag: string): Promise<Retried> {return this.json("POST", "/upstreams/" + encodeURIComponent(tag) + "/retry")}
+
+	/** Changes what an upstream chooses: the profile, failover, the transport and the provider's exit. A field left out stays, null is automatic. Needs a token of scope full. */
+	chooseUpstream(tag: string, choice: UpstreamChoice): Promise<UpstreamChosen> {return this.json("PATCH", "/upstreams/" + encodeURIComponent(tag), choice)}
 
 	/** The Xray add-on: whether it is installed and its inbounds. */
 	getXray(): Promise<Xray> {return this.json("GET", "/xray")}

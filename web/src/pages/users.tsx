@@ -1,13 +1,17 @@
 import {Banner, Button, Checkbox, ConfirmDialog, Dialog, Glass, NumberField, RadioGroup, Segmented, SelectField, StateBlock, Switch, TextField, UsageBar, useToast} from "@veilway/ui";
 import {useEffect, useId, useState} from "react";
 import {api, type LinkView, type NodeState, type NodeUser, type User, type UserPatch} from "../api.ts";
-import {ago, DayField, ErrorNote, fromDay, Mark, NodeNote, PageHead, toDay, useGuard, useLoad, useP, useSay} from "../kit.tsx";
+import {ago, DayField, ErrorNote, fromDay, Mark, MBIT, NodeNote, PageHead, toDay, useGuard, useLoad, useP, useSay, useSpeed} from "../kit.tsx";
 import {useSettings} from "../settings.ts";
 import {EndpointPick, MoveDialog} from "./endpoints.tsx";
 
 const GB = 1024 ** 3;
 const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const PAGE = 50;
+// 16384 bytes per second is the least the node takes, a little over 0.13 Mbit/s.
+const SPEED_MIN = 0.14, SPEED_MAX = 100000;
+const fromMbit = (value: number | "") => value === "" ? null : Math.round(value * MBIT);
+const toMbit = (bytes?: number | null): number | "" => bytes ? Math.round(bytes / MBIT * 1000) / 1000 : "";
 type Period = "none" | "daily" | "weekly" | "monthly";
 export type Exits = "all" | string[];
 type ExitRow = {tag: string, name: string, country: string, up: boolean | null};
@@ -56,7 +60,8 @@ export function UsersPage({adding}: {adding: boolean}) {
 		}
 	};
 	const toggle = (id: number, on: boolean) => setPicked(old => { const next = new Set(old); if (on) next.add(id); else next.delete(id); return next; });
-	const cols = [t("users.col.user"), t("users.col.groups"), t("users.col.exits"), t("users.col.usage"), t("users.col.expiry"), t("users.col.devices"), t("users.col.state")];
+	const speed = useSpeed();
+	const cols = [t("users.col.user"), t("users.col.groups"), t("users.col.exits"), t("users.col.usage"), t("users.col.expiry"), t("users.col.devices"), t("users.col.speed"), t("users.col.state")];
 	const state = (u: User) => {
 		const node = u.node as NodeUser | null, ages = (node?.devices ?? []).map(d => d.handshake_age_secs).filter((age): age is number => typeof age === "number"), age = ages.length ? Math.min(...ages) : null;
 		if (!u.enabled) return <Mark tone="muted">{t("users.disabled")}</Mark>;
@@ -106,7 +111,8 @@ export function UsersPage({adding}: {adding: boolean}) {
 						<td data-label={cols[3]} className="p-usage-cell">{node?.used_bytes === undefined ? <span className="vw-muted">{t("users.usageUnknown")}</span> : u.quota_bytes ? <UsageBar compact label={u.name} used={node.used_bytes} total={u.quota_bytes}/> : <span className="p-user"><span className="vw-num">{bytes(node.used_bytes).text}</span><span>{t("users.noLimit")}</span></span>}</td>
 						<td data-label={cols[4]}>{u.expires_at ? <span className="p-user"><span className="vw-num">{date(new Date(u.expires_at * 1000))}</span><span>{expiry(u.expires_at)}</span></span> : <span className="vw-muted">{t("users.noExpiry")}</span>}</td>
 						<td data-label={cols[5]} data-align="end"><span className="vw-num">{u.device_limit ? t("users.devicesOf", {used: number(u.devices), limit: number(u.device_limit)}) : number(u.devices)}</span></td>
-						<td data-label={cols[6]}>{state(u)}</td>
+						<td data-label={cols[6]}>{speed(u.speed_up, u.speed_down) ?? <span className="vw-muted">{t("users.noSpeedLimit")}</span>}</td>
+						<td data-label={cols[7]}>{state(u)}</td>
 					</tr>;
 				})}</tbody>
 			</table></div>}
@@ -129,19 +135,21 @@ export function UsersPage({adding}: {adding: boolean}) {
 
 // The bulk changes that need a value, behind one dialog so the bar stays short.
 function BulkChange({count, busy, error, onClose, onApply}: {count: number, busy: boolean, error: unknown, onClose: () => void, onApply: (action: string, value: unknown) => void}) {
-	const {t} = useP(), [action, setAction] = useState("add_group"), [group, setGroup] = useState("*"), [quota, setQuota] = useState<number | "">(""), [period, setPeriod] = useState<Period>("monthly"), [day, setDay] = useState(""), [limit, setLimit] = useState<number | "">(3), [problem, setProblem] = useState("");
+	const {t} = useP(), [action, setAction] = useState("add_group"), [group, setGroup] = useState("*"), [quota, setQuota] = useState<number | "">(""), [period, setPeriod] = useState<Period>("monthly"), [day, setDay] = useState(""), [limit, setLimit] = useState<number | "">(3), [problem, setProblem] = useState(""), [up, setUp] = useState<number | "">(""), [down, setDown] = useState<number | "">("");
 	const [exits, setExits] = useState<Exits>("all"), nodeExits = useExits(action === "set_exits"), kept = keptExits(exits, nodeExits.data);
 	const apply = () => {
 		if ((action === "add_group" || action === "remove_group") && !NAME.test(group)) return setProblem(t("error.group"));
 		if (action === "set_exits" && kept.length === 0) return setProblem(t("exits.pick"));
+		if (action === "set_speed" && [up, down].some(value => value !== "" && !(value >= SPEED_MIN && value <= SPEED_MAX))) return setProblem(t("error.speed"));
 		setProblem("");
-		onApply(action, action === "set_quota" ? {quota_bytes: quota === "" ? null : Math.round(quota * GB), quota_period: quota === "" || period === "none" ? null : period} : action === "set_expiry" ? fromDay(day) : action === "set_device_limit" ? (limit === "" ? 0 : limit) : action === "set_exits" ? kept : group);
+		onApply(action, action === "set_speed" ? {speed_up: fromMbit(up), speed_down: fromMbit(down)} : action === "set_quota" ? {quota_bytes: quota === "" ? null : Math.round(quota * GB), quota_period: quota === "" || period === "none" ? null : period} : action === "set_expiry" ? fromDay(day) : action === "set_device_limit" ? (limit === "" ? 0 : limit) : action === "set_exits" ? kept : group);
 	};
 	return <Dialog open onOpenChange={open => { if (!open) onClose(); }} title={t("bulk.changeTitle", {count})}>
 		<form className="p-stack" onSubmit={event => { event.preventDefault(); apply(); }}>
-			<RadioGroup label={t("bulk.action")} value={action} onChange={setAction} options={[{value: "add_group", label: t("bulk.addGroup")}, {value: "remove_group", label: t("bulk.removeGroup")}, {value: "set_quota", label: t("bulk.setQuota")}, {value: "set_expiry", label: t("bulk.setExpiry")}, {value: "set_device_limit", label: t("bulk.setLimit")}, {value: "set_exits", label: t("bulk.setExits")}]}/>
+			<RadioGroup label={t("bulk.action")} value={action} onChange={setAction} options={[{value: "add_group", label: t("bulk.addGroup")}, {value: "remove_group", label: t("bulk.removeGroup")}, {value: "set_quota", label: t("bulk.setQuota")}, {value: "set_speed", label: t("bulk.setSpeed")}, {value: "set_expiry", label: t("bulk.setExpiry")}, {value: "set_device_limit", label: t("bulk.setLimit")}, {value: "set_exits", label: t("bulk.setExits")}]}/>
 			{(action === "add_group" || action === "remove_group") && <TextField label={t("form.groups")} value={group} onChange={value => setGroup(value.toLowerCase().trim())} error={problem || undefined} technical/>}
 			{action === "set_quota" && <><NumberField label={t("form.quota")} hint={t("form.quotaHint")} unit={t("unit.gb")} min={0} step="any" value={quota} onChange={setQuota}/><SelectField label={t("form.period")} value={period} onChange={value => setPeriod(value as Period)} disabled={quota === ""} options={(["none", "daily", "weekly", "monthly"] as const).map(p => ({value: p, label: t(`form.period.${p}`)}))}/></>}
+			{action === "set_speed" && <><p className="vw-note">{t("bulk.speedNote")}</p><div className="p-pair"><NumberField label={t("form.speedUp")} unit={t("unit.mbit")} min={SPEED_MIN} max={SPEED_MAX} step="any" value={up} onChange={setUp} error={problem || undefined} optional/><NumberField label={t("form.speedDown")} unit={t("unit.mbit")} min={SPEED_MIN} max={SPEED_MAX} step="any" value={down} onChange={setDown} optional/></div></>}
 			{action === "set_expiry" && <DayField label={t("form.expiry")} hint={t("form.expiryHint")} value={day} onChange={setDay}/>}
 			{action === "set_device_limit" && <NumberField label={t("form.limit")} hint={t("form.limitHint")} unit={t("form.devices")} min={0} max={65535} value={limit} onChange={setLimit}/>}
 			{action === "set_exits" && <><p className="vw-note">{t("bulk.exitsNote")}</p><ExitPicker value={exits} onChange={setExits} exits={nodeExits} problem={problem || undefined}/></>}
@@ -201,20 +209,23 @@ export function UserForm({user, defaultLimit, onClose, onSaved}: {user: User | n
 	const {t} = useP(), guard = useGuard(), choices = (useSettings()?.endpoints ?? []).length;
 	const [name, setName] = useState(user?.name ?? ""), [groups, setGroups] = useState(user?.groups.join(", ") ?? ""), [quota, setQuota] = useState<number | "">(user?.quota_bytes ? Math.round(user.quota_bytes / GB * 100) / 100 : "");
 	const [period, setPeriod] = useState<Period>((user?.quota_period as Period | null) ?? "none"), [day, setDay] = useState(toDay(user?.expires_at)), [limit, setLimit] = useState<number | "">(user?.device_limit ?? defaultLimit), [note, setNote] = useState(user?.note ?? ""), [enabled, setEnabled] = useState(user?.enabled ?? true);
+	const [up, setUp] = useState<number | "">(toMbit(user?.speed_up)), [down, setDown] = useState<number | "">(toMbit(user?.speed_down));
 	const [error, setError] = useState<unknown>(null), [busy, setBusy] = useState(false), [tried, setTried] = useState(false), [exits, setExits] = useState<Exits>("all"), [fallback, setFallback] = useState<string | null>(null), [endpoint, setEndpoint] = useState(""), nodeExits = useExits(!user);
 	const list = groups.split(",").map(g => g.trim().toLowerCase()).filter(Boolean);
-	const problems = {name: NAME.test(name) ? undefined : t("error.userName"), groups: list.every(g => NAME.test(g)) ? undefined : t("error.group"), exits: keptExits(exits, nodeExits.data).length === 0 ? t("exits.pick") : undefined};
+	const problems = {name: NAME.test(name) ? undefined : t("error.userName"), groups: list.every(g => NAME.test(g)) ? undefined : t("error.group"), exits: keptExits(exits, nodeExits.data).length === 0 ? t("exits.pick") : undefined, speed: [up, down].some(value => value !== "" && !(value >= SPEED_MIN && value <= SPEED_MAX)) ? t("error.speed") : undefined};
 	const save = async () => {
 		setTried(true);
-		if (problems.name || problems.groups || (!user && problems.exits)) return;
+		if (problems.name || problems.groups || problems.speed || (!user && problems.exits)) return;
 		setBusy(true);
 		setError(null);
 		const body = {name, groups: list, quota_bytes: quota === "" ? null : Math.round(quota * GB), quota_period: quota === "" || period === "none" ? null : period, expires_at: fromDay(day), device_limit: limit === "" ? 0 : limit, note, enabled};
+		// A cap the form shows rounded is sent only when it was edited, so saving other fields keeps the exact value the node has.
+		const speeds = {...(up === toMbit(user?.speed_up) && user ? {} : {speed_up: fromMbit(up)}), ...(down === toMbit(user?.speed_down) && user ? {} : {speed_down: fromMbit(down)})};
 		try {
 			// The schema lists the nullable fields as required, but the server leaves out what is not sent, so the default exit stays.
-			if (user) onSaved((await guard(() => api("patch", "/users/{id}", {params: {id: user.id}, body: body as UserPatch}))).user, null, null);
+			if (user) onSaved((await guard(() => api("patch", "/users/{id}", {params: {id: user.id}, body: {...body, ...speeds} as UserPatch}))).user, null, null);
 			else {
-				const answer = await guard(() => api("post", "/users", {body: {...body, exits: keptExits(exits, nodeExits.data), exit: keptFallback(exits, fallback, nodeExits.data), endpoint: endpoint || null}}));
+				const answer = await guard(() => api("post", "/users", {body: {...body, ...speeds, exits: keptExits(exits, nodeExits.data), exit: keptFallback(exits, fallback, nodeExits.data), endpoint: endpoint || null}}));
 				onSaved(answer.user, answer.link ?? null, answer.link_error ?? null);
 			}
 		} catch (failure) {
@@ -234,6 +245,10 @@ export function UserForm({user, defaultLimit, onClose, onSaved}: {user: User | n
 			<div className="p-pair">
 				<DayField label={t("form.expiry")} hint={t("form.expiryHint")} value={day} onChange={setDay} optional/>
 				<NumberField label={t("form.limit")} hint={t("form.limitHint")} unit={t("form.devices")} min={0} max={65535} value={limit} onChange={setLimit}/>
+			</div>
+			<div className="p-pair">
+				<NumberField label={t("form.speedUp")} hint={t("form.speedHint")} unit={t("unit.mbit")} min={SPEED_MIN} max={SPEED_MAX} step="any" value={up} onChange={setUp} error={tried ? problems.speed : undefined} optional/>
+				<NumberField label={t("form.speedDown")} hint={t("form.speedHint")} unit={t("unit.mbit")} min={SPEED_MIN} max={SPEED_MAX} step="any" value={down} onChange={setDown} error={tried ? problems.speed : undefined} optional/>
 			</div>
 			{!user && <div className="vw-field"><span className="vw-label">{t("exits.title")}</span><p className="vw-note">{t("exits.lead")}</p><ExitPicker value={exits} onChange={setExits} exits={nodeExits} problem={tried ? problems.exits : undefined} fallback={fallback} onFallback={setFallback}/></div>}
 			{!user && choices > 0 && <EndpointPick label={t("endpoint.label")} hint={t("endpoint.hint")} value={endpoint} onChange={setEndpoint} followLabel={t("endpoint.follow")}/>}

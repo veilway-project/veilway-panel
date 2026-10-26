@@ -58,6 +58,7 @@ impl Fake {
 			("GET", "/v1/sessions") => (200, json!({"sessions": []})),
 			("GET", "/v1/busy") => (503, json!({"error": {"code": "busy", "message": "the node is busy"}})),
 			("GET", "/v1/upstreams") => (200, json!({"upstreams": []})),
+			("PATCH", path) if path.starts_with("/v1/upstreams/") => (200, json!({"tag": path.trim_start_matches("/v1/upstreams/"), "revision": "r2", "generation": 2, "live": false})),
 			("POST", path) if path.starts_with("/v1/upstreams/") && path.ends_with("/retry") => (200, json!({"tag": path.trim_start_matches("/v1/upstreams/").trim_end_matches("/retry")})),
 			("POST", path) if path.starts_with("/v1/users/") && path.ends_with("/usage/reset") => {if self.reset_missing.load(Ordering::Relaxed) {return (404, json!({"error": {"code": "not_found", "message": "no such route"}}))} self.resets.lock().unwrap().push((path["/v1/users/".len()..path.len() - "/usage/reset".len()].to_string(), body)); (200, json!({}))}
 			_ => (404, json!({"error": {"code": "not_found", "message": "no such route"}})),
@@ -740,9 +741,10 @@ async fn the_upstreams_of_another_server_go_through_its_link_and_node_1_is_not_c
 	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
 	assert_eq!(panel.call(Method::GET, &format!("/p/api/nodes/{two}/upstreams"), None).await, json!({"upstreams": []}));
 	assert_eq!(panel.call(Method::POST, &format!("/p/api/nodes/{two}/upstreams/edge/retry"), None).await, json!({"tag": "edge"}));
+	assert_eq!(panel.call(Method::PATCH, &format!("/p/api/nodes/{two}/upstreams/edge"), Some(json!({"transport": null}))).await["tag"], "edge");
 	assert_eq!(panel.call(Method::GET, "/p/api/upstreams", None).await, json!({"upstreams": []}), "node 1 keeps its own endpoints");
 	let seen = remote.calls.lock().unwrap().clone();
-	assert!(seen.contains(&"GET /v1/upstreams".to_string()) && seen.contains(&"POST /v1/upstreams/edge/retry".to_string()), "{seen:?}");
+	assert!(seen.contains(&"GET /v1/upstreams".to_string()) && seen.contains(&"POST /v1/upstreams/edge/retry".to_string()) && seen.contains(&"PATCH /v1/upstreams/edge".to_string()), "{seen:?}");
 	assert!(panel.world.local.calls.lock().unwrap().iter().all(|call| !call.contains("/retry")), "node 1 is not called for another server's retry");
 }
 
