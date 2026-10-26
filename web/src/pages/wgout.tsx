@@ -24,7 +24,7 @@ export function wgProblems(draft: Item, original: Item | null): Record<string, P
 	const range = (key: string, low: number, high: number, to: PanelKey) => { const value = draft[key]; if (value !== undefined && !(Number.isInteger(value) && (value as number) >= low && (value as number) <= high)) found[key] = to; };
 	range("mtu", 1280, 1500, "wg.err.mtu");
 	range("keepalive_secs", 0, 3600, "wg.err.keepalive");
-	range("max_flows", 16, 16384, "wg.err.flows");
+	range("max_flows", 16, 4096, "wg.err.flows");
 	return found;
 }
 
@@ -65,7 +65,7 @@ export function WireguardOutboundFields({draft, setDraft, set, original, problem
 			<div className="p-pair">
 				<NumberField label={t("wg.mtu")} hint={t("wg.mtuHint")} unit={t("wg.unitBytes")} min={1280} max={1500} value={typeof draft.mtu === "number" ? draft.mtu : ""} onChange={value => number("mtu", value)} error={why("mtu")} optional/>
 				<NumberField label={t("wg.keepalive")} hint={t("wg.keepaliveHint")} unit={t("unit.seconds")} min={0} max={3600} value={typeof draft.keepalive_secs === "number" ? draft.keepalive_secs : ""} onChange={value => number("keepalive_secs", value)} error={why("keepalive_secs")} optional/>
-				<NumberField label={t("wg.maxFlows")} hint={t("wg.maxFlowsHint")} unit={t("wg.unitFlows")} min={16} max={16384} value={typeof draft.max_flows === "number" ? draft.max_flows : ""} onChange={value => number("max_flows", value)} error={why("max_flows")} optional/>
+				<NumberField label={t("wg.maxFlows")} hint={t("wg.maxFlowsHint")} unit={t("wg.unitFlows")} min={16} max={4096} value={typeof draft.max_flows === "number" ? draft.max_flows : ""} onChange={value => number("max_flows", value)} error={why("max_flows")} optional/>
 			</div>
 			<div className="p-pair">
 				<TextField label={t("config.bindLabel")} hint={t("config.bindHint")} value={str(draft.bind)} onChange={value => set("bind", value.trim())} technical optional/>
