@@ -5,6 +5,7 @@ import {Copyable, ErrorNote, Mark, NodeNote, Qr, useCopy, useGuard, useLoad, use
 import {offline, useServers} from "../servers.tsx";
 import {useSettings} from "../settings.ts";
 import {EndpointPick, PlainNote} from "./endpoints.tsx";
+import {UserOrder} from "./order.tsx";
 import {ProxyLogin} from "./proxy.tsx";
 import {ExitPicker, type Exits, handoff, keptExits, keptFallback, useExits, useExpiry, UserForm} from "./users.tsx";
 import {XrayLinksDialog} from "./xray.tsx";
@@ -176,6 +177,7 @@ export function UserPage({id}: {id: number}) {
 						</div>
 					</div>
 				</Glass>
+				<UserOrder user={user} onSaved={page.reload}/>
 				<ProxyLogin user={user} onChanged={page.reload}/>
 			</div>
 			<div className="p-stack">

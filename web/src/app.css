@@ -334,6 +334,9 @@
 .p-step { inline-size: 30px; block-size: 30px; color: var(--c-text-muted); }
 .p-step .vw-icon { inline-size: 1.1em; block-size: 1.1em; }
 [data-order-row], tr:has(.p-grip) { position: relative; }
+.p-order-list { position: relative; display: grid; gap: var(--s-2); margin: 0; padding: 0; list-style: none; }
+.p-order-item { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); padding: var(--s-2) var(--s-3); border: 1px solid var(--c-line); border-radius: var(--r-2); }
+.p-order-item .p-row-text { display: grid; min-inline-size: 0; overflow-wrap: anywhere; }
 [data-lifted] { z-index: 2; background: var(--c-surface); border-radius: var(--r-2); box-shadow: var(--shadow-3), 0 0 0 1px var(--c-line-strong); cursor: grabbing; }
 [data-lifted] .p-grip { color: var(--c-accent-ink); cursor: grabbing; }
 .vw-table-wrap:has(.p-grip), .p-form:has(> [data-order-row]), .p-mirror:has(> [data-order-row]) { position: relative; }

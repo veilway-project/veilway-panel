@@ -537,6 +537,7 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 		saved.inbound_keys = before.inbound_keys.clone();
 		saved.transport_keys = before.transport_keys.clone();
 		saved.transport_clocks = before.transport_clocks.clone();
+		saved.profile_order = before.profile_order.clone();
 		// A form loaded before a rotation may carry a key the node no longer accepts, or soon will not.
 		crate::nodecfg::retarget(&mut saved.profiles, &crate::nodecfg::stale_keys(&before));
 		crate::endpoints::in_use(&tx, &saved).map_err(Failure::conflict)?;
@@ -554,6 +555,48 @@ pub async fn put_settings(State(app): State<Arc<App>>, Extension(ctx): Extension
 	*app.not_found_page.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = input.not_found.clone();
 	app.db.audit(&ctx.actor, &ctx.source, "settings.update", "settings", detail).await;
 	ok(&stored)
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ListedProfile {
+	/// The id a subscription gives the profile: a remote node's profiles are the node's slug, a dash and the profile's id.
+	pub id: String, pub name: String,
+	/// The name of the node the profile belongs to.
+	pub node: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ProfileOrder {
+	/// The saved global order, as the profile ids across all nodes.
+	pub order: Vec<String>,
+	/// Every profile of every node in the order a subscription gives them when no order is set: node 1's, then the other nodes by place and id.
+	pub profiles: Vec<ListedProfile>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileOrderIn {
+	/// At most 64 profile ids. One that names no profile is ignored, and a repeat is dropped.
+	pub order: Vec<String>,
+}
+
+pub async fn get_profile_order(State(app): State<Arc<App>>) -> Result<Response, Failure> {
+	let settings = app.settings();
+	let (own, rows) = app.db.call(|db| -> rusqlite::Result<_> {Ok((db.query_row("select name from nodes where id = ?", [LOCAL.0], |row| row.get::<_, String>(0))?, db.prepare("select name, slug, settings from nodes where id != ? order by place, id")?.query_map([LOCAL.0], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?))}).await??;
+	let text = |profile: &Value, key: &str| profile[key].as_str().unwrap_or_default().to_string();
+	let mut profiles: Vec<ListedProfile> = settings.profiles.iter().map(|profile| ListedProfile {id: text(profile, "id"), name: text(profile, "name"), node: own.clone()}).collect();
+	for (node, slug, cache) in rows {
+		for entry in serde_json::from_str::<Value>(&cache).ok().and_then(|cache| cache["profiles"].as_array().cloned()).unwrap_or_default() {profiles.push(ListedProfile {id: format!("{slug}-{}", text(&entry["profile"], "id")), name: text(&entry["profile"], "name"), node: node.clone()});}
+	}
+	ok(&ProfileOrder {order: settings.profile_order, profiles})
+}
+
+pub async fn put_profile_order(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<ProfileOrderIn>) -> Result<Response, Failure> {
+	let order = crate::subs::order_checked(input.order)?;
+	let saved = order.clone();
+	app.update_settings(move |settings| settings.profile_order = saved).await.map_err(Failure::internal)?;
+	app.db.audit(&ctx.actor, &ctx.source, "profiles.order", "settings", &format!("{} ids", order.len())).await;
+	get_profile_order(State(app)).await
 }
 
 #[derive(Serialize, JsonSchema)]

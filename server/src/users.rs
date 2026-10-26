@@ -50,13 +50,15 @@ pub struct UserOut {
 	/// The ids of the nodes the user may use. Left out when every node is allowed.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub nodes: Option<Vec<i64>>,
+	/// The order of the profiles in this user's subscription, as profile ids (at most 64): these come first, in this order, then the rest in the global order. Null follows the global order.
+	pub profile_order: Option<Vec<String>>,
 	/// What the nodes counted together, in a panel with more than one node. Only on one user's answer.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub usage: Option<usage::Across>,
 }
 
 fn out(user: &UserRow, devices: i64, pending: i64, node: Option<Value>) -> UserOut {
-	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), endpoint: user.endpoint.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, proxy_login: user.proxy, node, nodes: serde_json::from_str(&user.nodes).ok(), usage: None}
+	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), endpoint: user.endpoint.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, proxy_login: user.proxy, node, nodes: serde_json::from_str(&user.nodes).ok(), profile_order: user.profile_order.as_deref().and_then(|text| serde_json::from_str(text).ok()), usage: None}
 }
 
 async fn counts(app: &App, id: i64) -> Result<(i64, i64), Failure> {
@@ -117,6 +119,8 @@ pub struct UserIn {
 	pub expires_at: Option<i64>, pub device_limit: Option<u16>, pub note: Option<String>,
 	/// The ids of the nodes the user may use, at least one. Left out or null: every node.
 	pub nodes: Option<Vec<i64>>,
+	/// The user's own order of the profiles, as profile ids, or null for the global order.
+	pub profile_order: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -133,6 +137,8 @@ pub struct UserPatch {
 	pub device_limit: Option<u16>, pub note: Option<String>,
 	/// The ids of the nodes the user may use, at least one, or null for every node. A node taken out frees the addresses of the user's devices in its pool.
 	#[serde(default, deserialize_with = "double")] pub nodes: Option<Option<Vec<i64>>>,
+	/// The user's own order of the profiles, as profile ids (at most 64), or null to follow the global order. An id that names no profile is ignored.
+	#[serde(default, deserialize_with = "double")] pub profile_order: Option<Option<Vec<String>>>,
 }
 
 /// Refuses a list of node ids that is empty, repeats an id or names a node the panel does not have.
@@ -190,10 +196,11 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	if let Some(name) = input.endpoint.as_deref() {if app.settings().named(name).is_none() {return Err(Failure::bad("endpoint is the name of one of the endpoints, or null."))}}
 	let nodes_text = input.nodes.as_ref().map_or("\"all\"".to_string(), |nodes| serde_json::to_string(nodes).unwrap_or_default());
 	subs::profiles_fit(&app, &nodes_text).await?;
+	let order_text = match input.profile_order.clone().map(subs::order_checked).transpose()? {Some(order) if !order.is_empty() => serde_json::to_string(&order).ok(), _ => None};
 	let id = app.db.call(move |db| -> rusqlite::Result<i64> {
 		let once = cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).show_links_once;
 		let copy = (!once).then(|| held.keys.as_ref().expect("checked before the lookup").seal_copy(&record, &token));
-		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created, default_exit, endpoint, nodes) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, lookup.as_slice(), copy, now(), input.exit, input.endpoint, nodes_text])?;
+		db.execute("insert into users (name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_lookup, token_copy, token_created, default_exit, endpoint, nodes, profile_order) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params![input.name, input.enabled.unwrap_or(true), serde_json::to_string(&input.groups.unwrap_or_default()).unwrap_or_default(), serde_json::to_string(&input.exits.unwrap_or(json!("all"))).unwrap_or_default(), input.quota_bytes.map(|quota| quota as i64), input.quota_bytes.and(input.quota_period), input.expires_at, input.device_limit.unwrap_or(cache.read().unwrap_or_else(|poisoned| poisoned.into_inner()).default_device_limit), input.note.unwrap_or_default(), now(), record.as_slice(), sub_id, lookup.as_slice(), copy, now(), input.exit, input.endpoint, nodes_text, order_text])?;
 		let id = db.last_insert_rowid();
 		crate::app::load_lookups(db, &held.lookups);
 		audit(db, &ctx.actor, &ctx.source, "user.create", &format!("user:{id}"), &input.name);
@@ -222,8 +229,9 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	let dirty = app.dirty_all();
 	let nodes_text = match &input.nodes {Some(Some(nodes)) => serde_json::to_string(nodes).unwrap_or_default(), Some(None) => "\"all\"".to_string(), None => user.nodes.clone()};
 	if nodes_text != user.nodes {subs::profiles_fit(&app, &nodes_text).await?}
+	let order_text = match input.profile_order.clone() {Some(Some(order)) => Some(subs::order_checked(order)?).filter(|order| !order.is_empty()).and_then(|order| serde_json::to_string(&order).ok()), Some(None) => None, None => user.profile_order.clone()};
 	app.db.call(move |db| -> rusqlite::Result<()> {
-		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ?, default_exit = ?, endpoint = ?, nodes = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), serde_json::to_string(&exits).unwrap_or_default(), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), exit, endpoint, nodes_text, id])?;
+		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ?, default_exit = ?, endpoint = ?, nodes = ?, profile_order = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), serde_json::to_string(&exits).unwrap_or_default(), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), exit, endpoint, nodes_text, order_text, id])?;
 		// The addresses follow the nodes the user may use: new ones are taken, the ones of a node taken away are freed.
 		db.execute("delete from device_addresses where device_id in (select id from devices where user_id = ?1) and node_id in (select id from nodes where id != ?2 and ?3 != '\"all\"' and not exists (select 1 from json_each(?3) where value = nodes.id))", params![id, LOCAL.0, nodes_text])?;
 		subs::add_addresses(db, Some(id))?;

@@ -16,13 +16,13 @@ const NODE_DEVICES_MAX: i64 = 16;
 const UPDATE_SOONEST: u32 = 900;
 
 #[derive(Clone, Debug)]
-pub struct UserRow {pub id: i64, pub name: String, pub enabled: bool, pub groups: String, pub exits: String, pub quota_bytes: Option<i64>, pub quota_period: Option<String>, pub expires_at: Option<i64>, pub device_limit: i64, pub note: String, pub created: i64, pub record_id: [u8; 16], pub sub_id: String, pub token_copy: Option<Vec<u8>>, pub token_gen: i64, pub token_created: i64, pub default_exit: Option<String>, pub endpoint: Option<String>, pub proxy: bool, pub nodes: String}
+pub struct UserRow {pub id: i64, pub name: String, pub enabled: bool, pub groups: String, pub exits: String, pub quota_bytes: Option<i64>, pub quota_period: Option<String>, pub expires_at: Option<i64>, pub device_limit: i64, pub note: String, pub created: i64, pub record_id: [u8; 16], pub sub_id: String, pub token_copy: Option<Vec<u8>>, pub token_gen: i64, pub token_created: i64, pub default_exit: Option<String>, pub endpoint: Option<String>, pub proxy: bool, pub nodes: String, pub profile_order: Option<String>}
 
-pub const USER_COLUMNS: &str = "id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_copy, token_gen, token_created, default_exit, endpoint, proxy_password is not null, nodes";
+pub const USER_COLUMNS: &str = "id, name, enabled, groups, exits, quota_bytes, quota_period, expires_at, device_limit, note, created, record_id, sub_id, token_copy, token_gen, token_created, default_exit, endpoint, proxy_password is not null, nodes, profile_order";
 
 impl UserRow {
 	pub fn read(row: &Row) -> rusqlite::Result<Self> {
-		Ok(Self {id: row.get(0)?, name: row.get(1)?, enabled: row.get(2)?, groups: row.get(3)?, exits: row.get(4)?, quota_bytes: row.get(5)?, quota_period: row.get(6)?, expires_at: row.get(7)?, device_limit: row.get(8)?, note: row.get(9)?, created: row.get(10)?, record_id: row.get::<_, Vec<u8>>(11)?.try_into().unwrap_or([0; 16]), sub_id: row.get(12)?, token_copy: row.get(13)?, token_gen: row.get(14)?, token_created: row.get(15)?, default_exit: row.get(16)?, endpoint: row.get(17)?, proxy: row.get(18)?, nodes: row.get(19)?})
+		Ok(Self {id: row.get(0)?, name: row.get(1)?, enabled: row.get(2)?, groups: row.get(3)?, exits: row.get(4)?, quota_bytes: row.get(5)?, quota_period: row.get(6)?, expires_at: row.get(7)?, device_limit: row.get(8)?, note: row.get(9)?, created: row.get(10)?, record_id: row.get::<_, Vec<u8>>(11)?.try_into().unwrap_or([0; 16]), sub_id: row.get(12)?, token_copy: row.get(13)?, token_gen: row.get(14)?, token_created: row.get(15)?, default_exit: row.get(16)?, endpoint: row.get(17)?, proxy: row.get(18)?, nodes: row.get(19)?, profile_order: row.get(20)?})
 	}
 	pub fn load(db: &Connection, id: i64) -> rusqlite::Result<Self> {db.query_row(&format!("select {USER_COLUMNS} from users where id = ?"), [id], Self::read)}
 }
@@ -143,6 +143,13 @@ pub fn add_addresses(db: &Connection, user: Option<i64>) -> rusqlite::Result<()>
 	Ok(())
 }
 
+/// A list of profile ids made ready to keep: at most 64 entries, each 1 to 128 characters, repeats dropped. An id that names no profile is no error, so a profile that was removed does not stop a save.
+pub fn order_checked(order: Vec<String>) -> Result<Vec<String>, Failure> {
+	if order.len() > PROFILES_MAX || order.iter().any(|id| id.is_empty() || id.len() > 128) {return Err(Failure::bad("A profile order is at most 64 profile ids of 1 to 128 characters."))}
+	let mut seen = HashSet::new();
+	Ok(order.into_iter().filter(|id| seen.insert(id.clone())).collect())
+}
+
 /// Which document is built. The endpoint's answer lists the static mirrors and carries usage. A static file has no usage, since a host may keep every version for good. A whole document, handed out as a file or in a link, lists no static mirrors, since it has no link to derive their keys from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Form {Answer, Static, Whole}
@@ -163,7 +170,7 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 	let (pool, stored) = (pooled.parse::<Ipv4Net>().ok(), this.address.parse::<Ipv4Addr>().ok());
 	let device_id = this.id;
 	let (total, remote_nodes, waiting) = app.db.call(move |db| -> rusqlite::Result<_> {
-		let rows = db.prepare("select nodes.id, nodes.name, nodes.slug, nodes.uid, nodes.pool_v4, device_addresses.address, nodes.settings, nodes.relays from nodes join device_addresses on device_addresses.node_id = nodes.id and device_addresses.device_id = ? where nodes.id != ? and nodes.applied_rev >= device_addresses.added_rev order by nodes.id")?.query_map(params![device_id, LOCAL.0], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+		let rows = db.prepare("select nodes.id, nodes.name, nodes.slug, nodes.uid, nodes.pool_v4, device_addresses.address, nodes.settings, nodes.relays from nodes join device_addresses on device_addresses.node_id = nodes.id and device_addresses.device_id = ? where nodes.id != ? and nodes.applied_rev >= device_addresses.added_rev order by nodes.place, nodes.id")?.query_map(params![device_id, LOCAL.0], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
 		let mut nodes = Vec::new();
 		for (id, name, slug, uid, pool, address, cache, relays) in rows {
 			let taken: HashSet<String> = db.prepare("select address from device_addresses where node_id = ?")?.query_map([id], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
@@ -210,6 +217,9 @@ pub async fn document(app: &App, user: &UserRow, this: &DeviceRow, signing: &[Si
 	let room = PROFILES_MAX.saturating_sub(profiles.len());
 	if remote.len() > room {tracing::warn!("user {}: {} profiles of other nodes are left out, a document holds {PROFILES_MAX} profiles at most", user.name, remote.len() - room)}
 	profiles.extend(remote.into_iter().take(room));
+	let (own_order, global_order) = (user.profile_order.as_deref().and_then(|text| serde_json::from_str::<Vec<String>>(text).ok()).unwrap_or_default(), &settings.profile_order);
+	// The account's own order first, then the global one, then the rest as they came: the sort is stable.
+	profiles.sort_by_key(|profile| {let id = profile["id"].as_str().unwrap_or_default(); own_order.iter().position(|listed| listed == id).or_else(|| global_order.iter().position(|listed| listed == id).map(|at| at + own_order.len())).unwrap_or(own_order.len() + global_order.len())});
 	let profiles = app.names.resolve(profiles).await;
 	if profiles.is_empty() {return Err("no profile has an address that resolves".into())}
 	let at = now();

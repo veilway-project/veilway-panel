@@ -825,6 +825,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/profiles/order": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The global order of the profiles in subscriptions, and every profile of every node in the default order. */
+        get: operations["getProfileOrder"];
+        /** Sets the global order of the profiles in subscriptions, as profile ids across all nodes (at most 64, unknown ids ignored). It widens nothing, so no re-authentication is asked. */
+        put: operations["putProfileOrder"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/profiles/overrides/{inbound}": {
         parameters: {
             query?: never;
@@ -2163,6 +2181,13 @@ export interface components {
             /** @description The link in the form providers hand out. A secret: it is shown to the one who asked and stored nowhere but in the sealed copy. */
             veilway: string;
         };
+        ListedProfile: {
+            /** @description The id a subscription gives the profile: a remote node's profiles are the node's slug, a dash and the profile's id. */
+            id: string;
+            name: string;
+            /** @description The name of the node the profile belongs to. */
+            node: string;
+        };
         /** @description What the last poll saw, for the pages that show the node now. */
         Live: {
             /** Format: int64 */
@@ -2511,6 +2536,16 @@ export interface components {
             name: string;
             tag: string;
         };
+        ProfileOrder: {
+            /** @description The saved global order, as the profile ids across all nodes. */
+            order: string[];
+            /** @description Every profile of every node in the order a subscription gives them when no order is set: node 1's, then the other nodes by place and id. */
+            profiles: components["schemas"]["ListedProfile"][];
+        };
+        ProfileOrderIn: {
+            /** @description At most 64 profile ids. One that names no profile is ignored, and a repeat is dropped. */
+            order: string[];
+        };
         ProxyChanged: {
             node: components["schemas"]["NodeState"];
             user: components["schemas"]["UserOut"];
@@ -2843,6 +2878,11 @@ export interface components {
             pool_v4: string;
             /** @default  */
             privacy_url: string;
+            /**
+             * @description The order profiles come in a subscription, as profile ids across all nodes, at most 64. An id that names no profile is ignored, and profiles not listed follow in the default order. Set at `/profiles/order`: a settings update keeps the stored value.
+             * @default []
+             */
+            readonly profile_order: string[];
             /**
              * @description Edits to the profiles derived from the node's inbounds, by inbound tag: an object whose members replace the derived ones.
              * @default {}
@@ -3191,6 +3231,8 @@ export interface components {
             /** @description The ids of the nodes the user may use, at least one. Left out or null: every node. */
             nodes?: number[] | null;
             note?: string | null;
+            /** @description The user's own order of the profiles, as profile ids, or null for the global order. */
+            profile_order?: string[] | null;
             /** Format: uint64 */
             quota_bytes?: number | null;
             /** @description "daily", "weekly" or "monthly". Needs quota_bytes. */
@@ -3226,6 +3268,8 @@ export interface components {
             note: string;
             /** Format: int64 */
             pending_devices: number;
+            /** @description The order of the profiles in this user's subscription, as profile ids (at most 64): these come first, in this order, then the rest in the global order. Null follows the global order. */
+            profile_order?: string[] | null;
             /** @description Whether the user has a proxy password. The password itself is only at `/users/{id}/proxy/show`. */
             proxy_login: boolean;
             /** Format: int64 */
@@ -3263,6 +3307,11 @@ export interface components {
              */
             nodes: number[] | null;
             note?: string | null;
+            /**
+             * @description The user's own order of the profiles, as profile ids (at most 64), or null to follow the global order. An id that names no profile is ignored.
+             * @default null
+             */
+            profile_order: string[] | null;
             /**
              * Format: uint64
              * @default null
@@ -6420,6 +6469,122 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    getProfileOrder: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileOrder"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    putProfileOrder: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfileOrderIn"];
+            };
+        };
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileOrder"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */

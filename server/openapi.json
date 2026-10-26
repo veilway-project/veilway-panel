@@ -1323,6 +1323,27 @@
         ],
         "type": "object"
       },
+      "ListedProfile": {
+        "properties": {
+          "id": {
+            "description": "The id a subscription gives the profile: a remote node's profiles are the node's slug, a dash and the profile's id.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "node": {
+            "description": "The name of the node the profile belongs to.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "node"
+        ],
+        "type": "object"
+      },
       "Live": {
         "description": "What the last poll saw, for the pages that show the node now.",
         "properties": {
@@ -2282,6 +2303,45 @@
         ],
         "type": "object"
       },
+      "ProfileOrder": {
+        "properties": {
+          "order": {
+            "description": "The saved global order, as the profile ids across all nodes.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "profiles": {
+            "description": "Every profile of every node in the order a subscription gives them when no order is set: node 1's, then the other nodes by place and id.",
+            "items": {
+              "$ref": "#/components/schemas/ListedProfile"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "order",
+          "profiles"
+        ],
+        "type": "object"
+      },
+      "ProfileOrderIn": {
+        "additionalProperties": false,
+        "properties": {
+          "order": {
+            "description": "At most 64 profile ids. One that names no profile is ignored, and a repeat is dropped.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "order"
+        ],
+        "type": "object"
+      },
       "ProxyChanged": {
         "properties": {
           "node": {
@@ -3045,6 +3105,15 @@
           "privacy_url": {
             "default": "",
             "type": "string"
+          },
+          "profile_order": {
+            "default": [],
+            "description": "The order profiles come in a subscription, as profile ids across all nodes, at most 64. An id that names no profile is ignored, and profiles not listed follow in the default order. Set at `/profiles/order`: a settings update keeps the stored value.",
+            "items": {
+              "type": "string"
+            },
+            "readOnly": true,
+            "type": "array"
           },
           "profile_overrides": {
             "additionalProperties": true,
@@ -3930,6 +3999,16 @@
               "null"
             ]
           },
+          "profile_order": {
+            "description": "The user's own order of the profiles, as profile ids, or null for the global order.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "quota_bytes": {
             "format": "uint64",
             "minimum": 0,
@@ -4026,6 +4105,16 @@
           "pending_devices": {
             "format": "int64",
             "type": "integer"
+          },
+          "profile_order": {
+            "description": "The order of the profiles in this user's subscription, as profile ids (at most 64): these come first, in this order, then the rest in the global order. Null follows the global order.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "proxy_login": {
             "description": "Whether the user has a proxy password. The password itself is only at `/users/{id}/proxy/show`.",
@@ -4148,6 +4237,17 @@
           "note": {
             "type": [
               "string",
+              "null"
+            ]
+          },
+          "profile_order": {
+            "default": null,
+            "description": "The user's own order of the profiles, as profile ids (at most 64), or null to follow the global order. An id that names no profile is ignored.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
               "null"
             ]
           },
@@ -8025,6 +8125,134 @@
         },
         "summary": "A `veilway` profile template per inbound, made from the node's config and the overrides, with what each still lacks.",
         "x-access": "read"
+      }
+    },
+    "/profiles/order": {
+      "get": {
+        "operationId": "getProfileOrder",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileOrder"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The global order of the profiles in subscriptions, and every profile of every node in the default order.",
+        "x-access": "read"
+      },
+      "put": {
+        "operationId": "putProfileOrder",
+        "parameters": [],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileOrderIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileOrder"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Sets the global order of the profiles in subscriptions, as profile ids across all nodes (at most 64, unknown ids ignored). It widens nothing, so no re-authentication is asked.",
+        "x-access": "full"
       }
     },
     "/profiles/overrides/{inbound}": {

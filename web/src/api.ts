@@ -9,6 +9,7 @@ export type WireguardConfig = Schemas["WireguardConfig"];
 export type LinkView = Schemas["LinkView"];
 export type NodeState = Schemas["NodeState"];
 export type Settings = Schemas["Settings"];
+export type ProfileOrder = Schemas["ProfileOrder"];
 export type SigningKey = Schemas["KeyOut"];
 export type Token = Schemas["TokenRow"];
 export type SessionRow = Schemas["SessionRow"];

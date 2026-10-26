@@ -976,3 +976,59 @@ async fn a_section_change_whose_answer_is_cut_is_confirmed_by_the_sync_that_foll
 	assert_eq!((listed["nodes"][1]["behind"].as_bool(), listed["nodes"][1]["last_error"].is_null()), (Some(false), true), "{listed}");
 	assert_eq!(remote.document.lock().unwrap()["exits"].as_array().unwrap().len(), 2, "the change stays in force");
 }
+
+/// The ids of the profiles a device's document lists, in order.
+async fn listed(panel: &Panel, user: i64, device: i64) -> Vec<String> {signed_payload(panel, user, device).await["profiles"].as_array().unwrap().iter().map(|profile| profile["id"].as_str().unwrap().to_string()).collect()}
+
+#[tokio::test]
+async fn the_profiles_of_other_nodes_come_by_place_then_id_and_a_global_and_a_own_order_move_them() {
+	let panel = Panel::start().await;
+	let (two, first) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	let (three, second) = panel.add_node("n3", "Amsterdam", "10.68.0.0/24").await;
+	panel.settle().await;
+	for remote in [&first, &second] {remote.document.lock().unwrap()["public_addresses"] = json!(["192.0.2.20"]);}
+	panel.app.update_settings(|settings| settings.profiles = vec![profile("a", "192.0.2.10"), profile("b", "192.0.2.10")]).await.unwrap();
+	node::sync(&panel.app, Node(two)).await.unwrap();
+	node::sync(&panel.app, Node(three)).await.unwrap();
+	let alice = panel.user("alice", json!({})).await;
+	let id = panel.device(alice).await["id"].as_i64().unwrap();
+	node::sync(&panel.app, Node(two)).await.unwrap();
+	node::sync(&panel.app, Node(three)).await.unwrap();
+	assert_eq!(listed(&panel, alice, id).await, ["a", "b", "frankfurt-main", "amsterdam-main"], "the same place keeps the order of the ids");
+	panel.call(Method::PATCH, &format!("/p/api/nodes/{three}"), Some(json!({"place": -1}))).await;
+	assert_eq!(listed(&panel, alice, id).await, ["a", "b", "amsterdam-main", "frankfurt-main"], "a lower place comes first");
+	let shown = panel.call(Method::GET, "/p/api/profiles/order", None).await;
+	assert_eq!(shown["order"], json!([]));
+	assert_eq!(shown["profiles"].as_array().unwrap().iter().map(|profile| (profile["id"].as_str().unwrap(), profile["node"].as_str().unwrap())).collect::<Vec<_>>(), [("a", "Node 1"), ("b", "Node 1"), ("amsterdam-main", "Amsterdam"), ("frankfurt-main", "Frankfurt")]);
+	let set = panel.call(Method::PUT, "/p/api/profiles/order", Some(json!({"order": ["frankfurt-main", "gone", "b", "b"]}))).await;
+	assert_eq!(set["order"], json!(["frankfurt-main", "gone", "b"]), "an unknown id is kept and ignored, a repeat is dropped");
+	assert_eq!(listed(&panel, alice, id).await, ["frankfurt-main", "b", "a", "amsterdam-main"], "listed ids first, the rest in the default order");
+	assert_eq!(panel.query::<String>("select action from audit order by id desc limit 1", vec![]), ["profiles.order"]);
+	let path = format!("/p/api/users/{alice}");
+	let patched = panel.call(Method::PATCH, &path, Some(json!({"profile_order": ["amsterdam-main", "nothing", "b"]}))).await;
+	assert_eq!(patched["user"]["profile_order"], json!(["amsterdam-main", "nothing", "b"]));
+	assert_eq!(listed(&panel, alice, id).await, ["amsterdam-main", "b", "frankfurt-main", "a"], "the account's ids first, then the global order");
+	panel.call(Method::PATCH, &path, Some(json!({"note": "x"}))).await;
+	assert_eq!(panel.shown(alice).await["profile_order"], json!(["amsterdam-main", "nothing", "b"]), "a change of something else keeps the order");
+	assert_eq!(panel.call(Method::PATCH, &path, Some(json!({"profile_order": null}))).await["user"]["profile_order"], Value::Null);
+	assert_eq!(listed(&panel, alice, id).await, ["frankfurt-main", "b", "a", "amsterdam-main"], "null follows the global order");
+	let bob = panel.user("bob", json!({"profile_order": ["b"]})).await;
+	assert_eq!(panel.shown(bob).await["profile_order"], json!(["b"]), "an order can be given when the account is made");
+	panel.call(Method::PUT, "/p/api/settings", Some({let mut body = panel.call(Method::GET, "/p/api/settings", None).await; body["profile_order"] = json!(["a"]); body})).await;
+	assert_eq!(panel.call(Method::GET, "/p/api/profiles/order", None).await["order"], json!(["frankfurt-main", "gone", "b"]), "a settings update does not write the order");
+}
+
+#[tokio::test]
+async fn an_order_of_more_than_64_ids_or_an_id_that_cannot_be_one_is_refused() {
+	let panel = Panel::start().await;
+	let many: Vec<String> = (0..65).map(|i| format!("p{i}")).collect();
+	let few: Vec<String> = many[..64].to_vec();
+	assert_eq!(panel.refused(Method::PUT, "/p/api/profiles/order", Some(json!({"order": many}))).await.0, StatusCode::BAD_REQUEST);
+	assert_eq!(panel.refused(Method::PUT, "/p/api/profiles/order", Some(json!({"order": [""]}))).await.0, StatusCode::BAD_REQUEST);
+	assert_eq!(panel.refused(Method::PUT, "/p/api/profiles/order", Some(json!({"order": ["x".repeat(129)]}))).await.0, StatusCode::BAD_REQUEST);
+	assert_eq!(panel.call(Method::PUT, "/p/api/profiles/order", Some(json!({"order": few}))).await["order"].as_array().unwrap().len(), 64);
+	assert_eq!(panel.refused(Method::POST, "/p/api/users", Some(json!({"name": "carol", "profile_order": many}))).await.0, StatusCode::BAD_REQUEST);
+	let alice = panel.user("alice", json!({})).await;
+	assert_eq!(panel.refused(Method::PATCH, &format!("/p/api/users/{alice}"), Some(json!({"profile_order": many}))).await.0, StatusCode::BAD_REQUEST);
+	assert_eq!(panel.shown(alice).await["profile_order"], Value::Null);
+}

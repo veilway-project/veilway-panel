@@ -4,6 +4,7 @@ import {api, type Template} from "../api.ts";
 import {ErrorNote, Mark, PageHead, useGuard, useLoad, useP, useSay} from "../kit.tsx";
 import type {PanelKey} from "../locales/en.ts";
 import {SettingsContext} from "../settings.ts";
+import {GlobalOrder} from "./order.tsx";
 
 const MISSING = ["inbound_public_key", "transport_public_key", "node_host"];
 const REFUSALS = ["not_acknowledged", "behind_proxy", "key_shared", "no_public_key", "bad_site", "node_host", "profile_id", "no_name", "plain_host", "plain_shared", "plain_key", "plain_cookie", "relays_only", "no_address", "inbound_off", "transport_off"];
@@ -25,6 +26,7 @@ export function ProfilesPage() {
 			<ErrorNote error={error}/>
 			{templates.length === 0 ? <StateBlock kind="empty" title={t("profiles.empty")} action={<Button onClick={() => { location.hash = "#/inbounds"; }}>{t("nav.inbounds")}</Button>}>{t("profiles.emptyBody")}</StateBlock> : <div className="p-columns">{templates.map(template => template.kind === "faketls" ? <Borrowed key={template.inbound + "/faketls"} template={template}/> : <Override key={template.inbound} template={template} onSaved={derived.reload}/>)}</div>}
 		</>}
+		<GlobalOrder/>
 	</>;
 }
 

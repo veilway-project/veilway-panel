@@ -16,6 +16,7 @@ export type Live = Schemas["Live"];
 export type Usage = Schemas["UsageOut"];
 export type History = Schemas["HistoryOut"];
 export type Settings = Schemas["Settings"];
+export type ProfileOrder = Schemas["ProfileOrder"];
 export type NodeInfo = Schemas["NodeInfo"];
 export type NodeState = Schemas["NodeState"];
 export type UpdateInfo = Schemas["UpdateInfo"];
@@ -134,6 +135,12 @@ export class Client {
 
 	/** The profiles the panel makes from the node's inbounds, before overrides. */
 	derivedProfiles(): Promise<unknown> {return this.json("GET", "/profiles/derived")}
+
+	/** The global order of the profiles in subscriptions, and every profile of every node in the default order. */
+	getProfileOrder(): Promise<ProfileOrder> {return this.json("GET", "/profiles/order")}
+
+	/** Sets the global order of the profiles as profile ids across all nodes (at most 64, unknown ids ignored). Needs a token of scope full. */
+	setProfileOrder(order: string[]): Promise<ProfileOrder> {return this.json("PUT", "/profiles/order", {order})}
 
 	/** Sets the overrides of the profile of one inbound, such as `node_addresses`. An empty object removes them. Needs a token of scope full. */
 	setProfileOverride(inbound: string, set: Record<string, unknown>): Promise<unknown> {return this.json("PUT", "/profiles/overrides/" + encodeURIComponent(inbound), {set})}
