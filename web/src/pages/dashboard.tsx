@@ -4,10 +4,11 @@ import {api, type Live, type NodeUser} from "../api.ts";
 import {ago, Mark, PageHead, useLoad, useP, useSay} from "../kit.tsx";
 import {NoticesPanel, SubscriptionNoticesPanel} from "./notices.tsx";
 import {PERIODS} from "./traffic.tsx";
+import {WgHealth, type WgState} from "./wgout.tsx";
 
 type Period = "day" | "week" | "month";
 type Rated = {name: string, up_bytes_per_sec: number, down_bytes_per_sec: number, udp?: boolean | null};
-type ExitState = {tag: string, name: string, backend?: {type?: string}, udp: boolean | null, udp_down_secs: number | null, interface_up: boolean | null, interface_down_secs: number | null, link_up: boolean | null};
+type ExitState = {tag: string, name: string, backend?: {type?: string}, udp: boolean | null, udp_down_secs: number | null, interface_up: boolean | null, interface_down_secs: number | null, link_up: boolean | null} & WgState;
 const NEAR = 0.85;
 
 // The one page an operator opens first: speed now, the day's shape, who is about to run out, where traffic leaves, and what changed.
@@ -76,14 +77,15 @@ export function DashboardPage({live, onLive}: {live: Live | null, onLive: () => 
 					<Button className="p-more" size="sm" variant="quiet" onClick={() => { location.hash = "#/routing/exits"; }}>{t("nav.routing")}<Icon name="chevronForward"/></Button>
 				</div>
 				{!live ? <StateBlock kind="loading" title={t("common.loading")}/> : exits.length === 0 && outbounds.length === 0 ? <p className="vw-muted">{t("traffic.noExits")}</p> : <ul className="p-row-list">
-					{exits.map(e => { const bad = e.interface_up === false || e.link_up === false, warn = e.udp === false; return <li key={"e" + e.tag}>
+					{exits.map(e => { const bad = e.interface_up === false || e.link_up === false || e.outbound_up === false, warn = e.udp === false; return <li key={"e" + e.tag}>
 						<span className="p-tile-icon" data-tone={bad ? "danger" : warn ? "warning" : "success"}><Icon name={e.backend?.type === "chain" ? "device" : "upload"}/></span>
 						<div className="p-row-text"><strong className="p-name">{e.tag}</strong><span>{e.name !== e.tag ? e.name : t("traffic.exitKind", {backend: e.backend?.type ?? ""})}</span></div>
 						<span className="p-flags">
 							{e.interface_up !== null && <Mark tone={e.interface_up ? "success" : "danger"}>{e.interface_up ? t("traffic.interfaceUp") : t("traffic.interfaceDown", {time: since(e.interface_down_secs)})}</Mark>}
 							{e.link_up !== null && <Mark tone={e.link_up ? "success" : "danger"}>{t(e.link_up ? "traffic.linkUp" : "traffic.linkDown")}</Mark>}
 							{e.udp !== null && <Mark tone={e.udp ? "success" : "warning"}>{e.udp ? t("traffic.udp") : t("traffic.noUdp", {time: since(e.udp_down_secs)})}</Mark>}
-							{e.interface_up === null && e.link_up === null && e.udp === null && <Mark tone="muted">{t("traffic.noState")}</Mark>}
+							{e.outbound_up !== null && e.outbound_up !== undefined && <WgHealth state={e} compact/>}
+							{e.interface_up === null && e.link_up === null && e.udp === null && (e.outbound_up === null || e.outbound_up === undefined) && <Mark tone="muted">{t("traffic.noState")}</Mark>}
 						</span>
 					</li>; })}
 					{outbounds.map(o => <li key={"o" + o.name}>
