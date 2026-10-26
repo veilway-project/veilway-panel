@@ -204,6 +204,9 @@ async fn flush_resets(app: &Arc<App>, node: Node) -> Result<(), String> {
 	Ok(())
 }
 
+/// How the error of a push starts when the node took the connection and refused the document.
+pub const REFUSED: &str = "the node refused the config with";
+
 /// Puts the panel's users into the node's running config. A stale revision is read again once. A remote node's push counts only once its node confirms it (see `Confirm`), and then the usage resets that wait for the node are sent.
 pub async fn sync(app: &Arc<App>, node: Node) -> Result<(), String> {
 	let _turn = app.turn(node).await;
@@ -264,7 +267,7 @@ pub async fn sync(app: &Arc<App>, node: Node) -> Result<(), String> {
 					return Ok(())
 				}
 				409 => continue,
-				other => return Err(format!("the node refused the config with {other}: {}", String::from_utf8_lossy(&body).chars().take(300).collect::<String>())),
+				other => return Err(format!("{REFUSED} {other}: {}", String::from_utf8_lossy(&body).chars().take(300).collect::<String>())),
 			}
 		}
 		Err("the node's config kept changing underneath the panel".into())

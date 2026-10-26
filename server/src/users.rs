@@ -1,12 +1,12 @@
 //! Users, their devices and their subscription links.
-use crate::{app::{App, Settings, LOCAL}, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, usage, subs::{self, DeviceRow, UserRow, USER_COLUMNS}};
+use crate::{app::{App, Node, Settings, LOCAL}, crypto::{self, now}, db::audit, http::{ok, Body, Ctx, Failure}, node, usage, subs::{self, DeviceRow, UserRow, USER_COLUMNS}};
 use axum::{extract::{Path, Query, State}, http::StatusCode, response::Response, Extension};
 use base64::{engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD}, Engine};
 use rusqlite::{params, Connection};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::{Arc, RwLock}};
+use std::{collections::{BTreeSet, HashMap}, sync::{Arc, RwLock}};
 use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 use veilway_proto::subscription::{link::{Carried, Link}, sealed_file};
@@ -158,6 +158,19 @@ async fn nodes_check(app: &App, nodes: &[i64]) -> Result<(), Failure> {
 /// Whether `exit` may be the default of a user with these exits. Whether the node has it is decided at the next sync.
 fn default_ok(exits: &Value, exit: &str) -> bool {name_ok(exit, false) && (exits == &json!("all") || exits.as_array().is_some_and(|tags| tags.iter().any(|tag| tag == exit)))}
 
+/// Refuses exit tags the user's node does not run, so a document the node would refuse whole is never sent. Node 1 refuses a user over an unknown tag, a remote node is only given the tags it has, so node 1 decides when the user may use it. When a node cannot be read, only the tags users already hold are taken.
+async fn exits_known(app: &App, nodes: &str, exits: Option<&Value>, default: Option<&str>) -> Result<(), Failure> {
+	let tags: Vec<String> = exits.and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).chain(default).map(str::to_string).collect();
+	if tags.is_empty() {return Ok(())}
+	let wanted: Vec<Node> = if subs::allowed(nodes, LOCAL) {vec![LOCAL]} else {app.nodes().into_iter().filter(|node| subs::allowed(nodes, *node)).collect()};
+	let (mut known, mut unread) = (BTreeSet::new(), false);
+	for node in wanted {match crate::nodecfg::running(app, node).await {Ok((_, _, document)) => known.extend(document["exits"].as_array().into_iter().flatten().filter_map(|exit| exit["tag"].as_str().map(str::to_string))), Err(_) => unread = true}}
+	if unread {known.extend(app.db.call(|db| db.prepare("select exits, default_exit from users")?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()).await??.into_iter().flat_map(|(exits, default)| serde_json::from_str::<Vec<String>>(&exits).unwrap_or_default().into_iter().chain(default)))}
+	let unknown: Vec<&str> = tags.iter().map(String::as_str).filter(|tag| !known.contains(*tag)).collect();
+	if !unknown.is_empty() {return Err(Failure::bad(format!("The node has no exit with the tag {}.{}", unknown.join(", "), if unread {" The node cannot be read now, so only exits users already hold are accepted."} else {""})))}
+	Ok(())
+}
+
 /// The rate cap the node takes, in bytes per second.
 const SPEED: std::ops::RangeInclusive<u64> = 16_384..=12_500_000_000;
 
@@ -208,6 +221,7 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	let (held, cache) = (app.clone(), app.settings.clone());
 	if let Some(name) = input.endpoint.as_deref() {if app.settings().named(name).is_none() {return Err(Failure::bad("endpoint is the name of one of the endpoints, or null."))}}
 	let nodes_text = input.nodes.as_ref().map_or("\"all\"".to_string(), |nodes| serde_json::to_string(nodes).unwrap_or_default());
+	exits_known(&app, &nodes_text, input.exits.as_ref(), input.exit.as_deref()).await?;
 	subs::profiles_fit(&app, &nodes_text).await?;
 	let order_text = match input.profile_order.clone().map(subs::order_checked).transpose()? {Some(order) if !order.is_empty() => serde_json::to_string(&order).ok(), _ => None};
 	let id = app.db.call(move |db| -> rusqlite::Result<i64> {
@@ -244,6 +258,7 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	let dirty = app.dirty_all();
 	let nodes_text = match &input.nodes {Some(Some(nodes)) => serde_json::to_string(nodes).unwrap_or_default(), Some(None) => "\"all\"".to_string(), None => user.nodes.clone()};
 	if nodes_text != user.nodes {subs::profiles_fit(&app, &nodes_text).await?}
+	exits_known(&app, &nodes_text, input.exits.as_ref(), input.exit.as_ref().and_then(|exit| exit.as_deref())).await?;
 	let order_text = match input.profile_order.clone() {Some(Some(order)) => Some(subs::order_checked(order)?).filter(|order| !order.is_empty()).and_then(|order| serde_json::to_string(&order).ok()), Some(None) => None, None => user.profile_order.clone()};
 	app.db.call(move |db| -> rusqlite::Result<()> {
 		db.execute("update users set name = ?, enabled = ?, groups = ?, exits = ?, quota_bytes = ?, quota_period = ?, expires_at = ?, device_limit = ?, note = ?, default_exit = ?, endpoint = ?, nodes = ?, profile_order = ?, speed_up = ?, speed_down = ? where id = ?", params![input.name.unwrap_or(user.name.clone()), input.enabled.unwrap_or(user.enabled), input.groups.map_or(user.groups.clone(), |groups| serde_json::to_string(&groups).unwrap_or_default()), serde_json::to_string(&exits).unwrap_or_default(), quota.map(|quota| quota as i64), quota.and(period), input.expires_at.unwrap_or(user.expires_at), input.device_limit.map_or(user.device_limit, i64::from), input.note.unwrap_or(user.note.clone()), exit, endpoint, nodes_text, order_text, speed_up.map(|speed| speed as i64), speed_down.map(|speed| speed as i64), id])?;
@@ -348,6 +363,7 @@ pub async fn bulk(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, B
 				"set_exits" => {
 					let exits = value.ok_or("value is \"all\" or a list of exit tags")?;
 					check(None, Some(&exits), None, None).map_err(|error| error.message)?;
+					exits_known(&app, &user.nodes, Some(&exits), None).await.map_err(|error| error.message)?;
 					let (stored, default_exit) = (serde_json::to_string(&exits).unwrap_or_default(), user.default_exit.filter(|exit| default_ok(&exits, exit)));
 					app.db.call(move |db| db.execute("update users set exits = ?, default_exit = ? where id = ?", params![stored, default_exit, id]).inspect(|_| dirty.set())).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
 				}

@@ -1114,7 +1114,7 @@ async fn a_default_exit_is_one_of_the_users_exits_and_goes_with_its_exit() {
 #[tokio::test]
 async fn bulk_exits_set_every_user_and_clear_defaults_they_leave_out() {
 	let mut document = node_document("10.66.0.1/24");
-	document["exits"] = json!([{"tag": "fra", "backend": {"type": "netstack", "outbound": "plain"}}, {"tag": "ams", "backend": {"type": "netstack", "outbound": "plain"}}]);
+	document["exits"] = json!([{"tag": "fra", "backend": {"type": "netstack", "outbound": "plain"}}, {"tag": "ams", "backend": {"type": "netstack", "outbound": "plain"}}, {"tag": "lon", "backend": {"type": "netstack", "outbound": "plain"}}]);
 	let (_fake, socket) = Fake::start(document).await;
 	let h = Harness::with_socket(Some(socket)).await;
 	let session = h.login("10.0.0.1").await;
@@ -1127,6 +1127,53 @@ async fn bulk_exits_set_every_user_and_clear_defaults_they_leave_out() {
 	assert_eq!(seen, vec![(json!(["ams", "lon"]), Value::Null), (json!(["ams", "lon"]), json!("ams"))], "ann's default fra is left out and cleared, bob's ams stays");
 	assert_eq!(h.call(Method::POST, "/p/api/users/bulk", Some(&session), Some(json!({"ids": [a, b], "action": "set_exits", "value": "all"})), "10.0.0.1").await.json()["done"], 2);
 	assert_eq!(h.call(Method::GET, &format!("/p/api/users/{b}"), Some(&session), None, "10.0.0.1").await.json()["exits"], "all");
+}
+
+#[tokio::test]
+async fn an_exit_the_node_does_not_run_is_refused_for_a_user_and_a_removed_exit_waits_for_the_users_that_name_it() {
+	let mut document = node_document("10.66.0.1/24");
+	document["exits"] = json!([{"tag": "fra", "backend": {"type": "netstack", "outbound": "plain"}}, {"tag": "ams", "backend": {"type": "netstack", "outbound": "plain"}}]);
+	let (_fake, socket) = Fake::start(document).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	let refused = h.call(Method::POST, "/p/api/users", Some(&session), Some(json!({"name": "ann", "exits": ["fra", "de"]})), "10.0.0.1").await;
+	assert_eq!(refused.status, StatusCode::BAD_REQUEST);
+	assert!(String::from_utf8_lossy(&refused.body).contains("de"), "{}", String::from_utf8_lossy(&refused.body));
+	assert_eq!(h.call(Method::POST, "/p/api/users", Some(&session), Some(json!({"name": "ann", "exit": "de"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST, "a default the node lacks, with all exits");
+	let id = h.call(Method::POST, "/p/api/users", Some(&session), Some(json!({"name": "ann", "exits": ["fra", "ams"]})), "10.0.0.1").await.json()["user"]["id"].as_i64().unwrap();
+	assert_eq!(h.call(Method::PATCH, &format!("/p/api/users/{id}"), Some(&session), Some(json!({"exits": ["de"]})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	assert_eq!(h.call(Method::PATCH, &format!("/p/api/users/{id}"), Some(&session), Some(json!({"exits": "all", "exit": "de"})), "10.0.0.1").await.status, StatusCode::BAD_REQUEST);
+	let bulk = h.call(Method::POST, "/p/api/users/bulk", Some(&session), Some(json!({"ids": [id], "action": "set_exits", "value": ["de"]})), "10.0.0.1").await.json();
+	assert_eq!(bulk["failed"].as_array().unwrap().len(), 1, "{bulk}");
+	assert_eq!(h.call(Method::GET, &format!("/p/api/users/{id}"), Some(&session), None, "10.0.0.1").await.json()["exits"], json!(["fra", "ams"]), "nothing was stored");
+	let revision = h.call(Method::GET, "/p/api/config/exits", Some(&session), None, "10.0.0.1").await.json()["revision"].clone();
+	let kept = json!([{"tag": "ams", "backend": {"type": "netstack", "outbound": "plain"}}]);
+	let held = h.call(Method::PUT, "/p/api/config/exits", Some(&session), Some(json!({"revision": revision, "value": kept.clone()})), "10.0.0.1").await;
+	assert_eq!(held.status, StatusCode::CONFLICT);
+	assert!(String::from_utf8_lossy(&held.body).contains("ann (fra)"), "{}", String::from_utf8_lossy(&held.body));
+	assert_eq!(h.call(Method::PATCH, &format!("/p/api/users/{id}"), Some(&session), Some(json!({"exits": ["ams"]})), "10.0.0.1").await.status, StatusCode::OK);
+	let revision = h.call(Method::GET, "/p/api/config/exits", Some(&session), None, "10.0.0.1").await.json()["revision"].clone();
+	let applied = h.call(Method::PUT, "/p/api/config/exits", Some(&session), Some(json!({"revision": revision, "value": kept})), "10.0.0.1").await;
+	assert_eq!(applied.status, StatusCode::OK, "{}", String::from_utf8_lossy(&applied.body));
+}
+
+#[tokio::test]
+async fn a_push_the_node_refused_shows_in_the_node_status_until_a_push_works() {
+	let (fake, socket) = Fake::start(node_document("10.66.0.1/24")).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	assert_eq!(h.call(Method::GET, "/p/api/node", Some(&session), None, "10.0.0.1").await.json()["push_refused"], Value::Null);
+	let id = h.call(Method::POST, "/p/api/users", Some(&session), Some(json!({"name": "ann"})), "10.0.0.1").await.json()["user"]["id"].as_i64().unwrap();
+	fake.refuse.store(true, Ordering::Relaxed);
+	let changed = h.call(Method::PATCH, &format!("/p/api/users/{id}"), Some(&session), Some(json!({"note": "x"})), "10.0.0.1").await.json();
+	assert_eq!(changed["node"]["synced"], false);
+	let shown = h.call(Method::GET, "/p/api/node", Some(&session), None, "10.0.0.1").await.json()["push_refused"].as_str().unwrap().to_string();
+	assert!(shown.starts_with("the node refused the config with 422"), "{shown}");
+	let nodes = h.call(Method::GET, "/p/api/nodes", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!(nodes["nodes"][0]["last_error"], shown.as_str());
+	fake.refuse.store(false, Ordering::Relaxed);
+	assert_eq!(h.call(Method::POST, "/p/api/node/sync", Some(&session), None, "10.0.0.1").await.json()["synced"], true);
+	assert_eq!(h.call(Method::GET, "/p/api/node", Some(&session), None, "10.0.0.1").await.json()["push_refused"], Value::Null);
 }
 
 #[tokio::test]

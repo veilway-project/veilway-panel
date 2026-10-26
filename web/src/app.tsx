@@ -93,7 +93,7 @@ function Root({prefs, onPrefs}: {prefs: Prefs, onPrefs: (prefs: Prefs) => void})
 function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: {hash: string, username: string, httpBanner: ReactNode, twoStep: boolean, prefs: Prefs, onPrefs: (prefs: Prefs) => void, onLogout: () => void}) {
 	const {t, number} = useP(), path = hash.replace(/^#\/?/, ""), parts = path.split("/"), page = PAGES.includes(parts[0]!) ? parts[0]! : "dashboard", sub = parts[1] ?? "";
 	const [collapsed, setCollapsed] = useState(() => { try { return localStorage.getItem(SIDEBAR) === "collapsed"; } catch { return false; } }), [open, setOpen] = useState(false), menu = useRef<HTMLButtonElement>(null), side = useRef<HTMLElement>(null);
-	const node = useLoad(() => api("get", "/node"), []), live = useLoad(() => api("get", "/stats/now"), []), links = useLoad(() => api("get", "/links") as Promise<{links: NodeLink[] | null}>, []), servers = useLoad(() => api("get", "/nodes").then(answer => answer.nodes, () => [] as NodeRow[]), []), [picked, setPicked] = useState(1);
+	const node = useLoad(() => api("get", "/node"), [hash]), live = useLoad(() => api("get", "/stats/now"), []), links = useLoad(() => api("get", "/links") as Promise<{links: NodeLink[] | null}>, []), servers = useLoad(() => api("get", "/nodes").then(answer => answer.nodes, () => [] as NodeRow[]), []), [picked, setPicked] = useState(1);
 	const counts = useLoad(() => Promise.allSettled([api("get", "/users"), loadRunning(), api("get", "/xray")]).then(([users, running, xray]) => ({users: users.status === "fulfilled" ? users.value.users.length : undefined, inbounds: running.status === "fulfilled" ? ((running.value.document.inbounds as unknown[] | undefined)?.length ?? 0) + (xray.status === "fulfilled" ? xray.value.inbounds.length : 0) : undefined})), []);
 	useEffect(() => { const moved = MOVED[path] ?? MOVED[parts[0]!]; if (moved) location.replace("#/" + moved); }, [path]);
 	useEffect(() => { const timer = setInterval(() => { node.reload(); live.reload(); links.reload(); counts.reload(); servers.reload(); }, 30000); return () => clearInterval(timer); }, [node.reload, live.reload, links.reload, counts.reload, servers.reload]);
@@ -214,10 +214,12 @@ function UpdateBanner() {
 }
 
 // The node's health in one line at the top of every page, with the one action that can fix a missed push.
-function NodeBanner({node, onPushed}: {node: {keys_missing: boolean, reachable: boolean} | null, onPushed: () => void}) {
+function NodeBanner({node, onPushed}: {node: {keys_missing: boolean, reachable: boolean, push_refused?: string | null} | null, onPushed: () => void}) {
 	const {t} = useP(), say = useSay(), toast = useToast(), [busy, setBusy] = useState(false);
 	if (!node) return null;
 	if (node.keys_missing) return <Banner tone="danger" title={t("error.keys_missing")}>{t("banner.node.keys")}</Banner>;
+	const push = <Button size="sm" icon="refresh" disabled={busy} onClick={() => { setBusy(true); void api("post", "/node/sync").then(answer => { toast(answer.synced ? {tone: "success", title: t("banner.node.pushed")} : {tone: "danger", title: say(new Error(answer.error ?? t("error.node_unreachable")))}); onPushed(); }, failure => toast({tone: "danger", title: say(failure)})).finally(() => setBusy(false)); }}>{node.push_refused ? t("banner.node.pushAgain") : t("banner.node.push")}</Button>;
+	if (node.push_refused) return <Banner tone="danger" title={t("banner.node.refused")} action={push}>{t("banner.node.refusedBody", {error: node.push_refused})}</Banner>;
 	if (node.reachable) return null;
-	return <Banner tone="warning" title={t("banner.node.title")} action={<Button size="sm" icon="refresh" disabled={busy} onClick={() => { setBusy(true); void api("post", "/node/sync").then(answer => { toast(answer.synced ? {tone: "success", title: t("banner.node.pushed")} : {tone: "danger", title: say(new Error(answer.error ?? t("error.node_unreachable")))}); onPushed(); }, failure => toast({tone: "danger", title: say(failure)})).finally(() => setBusy(false)); }}>{t("banner.node.push")}</Button>}>{t("banner.node.body")}</Banner>;
+	return <Banner tone="warning" title={t("banner.node.title")} action={push}>{t("banner.node.body")}</Banner>;
 }

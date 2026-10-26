@@ -142,6 +142,18 @@ pub(crate) async fn apply(app: &Arc<App>, node: Node, ctx: &Ctx, document: Value
 	if crate::borrowed::sensitive(&before, &document) {reauthed(app, ctx).await?}
 	let found = [crate::borrowed::problems(&document, &before), crate::via::problems(&document, &before)].concat();
 	if !found.is_empty() {return Err(invalid(&found))}
+	if node == LOCAL {
+		let tags = |document: &Value| document["exits"].as_array().into_iter().flatten().filter_map(|exit| exit["tag"].as_str().map(str::to_string)).collect::<BTreeSet<_>>();
+		let (was, now) = (tags(&before), tags(&document));
+		// Refused and not mended: dropping a tag from a user's list would change who may use what, and a list that ends up empty is the operator's to decide.
+		let named: Vec<String> = app.db.call(move |db| -> rusqlite::Result<Vec<String>> {
+			Ok(db.prepare("select name, exits, nodes from users order by id")?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().filter(|(_, _, nodes)| subs::allowed(nodes, LOCAL)).filter_map(|(name, exits, _)| {
+				let gone: Vec<String> = serde_json::from_str::<Vec<String>>(&exits).unwrap_or_default().into_iter().filter(|tag| was.contains(tag) && !now.contains(tag)).collect();
+				(!gone.is_empty()).then(|| format!("{name} ({})", gone.join(", ")))
+			}).collect())
+		}).await??;
+		if !named.is_empty() {return Err(Failure::conflict(format!("Users still name an exit this change removes: {}{}. Take the exit out of their exits first (bulk action set_exits), then remove it.", named.iter().take(20).cloned().collect::<Vec<_>>().join(", "), if named.len() > 20 {format!(" and {} more", named.len() - 20)} else {String::new()})))}
+	}
 	let (status, checked) = call(app, node, "POST", "/v1/config/validate", None, Some(&document)).await?;
 	if status != 200 || checked.get("valid") != Some(&Value::Bool(true)) {return Err(Failure::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_config", checked.to_string().chars().take(4000).collect::<String>()))}
 	let answer = call(app, node, "PUT", "/v1/config", Some(revision), Some(&document)).await;

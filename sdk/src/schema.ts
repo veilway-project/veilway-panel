@@ -2389,6 +2389,8 @@ export interface components {
             gateway_switch_due: boolean;
             keys_missing: boolean;
             last_sync?: string | null;
+            /** @description Why the node refused the last users the panel sent, null while pushes work or fail only for another reason (the node cannot be reached). No user change reaches the node until this is fixed. */
+            push_refused?: string | null;
             reachable: boolean;
             status?: unknown;
         };

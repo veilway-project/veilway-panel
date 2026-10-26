@@ -644,12 +644,15 @@ pub struct NodeInfo {pub reachable: bool, pub status: Option<Value>, pub last_sy
 	/// The active gateway key is older than 180 days: time to load the next key.
 	pub gateway_switch_due: bool,
 	/// Whether the system reports its clock as synchronized, null when it cannot tell. A panel whose clock is off by more than a day writes static mirror names that no client asks for.
-	pub clock_synchronized: Option<bool>}
+	pub clock_synchronized: Option<bool>,
+	/// Why the node refused the last users the panel sent, null while pushes work or fail only for another reason (the node cannot be reached). No user change reaches the node until this is fixed.
+	pub push_refused: Option<String>}
 
 pub async fn node_info(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let status = match node::request(&app, LOCAL, "GET", "/v1/status", None, None).await {Ok((200, body)) => serde_json::from_slice(&body).ok(), _ => None};
 	let (gateway_missing, gateway_switch_due) = {let hold = app.gateway.lock().unwrap_or_else(|poisoned| poisoned.into_inner()); (!hold.loaded(), hold.active().is_some_and(|key| now() - key.created > crate::gateway::REMIND_AFTER))};
-	ok(&NodeInfo {reachable: status.is_some(), status, last_sync: app.node(LOCAL).last_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(), keys_missing: app.keys.is_none(), gateway_missing, gateway_switch_due, clock_synchronized: crate::statics::clock_synchronized()})
+	let push_refused = app.db.call(|db| db.query_row("select last_error from nodes where id = ?", [LOCAL.0], |row| row.get::<_, Option<String>>(0))).await.ok().and_then(Result::ok).flatten().filter(|error| error.starts_with(crate::node::REFUSED));
+	ok(&NodeInfo {reachable: status.is_some(), status, last_sync: app.node(LOCAL).last_sync.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone(), keys_missing: app.keys.is_none(), gateway_missing, gateway_switch_due, clock_synchronized: crate::statics::clock_synchronized(), push_refused})
 }
 
 pub async fn node_sync(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {

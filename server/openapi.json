@@ -1868,6 +1868,13 @@
               "null"
             ]
           },
+          "push_refused": {
+            "description": "Why the node refused the last users the panel sent, null while pushes work or fail only for another reason (the node cannot be reached). No user change reaches the node until this is fixed.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "reachable": {
             "type": "boolean"
           },
