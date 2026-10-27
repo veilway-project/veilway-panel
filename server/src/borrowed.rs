@@ -5,10 +5,14 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, net::{IpAddr, SocketAddr}};
 use veilway_proto::subscription::{is_host, payload::{dialable, CANDIDATES_MAX}};
 
-/// The profile member a faketls profile never takes from the overrides of its inbound: the label, the id, the type, the keys that belong to the other transports, and the cap on how it is rated, which is the transport's own and stays at Detectable.
+/// The profile member a faketls profile never takes from the overrides of its inbound as written: the label, which is the override's name (or the inbound's tag) with `SUFFIX`, the id, the type, the keys that belong to the other transports, and the cap on how it is rated, which is the transport's own and stays at Detectable.
 const OWN: [&str; 6] = ["id", "name", "type", "transports", "transport_public_key", "rating_cap"];
 /// The override member that lists more addresses the node is reached at, such as a forwarder's. Each is an IP address, which takes the listener's port, or an address with a port. It becomes candidates of the faketls transports and nothing else, and no other profile takes it.
 pub const ADDRESSES: &str = "faketls_addresses";
+/// What the label of a faketls profile always ends with, so that a user is told the transport is an alpha one whatever the provider names it.
+const SUFFIX: &str = " (borrowed site, alpha)";
+/// The most characters a profile's name has in a subscription.
+const NAME_MAX: usize = 64;
 /// What a `faketls` transport never has: it ends no TLS, has no decoy origin and no path, and sits behind no proxy.
 const NOT: [&str; 7] = ["path", "tls", "decoy", "trusted_proxies", "client_address_header", "shape", "http2"];
 const SITE: [&str; 6] = ["host", "names", "port", "address", "outbound", "acknowledged"];
@@ -157,7 +161,8 @@ pub fn template(settings: &Settings, document: &Value, inbound: &Value, gateways
 			(why, ..) => refused.push(json!({"transport": listen, "code": why.map(|(code, _)| code).unwrap_or("unreadable"), "reason": why.map(|(_, reason)| reason).unwrap_or("it does not read")})),
 		}
 	}
-	let mut profile = json!({"id": id, "name": format!("{tag} (borrowed site, alpha)"), "type": "veilway", "gateways": gateways, "mtu": inbound["mtu"].as_u64().unwrap_or(1420), "transports": emitted, "rating_cap": "detectable"});
+	let base = settings.profile_overrides.get(tag).and_then(|edits| edits["name"].as_str()).map(str::trim).filter(|name| !name.is_empty()).unwrap_or(tag);
+	let mut profile = json!({"id": id, "name": format!("{}{SUFFIX}", base.chars().take(NAME_MAX - SUFFIX.chars().count()).collect::<String>().trim_end()), "type": "veilway", "gateways": gateways, "mtu": inbound["mtu"].as_u64().unwrap_or(1420), "transports": emitted, "rating_cap": "detectable"});
 	if let Some(public) = settings.inbound_keys.get(tag) {profile["inbound_public_key"] = json!(public);}
 	let edits = settings.profile_overrides.get(tag).and_then(Value::as_object);
 	for (key, value) in edits.into_iter().flatten().filter(|(key, _)| !OWN.contains(&key.as_str()) && *key != ADDRESSES && !crate::nodecfg::NOT_MEMBERS.contains(&key.as_str())) {profile[key] = value.clone();}
@@ -304,10 +309,22 @@ mod tests {
 		settings.profile_overrides.insert("Main".into(), json!({"inbound_public_key": key(7), "name": "Edited", "transports": [], "transport_public_key": key(8), "id": "x", "parallel": 2, "rating_cap": "unsafe", "type": "other"}));
 		let template = made(&settings, &document);
 		let profile = &template["profile"];
-		assert_eq!((profile["inbound_public_key"].clone(), profile["parallel"].clone(), profile["name"].clone(), profile["id"].clone(), profile["transports"].as_array().unwrap().len(), template["missing"].clone()), (json!(key(7)), json!(2), json!("Main (borrowed site, alpha)"), json!("main-faketls"), 1, json!([])));
+		assert_eq!((profile["inbound_public_key"].clone(), profile["parallel"].clone(), profile["name"].clone(), profile["id"].clone(), profile["transports"].as_array().unwrap().len(), template["missing"].clone()), (json!(key(7)), json!(2), json!("Edited (borrowed site, alpha)"), json!("main-faketls"), 1, json!([])));
 		assert!(profile.get("transport_public_key").is_none());
 		assert_eq!((profile["rating_cap"].clone(), profile["type"].clone()), (json!("detectable"), json!("veilway")), "the cap and the type are the transport's own");
 		assert_eq!(template["overridden"], json!(["inbound_public_key", "parallel"]));
+	}
+
+	#[test]
+	fn the_label_is_the_name_of_the_inbound_override_with_the_suffix_and_fits_a_subscription() {
+		let document = document(vec![transport(json!({}))]);
+		let mut settings = settings(&document);
+		for (name, label) in [(json!("  "), "Main (borrowed site, alpha)".to_string()), (json!(7), "Main (borrowed site, alpha)".to_string()), (json!("Germany"), "Germany (borrowed site, alpha)".to_string()), (json!("x".repeat(80)), format!("{}{SUFFIX}", "x".repeat(41)))] {
+			settings.profile_overrides.insert("Main".into(), json!({"name": name}));
+			let made = made(&settings, &document)["profile"]["name"].as_str().unwrap().to_string();
+			assert!(made.chars().count() <= NAME_MAX, "{made}");
+			assert_eq!(made, label);
+		}
 	}
 
 	#[test]

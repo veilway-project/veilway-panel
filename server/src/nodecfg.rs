@@ -366,7 +366,9 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 	let inbounds = document.get("inbounds").and_then(Value::as_array).cloned().unwrap_or_default();
 	let reached = reaching(relays, user);
 	// Every profile is made up to its overrides first, since the host names and paths a `ws-plain` transport must not share are those of all the inbounds: one subscription carries them all.
-	let bases: Vec<(&Value, String, Value, Vec<Value>, Vec<Value>)> = inbounds.iter().filter(|inbound| inbound["type"] == "veilway").map(|inbound| {
+	// An inbound a node link connects to carries no user's device, so it has no profile.
+	let linked: Vec<&Value> = document["links"].as_array().into_iter().flatten().filter_map(|link| link.get("inbound")).collect();
+	let bases: Vec<(&Value, String, Value, Vec<Value>, Vec<Value>)> = inbounds.iter().filter(|inbound| inbound["type"] == "veilway" && !linked.contains(&&inbound["tag"])).map(|inbound| {
 		let (tag, host) = (inbound["tag"].as_str().unwrap_or_default().to_string(), settings.node_host.as_str());
 		let transports = live(inbound);
 		// The node takes its default `mtu` from every transport the inbound has, switched off or not.
@@ -717,6 +719,15 @@ mod tests {
 		let mut relay = json!({"name": "edge", "address": "198.51.100.7", "enabled": true});
 		relay.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
 		serde_json::from_value(relay).unwrap()
+	}
+
+	#[test]
+	fn an_inbound_a_link_connects_to_gets_no_profile() {
+		let mut document = document();
+		document["links"] = json!([{"tag": "edge", "inbound": "Other"}, {"tag": "out", "peer": {}}]);
+		let settings = Settings {node_host: "192.0.2.10".into(), ..Settings::default()};
+		let tags: Vec<Value> = derive(&settings, &document, &[], None, &Exposure::default(), false).into_iter().map(|template| template["inbound"].clone()).collect();
+		assert!(tags.contains(&json!("Main")) && !tags.contains(&json!("Other")), "{tags:?}");
 	}
 
 	fn derived(relays: Vec<Relay>) -> Vec<Value> {
