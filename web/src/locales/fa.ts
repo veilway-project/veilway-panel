@@ -1608,7 +1608,6 @@ export const fa: Record<PanelKey, string> = {
 	"side.version": "Veilway {version}",
 	"side.online": "برخط",
 	"side.config": "نسخهٔ پیکربندی",
-	"side.configNo": "{generation}، از آغاز راه‌اندازی نود شمرده می‌شود",
 	"side.configHint": "با هر تغییری که به نود می‌رسد یک واحد بالا می‌رود. با راه‌اندازی دوباره نود از ۱ شروع می‌شود.",
 	"side.links": "پیوندهای فعال",
 	"side.linksUp": "{up} از {total}",

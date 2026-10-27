@@ -61,7 +61,7 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 				<div className="p-sheet-head"><div><strong className="vw-h3"><bdi className="vw-code" dir="ltr">{status?.public_addresses?.[0] ?? t("side.thisNode")}</bdi></strong><span className="vw-small vw-muted">{t("nodes.this")}</span></div><Mark tone={reachable ? "success" : "danger"}>{reachable ? t("side.running") : t("side.unreachable")}</Mark></div>
 				<dl>
 					<div><dt>{t("nodes.online")}</dt><dd className="vw-num">{online === undefined ? t("users.usageUnknown") : number(online)}</dd></div>
-					{status?.generation !== undefined && <div><dt>{t("side.config")}</dt><dd className="vw-num" title={t("side.configHint")}>{t("side.configNo", {generation: number(status.generation)})}</dd></div>}
+					{status?.generation !== undefined && <div><dt>{t("side.config")}</dt><dd className="vw-num" title={t("side.configHint")}>{number(status.generation)}</dd></div>}
 					{status?.uptime_secs !== undefined && <div><dt>{t("side.uptime")}</dt><dd className="vw-num">{span(status.uptime_secs)}</dd></div>}
 					{status?.version && <div><dt>{t("nodes.version")}</dt><dd className="vw-code">{status.version}</dd></div>}
 				</dl>

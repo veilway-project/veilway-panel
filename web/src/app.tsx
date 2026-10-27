@@ -139,7 +139,7 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 						{status?.version && <span className="p-node-host vw-small vw-muted">{t("side.version", {version: status.version})}</span>}
 						{node.data?.reachable && <dl className="p-node-meta">
 							<div><dt>{t("side.online")}</dt><dd className="vw-num">{online === undefined ? "" : t("count.users", {count: online})}</dd></div>
-							{status?.generation !== undefined && <div><dt>{t("side.config")}</dt><dd className="vw-num" title={t("side.configHint")}>{t("side.configNo", {generation: number(status.generation)})}</dd></div>}
+							{status?.generation !== undefined && <div><dt>{t("side.config")}</dt><dd className="vw-num" title={t("side.configHint")}>{number(status.generation)}</dd></div>}
 							{list.length > 0 && <div><dt>{t("side.links")}</dt><dd className="vw-num">{t("side.linksUp", {up: number(up), total: number(list.length)})}</dd></div>}
 							{status?.uptime_secs !== undefined && <div><dt>{t("side.uptime")}</dt><dd className="vw-num">{(span => t(span.key, {count: span.count}))(ago(status.uptime_secs))}</dd></div>}
 						</dl>}

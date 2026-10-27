@@ -65,7 +65,7 @@
 .p-node { overflow: hidden; }
 .p-nav .vw-nav-item > .vw-icon { flex: none; }
 .p-node-host { max-block-size: 1.6rem; }
-.p-node-meta { max-block-size: 7rem; overflow: hidden; }
+.p-node-meta { max-block-size: 14rem; overflow: hidden; }
 .p-nav-label { max-block-size: 2rem; overflow: hidden; }
 .p-nav-group + .p-nav-group { border-block-start: 1px solid transparent; }
 .p-account { position: relative; padding-inline-end: calc(var(--control-h) + var(--s-3) + var(--s-1)); }

@@ -1607,7 +1607,6 @@ export const en = {
 	"side.version": "Veilway {version}",
 	"side.online": "Online",
 	"side.config": "Config version",
-	"side.configNo": "{generation}, counted since the node started",
 	"side.configHint": "Goes up by one each time a change reaches the node. Starts at 1 again when the node restarts.",
 	"side.links": "Links up",
 	"side.linksUp": "{up} of {total}",
