@@ -137,6 +137,8 @@ async fn login_totp_rate_limit_and_csrf() {
 	let wrong_code = h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD, "totp": "000000"})), "10.0.0.2").await;
 	assert_eq!((wrong_password.status, wrong_code.status), (StatusCode::UNAUTHORIZED, StatusCode::UNAUTHORIZED));
 	assert_eq!(wrong_password.body, wrong_code.body, "a wrong password and a wrong code look the same");
+	// The second login must fall in the same 30 s step as the first, or h.code(0) is a new code and rightly works.
+	if crypto::now() % 30 > 20 {tokio::time::sleep(std::time::Duration::from_secs((31 - crypto::now() % 30) as u64)).await;}
 	let session = h.login("10.0.0.3").await;
 	let set_cookie = h.call(Method::POST, "/p/api/login", None, Some(json!({"username": "owner", "password": PASSWORD, "totp": h.code(0)})), "10.0.0.3").await;
 	assert_eq!(set_cookie.status, StatusCode::UNAUTHORIZED, "a used code works once");
