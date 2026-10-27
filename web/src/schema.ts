@@ -1702,6 +1702,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/web/routes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The paths of the node that sit behind a web server on loopback (enabled `ws` and `fronted` transports with a path), as the panel would send them now, the paths left out with the reason, and the host helper's answer to its last run. */
+        get: operations["webRoutes"];
+        put?: never;
+        /** Asks the host to make its web server send every one of those paths to the node, replacing what was added before. The host script sets this up when it installed the web server. Needs a recent re-authentication and is audited. No API token can do this. */
+        post: operations["sendWebRoutes"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/xray": {
         parameters: {
             query?: never;
@@ -3481,6 +3499,43 @@ export interface components {
         };
         UsersOut: {
             users: components["schemas"]["UserOut"][];
+        };
+        /** @description What the root helper wrote to `web-routes.result` after its last run. */
+        WebResult: {
+            /** Format: int64 */
+            at: number;
+            message: string;
+            ok: boolean;
+            /** Format: uint32 */
+            routes: number;
+            web: string;
+        };
+        /** @description One path of the node that the web server sends to a loopback listener. This is what `web-routes.json` holds. */
+        WebRoute: {
+            path: string;
+            /** Format: uint16 */
+            port: number;
+            type: string;
+        };
+        WebRoutes: {
+            /** @description The helper's answer to its last run, when there is one. */
+            result?: components["schemas"]["WebResult"] | null;
+            /** @description The routes the panel sends now, or sent just now. */
+            routes: components["schemas"]["WebRoute"][];
+            /**
+             * Format: int64
+             * @description When this request was written, which the helper's `at` is compared with. Only a request has one.
+             */
+            sent_at?: number | null;
+            /** @description The paths left out and why. */
+            skipped: components["schemas"]["WebSkipped"][];
+            /** @description A request is waiting for the root service. */
+            waiting: boolean;
+        };
+        /** @description A path of the node that is left out of the routes, and why. */
+        WebSkipped: {
+            path: string;
+            reason: string;
         };
         WireguardConfig: {
             /** @description A wg-quick file. It holds the device's private key. */
@@ -10202,6 +10257,118 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Rotated"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    webRoutes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebRoutes"];
+                };
+            };
+            /** @description The request is malformed or breaks a rule. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not logged in, or the token is not valid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Not allowed: wrong scope, missing CSRF token or a re-authentication is due. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    sendWebRoutes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Done. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebRoutes"];
                 };
             };
             /** @description The request is malformed or breaks a rule. */

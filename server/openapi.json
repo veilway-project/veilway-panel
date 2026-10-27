@@ -4650,6 +4650,123 @@
         ],
         "type": "object"
       },
+      "WebResult": {
+        "description": "What the root helper wrote to `web-routes.result` after its last run.",
+        "properties": {
+          "at": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "routes": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "web": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "message",
+          "at",
+          "routes",
+          "web"
+        ],
+        "type": "object"
+      },
+      "WebRoute": {
+        "description": "One path of the node that the web server sends to a loopback listener. This is what `web-routes.json` holds.",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "port": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "port",
+          "type"
+        ],
+        "type": "object"
+      },
+      "WebRoutes": {
+        "properties": {
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WebResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The helper's answer to its last run, when there is one."
+          },
+          "routes": {
+            "description": "The routes the panel sends now, or sent just now.",
+            "items": {
+              "$ref": "#/components/schemas/WebRoute"
+            },
+            "type": "array"
+          },
+          "sent_at": {
+            "description": "When this request was written, which the helper's `at` is compared with. Only a request has one.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "skipped": {
+            "description": "The paths left out and why.",
+            "items": {
+              "$ref": "#/components/schemas/WebSkipped"
+            },
+            "type": "array"
+          },
+          "waiting": {
+            "description": "A request is waiting for the root service.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "routes",
+          "skipped",
+          "waiting"
+        ],
+        "type": "object"
+      },
+      "WebSkipped": {
+        "description": "A path of the node that is left out of the routes, and why.",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "reason"
+        ],
+        "type": "object"
+      },
       "WireguardConfig": {
         "properties": {
           "content": {
@@ -12663,6 +12780,124 @@
           }
         },
         "summary": "Gives the user new credentials in every Xray inbound. Their old share links stop working once the node takes the change. Needs a recent re-authentication and is audited.",
+        "x-access": "session-reauth"
+      }
+    },
+    "/web/routes": {
+      "get": {
+        "operationId": "webRoutes",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebRoutes"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "The paths of the node that sit behind a web server on loopback (enabled `ws` and `fronted` transports with a path), as the panel would send them now, the paths left out with the reason, and the host helper's answer to its last run.",
+        "x-access": "read"
+      },
+      "post": {
+        "operationId": "sendWebRoutes",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebRoutes"
+                }
+              }
+            },
+            "description": "Done."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "The request is malformed or breaks a rule."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not logged in, or the token is not valid."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Not allowed: wrong scope, missing CSRF token or a re-authentication is due."
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "Rate limited."
+          }
+        },
+        "summary": "Asks the host to make its web server send every one of those paths to the node, replacing what was added before. The host script sets this up when it installed the web server. Needs a recent re-authentication and is audited. No API token can do this.",
         "x-access": "session-reauth"
       }
     },

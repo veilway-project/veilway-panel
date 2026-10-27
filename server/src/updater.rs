@@ -1,5 +1,5 @@
 //! Finding out that a newer panel or node exists, and asking for it. The panel runs unprivileged and never updates itself: a request is a file with the word `panel`, `node` or `both` in a folder only the panel and root can write, which a root service on the host answers (see `veilway.sh`). Everything GitHub sends is untrusted.
-use crate::{app::App, crypto::now, http::{ok, Body, Ctx, Failure}};
+use crate::{app::{App, LOCAL}, crypto::now, nodecfg, http::{ok, Body, Ctx, Failure}};
 use axum::{extract::State, http::StatusCode, response::Response, Extension};
 use http_body_util::{BodyExt, Empty, Limited};
 use hyper::{body::Bytes, Request};
@@ -8,7 +8,7 @@ use rustls::pki_types::ServerName;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{cmp::Ordering, fs::OpenOptions, io::{ErrorKind, Write}, os::unix::fs::OpenOptionsExt, sync::Arc, time::Duration};
+use std::{cmp::Ordering, fs::OpenOptions, io::{ErrorKind, Read, Write}, net::{IpAddr, SocketAddr}, os::unix::fs::OpenOptionsExt, path::Path, sync::Arc, time::Duration};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
@@ -216,15 +216,15 @@ pub async fn info(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 pub struct Requested {pub ok: bool, pub version: String, pub part: Part}
 
 /// Puts `word` in the request file for the root service. Written whole under another name and renamed, so the path unit only ever sees a complete file. The root side reads `request` alone and ignores the other name.
-fn write_request(app: &App, word: &str) -> Result<(), Failure> {
-	if app.cfg.update_request.exists() {return Err(Failure::conflict("An update or a restart is already requested."))}
-	let temporary = app.cfg.update_request.with_extension("tmp");
+fn write_request(request: &Path, word: &str) -> Result<(), Failure> {
+	if request.exists() {return Err(Failure::conflict("An update or a restart is already requested."))}
+	let temporary = request.with_extension("tmp");
 	let _ = std::fs::remove_file(&temporary);
 	let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary).map_err(|error| match error.kind() {
 		ErrorKind::NotFound | ErrorKind::PermissionDenied => Failure::conflict("This server has no update service. Run `sudo bash veilway.sh update panel` on it once."),
 		_ => Failure::internal(error),
 	})?;
-	file.write_all(word.as_bytes()).and_then(|()| file.sync_all()).and_then(|()| std::fs::rename(&temporary, &app.cfg.update_request)).map_err(Failure::internal)
+	file.write_all(word.as_bytes()).and_then(|()| file.sync_all()).and_then(|()| std::fs::rename(&temporary, request)).map_err(Failure::internal)
 }
 
 /// Asks the host to restart the node, the panel or both. The host script of v0.2.9 or later does it; an older one ignores the request, and its next update installs one that does.
@@ -232,7 +232,7 @@ pub async fn restart(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 	{
 		let state = app.update.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		if state.requested_at.is_some_and(|at| now() - at < UPDATING) && state.requested.is_some() {return Err(Failure::conflict("An update was requested a moment ago."))}
-		write_request(&app, &format!("restart-{}", input.part.word()))?;
+		write_request(&app.cfg.update_request, &format!("restart-{}", input.part.word()))?;
 	}
 	app.db.audit(&ctx.actor, &ctx.source, "restart.request", input.part.word(), "").await;
 	ok(&json!({"ok": true, "part": input.part}))
@@ -252,7 +252,7 @@ pub async fn request(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 		let (panel, node) = (panel.filter(|_| part != Part::Node), node.filter(|_| part != Part::Panel));
 		let changes: Vec<String> = [panel.as_ref().map(|found| format!("panel from {CURRENT} to {}", found.version)), node.as_ref().map(|found| format!("node from {} to {}", node_now.as_deref().unwrap_or_default(), found.version))].into_iter().flatten().collect();
 		let version = panel.or(node).map(|found| found.version).unwrap_or_default();
-		write_request(&app, part.word())?;
+		write_request(&app.cfg.update_request, part.word())?;
 		(state.requested_at, state.requested, state.node_from) = (Some(now()), Some(part), node_now);
 		(part, changes.join("; "), version)
 	};
@@ -260,9 +260,101 @@ pub async fn request(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>
 	ok(&Requested {ok: true, version, part})
 }
 
+/// One path of the node that the web server sends to a loopback listener. This is what `web-routes.json` holds.
+#[derive(Serialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+pub struct WebRoute {pub path: String, pub port: u16, #[serde(rename = "type")] pub kind: String}
+
+/// A path of the node that is left out of the routes, and why.
+#[derive(Serialize, JsonSchema, Debug, PartialEq, Eq)]
+pub struct WebSkipped {pub path: String, pub reason: String}
+
+/// What the root helper wrote to `web-routes.result` after its last run.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Eq)]
+pub struct WebResult {pub ok: bool, pub message: String, pub at: i64, pub routes: u32, pub web: String}
+
+#[derive(Serialize, JsonSchema)]
+pub struct WebRoutes {
+	/// The routes the panel sends now, or sent just now.
+	pub routes: Vec<WebRoute>,
+	/// The paths left out and why.
+	pub skipped: Vec<WebSkipped>,
+	/// The helper's answer to its last run, when there is one.
+	pub result: Option<WebResult>,
+	/// A request is waiting for the root service.
+	pub waiting: bool,
+	/// When this request was written, which the helper's `at` is compared with. Only a request has one.
+	pub sent_at: Option<i64>,
+}
+
+const WEB_MAX: usize = 32;
+/// The helper's answer is a short line. Past this it is not read.
+const RESULT_MAX: u64 = 8192;
+
+/// The path rule of the root helper, so a route sent is never refused there.
+fn web_path_problem(path: &str, prefix: &str, sub_path: &str) -> Option<&'static str> {
+	let bytes = path.as_bytes();
+	if !(13..=129).contains(&bytes.len()) || bytes[0] != b'/' || !bytes[1..].iter().all(|byte| byte.is_ascii_alphanumeric() || b"._~-/".contains(byte)) || bytes[1] == b'/' {return Some("The path is 12 to 128 characters after the slash: letters, digits and . _ ~ - /")}
+	if path.contains("//") || path.contains("..") {return Some("The path has // or ..")}
+	if [prefix, sub_path].iter().any(|own| path == *own || path.starts_with(&format!("{own}/")) || own.starts_with(path)) {return Some("The path is the panel's own, under it or the start of it")}
+	None
+}
+
+/// The paths of the node's running config that sit behind a web server: the enabled `ws` and `fronted` transports of enabled veilway inbounds with a path and a listener on 127.0.0.1, the only address the host helper forwards to. Any other listener is left out with the reason.
+fn web_routes(document: &Value, prefix: &str, sub_path: &str) -> (Vec<WebRoute>, Vec<WebSkipped>) {
+	let (mut routes, mut skipped): (Vec<WebRoute>, Vec<WebSkipped>) = (Vec::new(), Vec::new());
+	for inbound in document["inbounds"].as_array().into_iter().flatten().filter(|inbound| inbound["type"] == "veilway" && inbound["enabled"] != false) {
+		for transport in inbound["transports"].as_array().into_iter().flatten().filter(|transport| transport["enabled"] != false && matches!(transport["type"].as_str(), Some("ws" | "fronted"))) {
+			let (Some(path), Some(listen), Some(kind)) = (transport["path"].as_str(), transport["listen"].as_str().and_then(|listen| listen.parse::<SocketAddr>().ok()), transport["type"].as_str()) else {continue};
+			let problem = (listen.port() == 0 || listen.ip() != IpAddr::from([127, 0, 0, 1])).then_some("The transport does not listen on 127.0.0.1, where the web server sends it").or_else(|| web_path_problem(path, prefix, sub_path)).or_else(|| routes.iter().any(|route| route.path == path).then_some("Two transports have this path")).or_else(|| (routes.len() >= WEB_MAX).then_some("Only 32 paths fit"));
+			match problem {
+				Some(reason) => skipped.push(WebSkipped {path: path.chars().take(130).collect(), reason: reason.into()}),
+				None => routes.push(WebRoute {path: path.into(), port: listen.port(), kind: kind.into()}),
+			}
+		}
+	}
+	(routes, skipped)
+}
+
+/// The helper's last answer, from the folder of the request file. A file that is missing, large or not the expected shape is no answer.
+fn web_result(request: &Path) -> Option<WebResult> {
+	let mut body = Vec::new();
+	std::fs::File::open(request.with_file_name("web-routes.result")).ok()?.take(RESULT_MAX).read_to_end(&mut body).ok()?;
+	serde_json::from_slice(&body).ok()
+}
+
+/// Writes `web-routes.json` whole under another name and renamed, readable by the helper's group, and then the request word. A request that waits refuses the whole thing before the file is touched.
+fn send_routes(request: &Path, routes: &[WebRoute]) -> Result<(), Failure> {
+	if request.exists() {return Err(Failure::conflict("An update, a restart or a web server request is already waiting."))}
+	let (target, temporary) = (request.with_file_name("web-routes.json"), request.with_file_name("web-routes.json.tmp"));
+	let _ = std::fs::remove_file(&temporary);
+	let mut file = OpenOptions::new().write(true).create_new(true).mode(0o640).open(&temporary).map_err(|error| match error.kind() {
+		ErrorKind::NotFound | ErrorKind::PermissionDenied => Failure::conflict("This server has no update service. Run `sudo bash veilway.sh update panel` on it once."),
+		_ => Failure::internal(error),
+	})?;
+	file.write_all(&serde_json::to_vec(&json!({"routes": routes})).map_err(Failure::internal)?).and_then(|()| file.sync_all()).and_then(|()| std::fs::rename(&temporary, &target)).map_err(Failure::internal)?;
+	write_request(request, "web-routes")
+}
+
+/// The routes the panel would send now and the helper's last answer.
+pub async fn web_routes_info(State(app): State<Arc<App>>) -> Result<Response, Failure> {
+	let (_, _, document) = nodecfg::running(&app, LOCAL).await?;
+	let (routes, skipped) = web_routes(&document, &app.cfg.prefix, &app.cfg.sub_path);
+	ok(&WebRoutes {routes, skipped, result: web_result(&app.cfg.update_request), waiting: app.cfg.update_request.exists(), sent_at: None})
+}
+
+/// Asks the host to make the web server send these paths to the node. The set replaces what the helper added before.
+pub async fn web_routes_send(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>) -> Result<Response, Failure> {
+	let (_, _, document) = nodecfg::running(&app, LOCAL).await?;
+	let (routes, skipped) = web_routes(&document, &app.cfg.prefix, &app.cfg.sub_path);
+	send_routes(&app.cfg.update_request, &routes)?;
+	app.db.audit(&ctx.actor, &ctx.source, "web.routes", "", &format!("{} paths", routes.len())).await;
+	ok(&WebRoutes {routes, skipped, result: web_result(&app.cfg.update_request), waiting: true, sent_at: Some(now())})
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::os::unix::fs::PermissionsExt;
 
 	fn v(text: &str) -> Version {Version::parse(text).unwrap()}
 
@@ -330,5 +422,46 @@ mod tests {
 		assert_eq!(chosen(Part::Both, true, false), Some(Part::Panel));
 		assert_eq!(chosen(Part::Both, false, true), Some(Part::Node));
 		assert_eq!(chosen(Part::Both, false, false), None);
+	}
+
+	#[test]
+	fn web_routes_are_the_enabled_loopback_ws_and_fronted_paths() {
+		let document = json!({"inbounds": [
+			{"type": "veilway", "transports": [
+				{"type": "ws", "listen": "127.0.0.1:8443", "path": "/aaaaaaaaaaaaaaaaaaaa"},
+				{"type": "fronted", "listen": "[::1]:9443", "path": "/bbbbbbbbbbbbbbbbbbbb"},
+				{"type": "ws", "listen": "0.0.0.0:8444", "path": "/cccccccccccccccccccc"},
+				{"type": "ws", "listen": "127.0.0.1:8445", "path": "/dddddddddddddddddddd", "enabled": false},
+				{"type": "ws", "listen": "127.0.0.1:8446", "path": "/panel/eeeeeeeeeeeeeeeeeeee"},
+				{"type": "ws", "listen": "127.0.0.1:8447", "path": "/short"},
+				{"type": "ws", "listen": "127.0.0.1:8448", "path": "/aaaaaaaaaaaaaaaaaaaa"},
+				{"type": "tls", "listen": "127.0.0.1:8449", "path": "/ffffffffffffffffffff"},
+				{"type": "ws", "listen": "127.0.0.1:8450", "path": "/aa/../aaaaaaaaaaaaaaa"}]},
+			{"type": "veilway", "enabled": false, "transports": [{"type": "ws", "listen": "127.0.0.1:8451", "path": "/gggggggggggggggggggg"}]},
+			{"type": "socks5", "transports": [{"type": "ws", "listen": "127.0.0.1:8452", "path": "/hhhhhhhhhhhhhhhhhhhh"}]}]});
+		let (routes, skipped) = web_routes(&document, "/panel", "/sub");
+		assert_eq!(routes, vec![WebRoute {path: "/aaaaaaaaaaaaaaaaaaaa".into(), port: 8443, kind: "ws".into()}]);
+		assert_eq!(skipped.iter().map(|skipped| skipped.path.as_str()).collect::<Vec<_>>(), ["/bbbbbbbbbbbbbbbbbbbb", "/cccccccccccccccccccc", "/panel/eeeeeeeeeeeeeeeeeeee", "/short", "/aaaaaaaaaaaaaaaaaaaa", "/aa/../aaaaaaaaaaaaaaa"]);
+		assert!(web_path_problem("/sub", "/panel", "/sub").is_some());
+		assert!(web_path_problem("/bff82055c6d2", "/bff82055c6d25edc", "/sub").is_some());
+		assert!(web_path_problem("/panelx-aaaaaaaaaaaa", "/panel", "/sub").is_none());
+	}
+
+	#[test]
+	fn a_web_routes_request_writes_the_file_and_the_word_and_refuses_a_second() {
+		let dir = std::env::temp_dir().join(format!("vwweb-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&dir);
+		std::fs::create_dir_all(&dir).unwrap();
+		let request = dir.join("request");
+		let routes = vec![WebRoute {path: "/aaaaaaaaaaaaaaaaaaaa".into(), port: 8443, kind: "ws".into()}];
+		assert!(send_routes(&request, &routes).is_ok());
+		assert_eq!(std::fs::read_to_string(&request).unwrap(), "web-routes");
+		assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(dir.join("web-routes.json")).unwrap()).unwrap(), json!({"routes": [{"path": "/aaaaaaaaaaaaaaaaaaaa", "port": 8443, "type": "ws"}]}));
+		assert_eq!(std::fs::metadata(dir.join("web-routes.json")).unwrap().permissions().mode() & 0o777, 0o640);
+		assert!(send_routes(&request, &[]).is_err());
+		assert!(web_result(&request).is_none());
+		std::fs::write(dir.join("web-routes.result"), r#"{"ok": true, "message": "done", "at": 5, "routes": 1, "web": "caddy"}"#).unwrap();
+		assert_eq!(web_result(&request), Some(WebResult {ok: true, message: "done".into(), at: 5, routes: 1, web: "caddy".into()}));
+		std::fs::remove_dir_all(&dir).unwrap();
 	}
 }

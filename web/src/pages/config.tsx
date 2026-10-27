@@ -251,15 +251,36 @@ const ceiling = (row: Row, key: string) => key === "undecided_per_source" ? Math
 const outside = (row: Row, key: string) => typeof row.limits[key] === "number" && ((row.limits[key] as number) < LIMITS[key]![0] || (row.limits[key] as number) > ceiling(row, key));
 // A key from the browser's random source, as veilway genkey makes one: an inbound key is clamped for X25519, a transport key is 32 random bytes.
 const newKey = (clamped: boolean) => { const key = crypto.getRandomValues(new Uint8Array(32)); if (clamped) { key[0] = key[0]! & 248; key[31] = (key[31]! & 127) | 64; } return btoa(String.fromCharCode(...key)); };
+// A path of 20 letters and digits for a transport. Bytes of 248 or more are dropped, so each of the 62 characters is equally likely.
+const newPath = () => { let path = "/"; while (path.length < 21) for (const byte of crypto.getRandomValues(new Uint8Array(32))) if (byte < 248 && path.length < 21) path += "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[byte % 62]; return path; };
 
 const toRow = (tr: Item, at: number): Row => { const tls = (tr.tls ?? {}) as Item, site = (tr.site ?? {}) as Item, shape = (tr.shape ?? {}) as Item; return {enabled: tr.enabled !== false, limits: {...((tr.limits ?? {}) as Record<string, number>)}, proxyProtocol: ((tr.decoy ?? {}) as Item).proxy_protocol === true, http2: tr.http2 === "on", type: str(tr.type), listen: str(tr.listen), path: str(tr.path), at, cert: tls.cert !== undefined ? "files" : "self", name: str(tls.name), certFile: str(tls.cert), keyFile: str(tls.key), origin: str(((tr.decoy ?? {}) as Item).origin), proxies: Array.isArray(tr.trusted_proxies) && tr.trusted_proxies.length ? tr.trusted_proxies as string[] : [""], header: str(tr.client_address_header), preset: presetOf(shape), shape, siteHost: str(site.host), siteNames: Array.isArray(site.names) ? site.names.map(str) : [], sitePort: typeof site.port === "number" ? site.port : "", siteAddress: str(site.address), siteOutbound: str(site.outbound), acknowledged: site.acknowledged === true, siteKey: str(tr.transport_key), keys: Array.isArray(tr.transport_keys) ? tr.transport_keys.map(str) : []}; };
 
 // The lines a transport behind the operator's web server needs in its site file. handle, never handle_path: the node wants the path kept. Caddy adds its own Server field to the decoy's, and two of them mark the path; nginx drops the upstream's by itself.
 function WebLines({row}: {row: Row}) {
-	const {t} = useP(), listen = row.listen.trim().replace(/^0\.0\.0\.0:/, "127.0.0.1:").replace(/^\[::\]:/, "[::1]:"), path = row.path.trim(), proxies = row.proxies.map(proxy => proxy.trim()).filter(Boolean), fronted = row.type !== "ws";
+	const {t} = useP(), guard = useGuard(), [busy, setBusy] = useState(false), [sent, setSent] = useState<{ok: boolean, text: string} | null>(null), [error, setError] = useState<unknown>(null), listen = row.listen.trim().replace(/^0\.0\.0\.0:/, "127.0.0.1:").replace(/^\[::\]:/, "[::1]:"), path = row.path.trim(), proxies = row.proxies.map(proxy => proxy.trim()).filter(Boolean), fronted = row.type !== "ws";
 	const caddy = `handle ${path}* {\n\treverse_proxy ${listen} {\n\t\theader_down -Server\n\t}\n}`, nginx = `location ${path} {\n\tproxy_pass http://${listen};\n\tproxy_http_version 1.1;\n\tproxy_set_header Upgrade $http_upgrade;\n\tproxy_set_header Connection "upgrade";\n\tproxy_set_header Host $host;\n\tproxy_set_header X-Forwarded-For $remote_addr;${fronted ? "\n\tproxy_buffering off;\n\tproxy_read_timeout 1h;" : ""}\n}`;
+	// The host helper answers by writing a result with the time it ran, so the answer to this click is the first one at or after the time the server wrote the request.
+	const send = async () => {
+		setBusy(true); setSent(null); setError(null);
+		try {
+			const asked = await guard(() => api("post", "/web/routes"));
+			for (let tries = 0; tries < 30; tries++) {
+				await new Promise(resolve => setTimeout(resolve, 2000));
+				const {result} = await api("get", "/web/routes");
+				if (result && result.at >= (asked.sent_at ?? 0)) { setSent({ok: result.ok, text: result.ok ? t("web.addedTo", {count: result.routes, web: result.web === "nginx" ? t("web.nginx") : t("web.caddy")}) : result.message}); return; }
+			}
+			setSent({ok: false, text: t("web.noAnswer")});
+		} catch (caught) { setError(caught); } finally { setBusy(false); }
+	};
 	return <details className="p-details p-wide" open>
 		<summary>{t("web.title")}</summary>
+		<div className="p-stack">
+			<div><Button variant="primary" disabled={busy} onClick={() => void send()}>{t("web.add")}</Button></div>
+			<p className="vw-muted vw-small">{t("web.addHint")}</p>
+			{sent && <Mark tone={sent.ok ? "success" : "danger"}>{sent.text}</Mark>}
+			<ErrorNote error={error}/>
+		</div>
 		<p className="vw-muted vw-small">{t("web.lead")}</p>
 		<Copyable label={t("web.caddy")} value={caddy} multiline/>
 		<Copyable label={t("web.nginx")} value={nginx} multiline/>
@@ -406,7 +427,7 @@ function ItemForm({section, hidden, item, taken, outbounds, kinds = {}, socks = 
 							{rows.length > 1 && <div className="p-row-tools">{reorder.handle(i)}<div className="p-cluster">{reorder.steps(i)}<IconButton icon="close" label={t("config.removeTransport", {number: i + 1})} onClick={() => setRows(rows.filter((_, j) => j !== i))}/></div></div>}
 							<SelectField label={t("config.transport", {number: i + 1})} value={row.type} onChange={type => up(type === "fronted-shaped" && type !== row.type ? {type, ...drawPreset("post-stream")} : type === "ws-plain" && !row.keys.length ? {type, keys: [newKey(false)]} : {type})} options={(kind === "wireguard" ? ["udp", "ws"] : TRANSPORTS).map(type => ({value: type, label: type === "faketls" ? t("borrowed.name") : type, detail: t(`config.transport.${type}` as PanelKey)}))}/>
 							<TextField label={t("config.listen")} placeholder={problem && row.type !== "tls" ? "127.0.0.1:8081" : "0.0.0.0:443"} value={row.listen} onChange={listen => up({listen})} technical/>
-							<Switch label={t("inbounds.transportEnabled")} hint={t("inbounds.transportEnabledHint")} checked={row.enabled} onChange={enabled => up({enabled})}/>
+							<div className="p-wide"><Switch label={t("inbounds.transportEnabled")} hint={t("inbounds.transportEnabledHint")} checked={row.enabled} onChange={enabled => up({enabled})}/></div>
 							{row.type === "faketls" && veilway && <div className="p-stream">
 								<Banner tone="warning" title={t("borrowed.title")}>{t("borrowed.warning")}</Banner>
 								{bproblem?.listen && <Mark tone="danger">{t(bproblem.listen)}</Mark>}
@@ -430,9 +451,15 @@ function ItemForm({section, hidden, item, taken, outbounds, kinds = {}, socks = 
 								<Checkbox label={t("borrowed.acknowledge")} checked={row.acknowledged} onChange={acknowledged => up({acknowledged})}/>
 								{bproblem?.ack && tried && <Mark tone="danger">{t(bproblem.ack)}</Mark>}
 							</div>}
-							{PATHED.includes(row.type) && !problem && <TextField label={t("config.path")} placeholder="/a-long-random-path" value={row.path} onChange={path => up({path})} technical/>}
+							{PATHED.includes(row.type) && !problem && <div className="p-proxy">
+								<TextField label={t("config.path")} placeholder="/a-long-random-path" value={row.path} onChange={path => up({path})} technical/>
+								<Button onClick={() => up({path: newPath()})}>{t("config.pathMake")}</Button>
+							</div>}
 							{problem && <div className="p-stream">
-								<TextField label={t("config.path")} hint={t("stream.pathHint")} placeholder="/a-long-random-path" value={row.path} onChange={path => up({path})} error={shown("path", row.path)} technical/>
+								<div className="p-proxy">
+									<TextField label={t("config.path")} hint={t("stream.pathHint")} placeholder="/a-long-random-path" value={row.path} onChange={path => up({path})} error={shown("path", row.path)} technical/>
+									<Button onClick={() => up({path: newPath()})}>{t("config.pathMake")}</Button>
+								</div>
 								{row.type === "fronted-shaped" && <ShapeFields preset={row.preset} shape={row.shape} problems={problem.shape} onChange={up}/>}
 								{row.type === "tls" && <>
 									<RadioGroup label={t("stream.cert")} value={row.cert} onChange={cert => up({cert: cert === "files" ? "files" : "self"})} options={[{value: "self", label: t("stream.cert.self"), detail: t("stream.cert.selfDetail")}, {value: "files", label: t("stream.cert.files"), detail: t("stream.cert.filesDetail")}]}/>
