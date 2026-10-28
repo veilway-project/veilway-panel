@@ -1358,7 +1358,7 @@ export const en = {
 	"rule.hint.group": "Group names.",
 	"rule.hint.inbound": "Inbound tags.",
 	"rule.hint.link": "Node link tags.",
-	"rule.hint.ip": "Networks like 10.0.0.0/8, or geoip:private, host:self, tunnel:users.",
+	"rule.hint.ip": "Networks like 10.0.0.0/8, a country like geoip:de, or geoip:private, host:self, tunnel:users.",
 	"rule.hint.domain": "Names like example.org. A name covers its subdomains.",
 	"rule.hint.protocol": "tcp, udp, icmp, or a protocol number.",
 	"rule.hint.port": "Ports like 443, or ranges like 6000-6100. Needs a protocol.",

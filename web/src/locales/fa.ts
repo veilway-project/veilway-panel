@@ -1359,7 +1359,7 @@ export const fa: Record<PanelKey, string> = {
 	"rule.hint.group": "نام گروه‌ها.",
 	"rule.hint.inbound": "برچسب ورودی‌ها.",
 	"rule.hint.link": "برچسب پیوندهای نود.",
-	"rule.hint.ip": "شبکه‌هایی مثل 10.0.0.0/8، یا geoip:private و host:self و tunnel:users.",
+	"rule.hint.ip": "شبکه‌هایی مثل 10.0.0.0/8، کشوری مثل geoip:de، یا geoip:private و host:self و tunnel:users.",
 	"rule.hint.domain": "نام‌هایی مثل example.org. هر نام زیردامنه‌هایش را هم در بر می‌گیرد.",
 	"rule.hint.protocol": "tcp، udp، icmp یا شمارهٔ پروتکل.",
 	"rule.hint.port": "درگاه‌هایی مثل 443 یا بازه‌هایی مثل 6000-6100. پروتکل لازم دارد.",
