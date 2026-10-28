@@ -75,6 +75,7 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 					<div><dt>{t(l.state === "up" ? "nodes.upFor" : "nodes.stateFor")}</dt><dd className="vw-num">{span(l.state_secs)}</dd></div>
 					<div><dt>{t("links.col.traffic")}</dt><dd className="vw-num">{bytes(l.traffic.up_bytes + l.traffic.down_bytes).text}</dd></div>
 					<div><dt>{t("nodes.flows")}</dt><dd className="vw-num">{number(l.flows)}</dd></div>
+					{l.mtu !== undefined && <div><dt>{t("links.mtu")}</dt><dd className="vw-num" title={t(l.mtu_found == null ? "links.mtuSet" : "links.mtuFound")}>{number(l.mtu)}</dd></div>}
 					{l.half === "exit" && <div><dt>{t("links.chained")}</dt><dd className="vw-num" title={t("links.chainedHint")}>{number(l.chained ?? 0)}</dd></div>}
 				</dl>
 				{manage(l.tag)}
