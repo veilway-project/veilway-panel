@@ -1,6 +1,6 @@
 {
 	"name": "@veilway/panel-web",
-	"version": "0.3.9",
+	"version": "0.3.10",
 	"private": true,
 	"description": "The Veilway panel's web app, embedded in the panel binary",
 	"license": "Apache-2.0",
