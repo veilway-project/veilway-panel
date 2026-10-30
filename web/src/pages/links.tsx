@@ -33,11 +33,11 @@ export function NodesPage({status, reachable, online}: {status: {version?: strin
 	const toCompare = (next: Compare) => { setFlow(null); setAnswering(null); setCompare(next); pairings.reload(); };
 	const drop = (id: string) => void api("delete", "/links/pairings/{id}", {params: {id}}).then(() => { toast({tone: "success", title: t("links.dropped")}); pairings.reload(); }, failure => toast({tone: "danger", title: say(failure)}));
 	const waiting = pairings.data ? pairings.data.offers.length + pairings.data.answered.length : 0, span = (seconds: number) => { const found = ago(seconds); return t(found.key, {count: found.count}); };
-	if (compare) return <><PageHead title={t("nav.nodes")}/><Fingerprints pairing={compare} onClose={() => { setCompare(null); refresh(); }}/></>;
-	if (preset) return <><PageHead title={t("nav.nodes")}/><Preset start={preset} onClose={() => { setPreset(null); running.reload(); refresh(); }}/></>;
-	if (tunnelPreset && running.data) return <><PageHead title={t("nav.nodes")}/><TunnelPreset protocol={tunnelPreset} running={running.data} onClose={() => { setTunnelPreset(null); running.reload(); }}/></>;
+	if (compare) return <><PageHead title={t("links.title")}/><Fingerprints pairing={compare} onClose={() => { setCompare(null); refresh(); }}/></>;
+	if (preset) return <><PageHead title={t("links.title")}/><Preset start={preset} onClose={() => { setPreset(null); running.reload(); refresh(); }}/></>;
+	if (tunnelPreset && running.data) return <><PageHead title={t("links.title")}/><TunnelPreset protocol={tunnelPreset} running={running.data} onClose={() => { setTunnelPreset(null); running.reload(); }}/></>;
 	return <>
-		<PageHead title={t("nav.nodes")} lead={t("links.lead")}>
+		<PageHead title={t("links.title")} lead={t("links.lead")}>
 			<Button variant={flow === "paste" ? "primary" : "secondary"} onClick={() => setFlow(flow === "paste" ? null : "paste")}>{t("links.paste")}</Button>
 			<Button variant={flow === "offer" ? "secondary" : "primary"} icon="plus" onClick={() => setFlow(flow === "offer" ? null : "offer")}>{t("links.offer")}</Button>
 		</PageHead>

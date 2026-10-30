@@ -176,6 +176,8 @@
 .p-row-list > li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--s-3); padding-block: var(--s-3); border-block-start: 1px solid var(--c-line); }
 .p-row-list > li:first-child { border-block-start: 0; padding-block-start: 0; }
 .p-row-list > li:last-child { padding-block-end: 0; }
+.p-setup > li { grid-template-columns: minmax(0, 1fr) auto; }
+.p-setup .p-flag { white-space: normal; }
 .p-row-text { display: grid; gap: 2px; min-inline-size: 0; }
 .p-row-text > span { font-size: var(--text-2); color: var(--c-text-muted); overflow-wrap: anywhere; }
 .p-row-text > strong { font-weight: var(--weight-regular); overflow-wrap: anywhere; }

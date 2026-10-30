@@ -1,5 +1,5 @@
 import {Banner, Button, Checkbox, DataTable, Dialog, Field, Glass, Icon, IconButton, NumberField, RadioGroup, SecretField, Segmented, SelectField, StateBlock, Switch, Tabs, TextField, useToast} from "@veilway/ui";
-import {useEffect, useState} from "react";
+import {useEffect, useRef, useState} from "react";
 import {api, ApiError, type Diff, type Report, type Running} from "../api.ts";
 import {check, type Issue, type Schema} from "../check.ts";
 import {Copyable, dnsName, ErrorNote, Issues, lines, LinesField, Mark, moved, PageHead, RowSwitch, useGuard, useLoad, useP, useReorder, useSay} from "../kit.tsx";
@@ -80,7 +80,7 @@ export function InboundsPage() {
 }
 
 function Inbounds({server}: {server: number}) {
-	const {t, number, bytes} = useP(), say = useSay(), toast = useToast(), config = useLoad(() => loadRunning(server), []), schema = useLoad(loadSchema, []), xray = useLoad(() => server === 1 ? api("get", "/xray") : Promise.resolve(null), []), live = useLoad(() => api("get", "/stats/now"), []);
+	const {t, number, bytes} = useP(), say = useSay(), toast = useToast(), guard = useGuard(), config = useLoad(() => loadRunning(server), []), schema = useLoad(loadSchema, []), xray = useLoad(() => server === 1 ? api("get", "/xray") : Promise.resolve(null), []), live = useLoad(() => api("get", "/stats/now"), []);
 	const counted = (server === 1 ? (live.data as {proxies?: ProxyCounters[] | null} | null)?.proxies ?? [] : []) as ProxyCounters[];
 	useEffect(() => { const timer = setInterval(live.reload, 10000); return () => clearInterval(timer); }, [live.reload]);
 	const [kind, setKind] = useState("all"), [json, setJson] = useState(false), [proposed, setProposed] = useState<unknown>(undefined), [editing, setEditing] = useState<{index: number | null} | null>(null), [adding, setAdding] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [moves, setMoves] = useState<string[]>([]), [remind, setRemind] = useState(false);
@@ -112,9 +112,9 @@ function Inbounds({server}: {server: number}) {
 						{id: "edit", header: "", align: "end", cell: row => <div className="p-cluster p-end">{row.item && <Button size="sm" variant="quiet" aria-label={t("config.editName", {name: row.tag})} onClick={() => setEditing({index: row.index})}>{t("user.edit")}</Button>}<Button size="sm" variant="quiet" disabled={busy} aria-label={t("config.removeName", {name: row.tag})} onClick={() => row.item ? propose(items.filter((_, i) => i !== row.index)) : removeXray(row.tag)}>{t("common.remove")}</Button></div>}
 					]}/>
 					<ErrorNote error={error}/>
-					<div className="vw-well p-note"><Icon name="info"/><p className="vw-small">{t("inbounds.rating")}{items.some(item => PROXY_TYPES.includes(str(item.type))) && " " + t("inbounds.ratingProxy")}</p></div>
+					<details className="p-details"><summary>{t("inbounds.rating")}</summary><p className="vw-muted vw-small">{t("inbounds.ratingMore")}{items.some(item => PROXY_TYPES.includes(str(item.type))) && " " + t("inbounds.ratingProxy")}</p></details>
 				</Glass>}
-				{(remind || items.some(item => item.enabled === false || list(item.transports).some(tr => tr.enabled === false))) && <div className="vw-well p-note"><Icon name="info"/><p className="vw-small">{t("inbounds.publishNote")} <Button size="sm" variant="quiet" onClick={() => { location.hash = "#/profiles"; }}>{t("nav.profiles")}</Button></p></div>}
+				{(remind || items.some(item => item.enabled === false || list(item.transports).some(tr => tr.enabled === false))) && <div className="vw-well p-note"><Icon name="info"/><p className="vw-small">{t("inbounds.publishNote")} {server === 1 && <Button size="sm" disabled={busy} onClick={() => { setBusy(true); setError(null); void guard(() => api("post", "/profiles/publish")).then(() => { setRemind(false); toast({tone: "success", title: t("profiles.published")}); }, setError).finally(() => setBusy(false)); }}>{t("inbounds.publishNow")}</Button>} <Button size="sm" variant="quiet" onClick={() => { location.hash = "#/profiles"; }}>{t("nav.profiles")}</Button></p></div>}
 				<p className="vw-muted vw-small">{t("config.reviewNote")}</p>
 				{server === 1 && xray.data && <XraySheet xray={xray.data} onAdd={() => setAdding(true)} onChanged={xray.reload}/>}
 			</div>
@@ -252,6 +252,9 @@ const outside = (row: Row, key: string) => typeof row.limits[key] === "number" &
 // A key from the browser's random source, as veilway genkey makes one: an inbound key is clamped for X25519, a transport key is 32 random bytes.
 const newKey = (clamped: boolean) => { const key = crypto.getRandomValues(new Uint8Array(32)); if (clamped) { key[0] = key[0]! & 248; key[31] = (key[31]! & 127) | 64; } return btoa(String.fromCharCode(...key)); };
 // A path of 20 letters and digits for a transport. Bytes of 248 or more are dropped, so each of the 62 characters is equally likely.
+const newCookie = () => { const bytes = crypto.getRandomValues(new Uint8Array(17)); return Array.from(bytes.slice(1, 9 + bytes[0]! % 9), b => "abcdefghijklmnopqrstuvwxyz0123456789_-"[b % 38]).join(""); };
+// Fields and messages marked as wrong, apart from the count beside the review button itself.
+const invalid = (form: HTMLFormElement | null) => [...form?.querySelectorAll<HTMLElement>("[aria-invalid=true], .p-flag[data-tone=danger]") ?? []].filter(found => !found.closest(".vw-dialog-foot"));
 const newPath = () => { let path = "/"; while (path.length < 21) for (const byte of crypto.getRandomValues(new Uint8Array(32))) if (byte < 248 && path.length < 21) path += "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[byte % 62]; return path; };
 
 const toRow = (tr: Item, at: number): Row => { const tls = (tr.tls ?? {}) as Item, site = (tr.site ?? {}) as Item, shape = (tr.shape ?? {}) as Item; return {enabled: tr.enabled !== false, limits: {...((tr.limits ?? {}) as Record<string, number>)}, proxyProtocol: ((tr.decoy ?? {}) as Item).proxy_protocol === true, http2: tr.http2 === "on", type: str(tr.type), listen: str(tr.listen), path: str(tr.path), at, cert: tls.cert !== undefined ? "files" : "self", name: str(tls.name), certFile: str(tls.cert), keyFile: str(tls.key), origin: str(((tr.decoy ?? {}) as Item).origin), proxies: Array.isArray(tr.trusted_proxies) && tr.trusted_proxies.length ? tr.trusted_proxies as string[] : [""], header: str(tr.client_address_header), preset: presetOf(shape), shape, siteHost: str(site.host), siteNames: Array.isArray(site.names) ? site.names.map(str) : [], sitePort: typeof site.port === "number" ? site.port : "", siteAddress: str(site.address), siteOutbound: str(site.outbound), acknowledged: site.acknowledged === true, siteKey: str(tr.transport_key), keys: Array.isArray(tr.transport_keys) ? tr.transport_keys.map(str) : []}; };
@@ -351,8 +354,9 @@ function ItemJson({value, onChange}: {value: Item, onChange: (item: Item | null,
 
 function ItemForm({section, hidden, item, taken, outbounds, kinds = {}, socks = [], exits = [], chain = [], chained = [], xray = false, onXray, schema, onSave, onClose}: {section: Exclude<Section, "routing">, hidden: boolean, item: Item | null, taken: string[], outbounds: string[], kinds?: Record<string, string>, socks?: string[], exits?: Item[], chain?: Item[], chained?: string[], xray?: boolean, onXray?: () => void, schema: Schema | null, onSave: (item: Item, notes: string[]) => void, onClose: () => void}) {
 	const {t, number} = useP(), say = useIssueText(), read = (from: Item) => ({draft: from, addresses: ((from.address as string[] | undefined) ?? []).join("\n"), links: ((((from.backend ?? {}) as Item).links as string[] | undefined) ?? []).join("\n"), rows: list(from.transports).map(toRow), headers: ((from.upgrade_headers as string[] | undefined) ?? []).join("\n")});
-	const [form, setForm] = useState(() => read(item ?? BLANK[section])), [access, setAccess] = useState<Access>(() => (item?.users as string[] | undefined)?.length || (item?.groups as string[] | undefined)?.length ? "chosen" : "all"), [json, setJson] = useState<string | null>(null), [issues, setIssues] = useState<{path: string, text: string}[]>([]), [tried, setTried] = useState(false);
+	const [form, setForm] = useState(() => read(item ?? BLANK[section])), [access, setAccess] = useState<Access>(() => (item?.users as string[] | undefined)?.length || (item?.groups as string[] | undefined)?.length ? "chosen" : "all"), [json, setJson] = useState<string | null>(null), [issues, setIssues] = useState<{path: string, text: string}[]>([]), [tried, setTried] = useState(false), [attention, setAttention] = useState<number | null>(null), [noXray, setNoXray] = useState(false), formRef = useRef<HTMLFormElement>(null);
 	const {draft, rows} = form, patch = (change: Partial<typeof form>) => setForm({...form, ...change}), setRows = (next: Row[]) => patch({rows: next});
+	useEffect(() => { if (attention !== null) setAttention(invalid(formRef.current).length); });
 	const set = (key: string, next: unknown) => { const copy = {...draft}; if (next === undefined || next === "") delete copy[key]; else copy[key] = next; patch({draft: copy}); };
 	const setBackend = (key: string, next: unknown) => { const copy = {...(draft.backend as Item)}; if (next === undefined || next === "") delete copy[key]; else copy[key] = next; set("backend", copy); };
 	const reorder = useReorder(rows.length, index => t("config.transport", {number: index + 1}), (from, to) => { const next = rows.filter((_, i) => i !== from); next.splice(to, 0, rows[from]!); setRows(next); });
@@ -395,20 +399,26 @@ function ItemForm({section, hidden, item, taken, outbounds, kinds = {}, socks = 
 	const save = () => {
 		setTried(true);
 		if (json !== null && issues.length && issues[0]!.path === "json") return;
-		if (Object.keys(proxyWrong).length || problems.some(problem => problem && (Object.keys(problem.errors).length || problem.shape.length)) || borrowedWrong || keyWrong || plainWrong || cookieWrong || headersWrong || paddingWrong("normal") || paddingWrong("wide") || rows.some(row => (POOLS[row.type] ?? []).some(key => outside(row, key))) || around || loadWrong || viaWrong || Object.keys(xrayWrong).length || Object.keys(wgWrong).length || (xrayOut && policy("udp") !== "reject" && policy("udp") !== "drop") || (udpChained && policy("udp") === "direct") || idleWrong("tcp_idle_secs") || idleWrong("udp_idle_secs") || (back.type === "netstack" && ["icmp_echo", "udp", "other"].some(key => policy(key) === "via" && !targets(key).includes(viaOf(key))))) return;
+		if (Object.keys(proxyWrong).length || problems.some(problem => problem && (Object.keys(problem.errors).length || problem.shape.length)) || borrowedWrong || keyWrong || plainWrong || cookieWrong || headersWrong || paddingWrong("normal") || paddingWrong("wide") || rows.some(row => (POOLS[row.type] ?? []).some(key => outside(row, key))) || around || loadWrong || viaWrong || Object.keys(xrayWrong).length || Object.keys(wgWrong).length || (xrayOut && policy("udp") !== "reject" && policy("udp") !== "drop") || (udpChained && policy("udp") === "direct") || idleWrong("tcp_idle_secs") || idleWrong("udp_idle_secs") || (back.type === "netstack" && ["icmp_echo", "udp", "other"].some(key => policy(key) === "via" && !targets(key).includes(viaOf(key))))) {
+			// Wait for the errors to render, then open the sections that hold them and bring the first one into view.
+			requestAnimationFrame(() => { const bad = invalid(formRef.current); bad.forEach(field => { const section = field.closest("details"); if (section) section.open = true; }); setAttention(bad.length); bad[0]?.scrollIntoView({block: "center"}); bad[0]?.focus(); });
+			return;
+		}
+		setAttention(null);
 		const made = build(), found = schema && typeof schema === "object" ? say(check(((schema.properties as Record<string, Item>)[section]?.items ?? true) as Schema, made, schema, section)) : [];
 		setIssues(clash ? [{path: "tag", text: t("config.tagTaken")}, ...found] : found);
 		if (!clash && !found.length) onSave(made, section === "inbounds" ? moved(rows.map(row => row.at)).map(move => t("review.moveTransport", {name: rows[move.to]!.type + " " + (rows[move.to]!.path || rows[move.to]!.listen), inbound: tag, from: number(move.from + 1), to: number(move.to + 1)})) : []);
 	};
 	// While the review is open the form stays mounted behind it, so closing the review comes back to the same edit.
 	return <Dialog open={!hidden} onOpenChange={open => { if (!open) onClose(); }} title={t(item ? "config.editName" : `config.add.${section}`, {name: str(item?.tag)})}>
-		<form className="p-stack" onSubmit={event => { event.preventDefault(); save(); }} noValidate>
+		<form ref={formRef} className="p-stack" onSubmit={event => { event.preventDefault(); save(); }} noValidate>
 			<Segmented label={t("config.view")} value={json === null ? "form" : "json"} onChange={view => { setIssues([]); setJson(view === "json" ? JSON.stringify(build(), null, 2) : null); }} options={[{value: "form", label: t("config.view.form")}, {value: "json", label: t("config.view.json")}]}/>
 			{json !== null ? <ItemJson value={JSON.parse(json) as Item} onChange={(next, error) => { if (next) setForm(read(next)); setIssues(error ? [{path: "json", text: error}] : []); }}/> : <>
 			<TextField label={t("config.col.tag")} hint={t("config.tagHint")} value={tag} onChange={value => set("tag", value.toLowerCase())} error={clash ? t("config.tagTaken") : undefined} technical required autoFocus/>
 			{section === "inbounds" && <>
 				<Switch label={t("inbounds.enabled")} hint={t("inbounds.enabledHint")} checked={draft.enabled !== false} onChange={on => set("enabled", on ? undefined : false)}/>
-				<SelectField label={t("inbounds.col.type")} hint={t("inbounds.typeHint")} value={kind} onChange={value => { if (value === "xray") { if (xray) onXray?.(); } else if (PROXY_TYPES.includes(value) !== proxyKind) patch(read(PROXY_TYPES.includes(value) ? {tag, type: value, listen: ""} : {...BLANK.inbounds, tag, type: value})); else { const copy: Item = {...draft, type: value}; if (value === "http") { delete copy.udp; delete copy.udp_any_port; } patch({draft: copy}); } }} options={[...(proxyKind ? [] : [{value: "veilway", label: t("config.inbound.veilway"), detail: t("config.inbound.veilwayDetail")}, {value: "wireguard", label: t("config.inbound.wireguard"), detail: t("config.inbound.wireguardDetail")}]), ...(item && !proxyKind ? [] : PROXY_TYPES.map(type => ({value: type, label: t(`config.inbound.${type}` as PanelKey), detail: t(`config.inbound.${type}Detail` as PanelKey)}))), ...(item ? [] : [{value: "xray", label: t("config.inbound.xray"), detail: t(xray ? "config.inbound.xrayDetail" : "config.inbound.xrayMissing")}])]}/>
+				<SelectField label={t("inbounds.col.type")} hint={t("inbounds.typeHint")} value={kind} onChange={value => { setNoXray(value === "xray" && !xray); if (value === "xray") { if (xray) onXray?.(); } else if (PROXY_TYPES.includes(value) !== proxyKind) patch(read(PROXY_TYPES.includes(value) ? {tag, type: value, listen: ""} : {...BLANK.inbounds, tag, type: value})); else { const copy: Item = {...draft, type: value}; if (value === "http") { delete copy.udp; delete copy.udp_any_port; } patch({draft: copy}); } }} options={[...(proxyKind ? [] : [{value: "veilway", label: t("config.inbound.veilway"), detail: t("config.inbound.veilwayDetail")}, {value: "wireguard", label: t("config.inbound.wireguard"), detail: t("config.inbound.wireguardDetail")}]), ...(item && !proxyKind ? [] : PROXY_TYPES.map(type => ({value: type, label: t(`config.inbound.${type}` as PanelKey), detail: t(`config.inbound.${type}Detail` as PanelKey)}))), ...(item ? [] : [{value: "xray", label: t("config.inbound.xray"), detail: t(xray ? "config.inbound.xrayDetail" : "config.inbound.xrayMissing")}])]}/>
+				{noXray && <Banner tone="warning" title={t("inbounds.xrayMissingTitle")}>{t("inbounds.xrayMissing")}<Copyable label={t("inbounds.xrayInstall")} value="sudo bash veilway.sh addon xray install" multiline/></Banner>}
 				{proxyKind && <ProxyFields draft={draft} setDraft={next => patch({draft: next})} access={access} setAccess={next => { patch(next === "all" ? {draft: Object.fromEntries(Object.entries(draft).filter(([key]) => key !== "users" && key !== "groups"))} : {}); setAccess(next); }} problems={proxyWrong} tried={tried}/>}
 				{!proxyKind && <>
 				<div className="p-proxy">
@@ -416,7 +426,6 @@ function ItemForm({section, hidden, item, taken, outbounds, kinds = {}, socks = 
 					{!str(draft.private_key).startsWith("<redacted") && <Button onClick={() => set("private_key", newKey(true))}>{t("config.keyMake")}</Button>}
 				</div>
 				<LinesField label={t("config.addresses")} hint={t("config.addressesHint")} value={form.addresses} onChange={addresses => patch({addresses})} rows={2}/>
-				<NumberField label={t("config.mtu")} hint={t("config.mtuHint")} unit={t("config.bytes")} min={1280} max={1500} value={typeof draft.mtu === "number" ? draft.mtu : ""} onChange={value => set("mtu", value === "" ? undefined : value)} optional/>
 				<fieldset className="p-mirror">
 					<legend className="vw-label">{t("config.col.transports")}</legend>
 					<p className="vw-muted vw-small">{t("inbounds.transportHint")}</p>
@@ -425,7 +434,7 @@ function ItemForm({section, hidden, item, taken, outbounds, kinds = {}, socks = 
 						const problem = problems[i], bproblem = borrowed[i], shownBorrowed = (field: keyof BorrowedErrors, value: string) => bproblem?.[field] && (tried || value.trim()) ? t(bproblem[field]!) : undefined, up = (change: Partial<Row>) => setRows(rows.map((r, j) => j === i ? {...r, ...change} : r)), shown = (field: keyof StreamErrors, value: string) => problem?.errors[field] && (tried || value.trim()) ? t(problem.errors[field]!) : undefined;
 						return <div key={i} className="p-transport-row" data-order-row>
 							{rows.length > 1 && <div className="p-row-tools">{reorder.handle(i)}<div className="p-cluster">{reorder.steps(i)}<IconButton icon="close" label={t("config.removeTransport", {number: i + 1})} onClick={() => setRows(rows.filter((_, j) => j !== i))}/></div></div>}
-							<SelectField label={t("config.transport", {number: i + 1})} value={row.type} onChange={type => up(type === "fronted-shaped" && type !== row.type ? {type, ...drawPreset("post-stream")} : type === "ws-plain" && !row.keys.length ? {type, keys: [newKey(false)]} : {type})} options={(kind === "wireguard" ? ["udp", "ws"] : TRANSPORTS).map(type => ({value: type, label: type === "faketls" ? t("borrowed.name") : type, detail: t(`config.transport.${type}` as PanelKey)}))}/>
+							<SelectField label={t("config.transport", {number: i + 1})} value={row.type} onChange={type => { const next = {...row, ...(type === "fronted-shaped" && type !== row.type ? {type, ...drawPreset("post-stream")} : type === "ws-plain" && !row.keys.length ? {type, keys: [newKey(false)]} : {type}), ...(PATHED.includes(type) && !row.path.trim() ? {path: newPath()} : {})}; patch({rows: rows.map((r, j) => j === i ? next : r), draft: {...draft, ...(type !== row.type && ["tls", "ws", "fronted", "fronted-shaped"].includes(type) && !str(keys[0]) ? {transport_keys: [newKey(false), ...keys.slice(1)]} : {}), ...(["tls", "ws", "ws-plain"].includes(type) && !str(draft.upgrade_cookie) ? {upgrade_cookie: newCookie()} : {})}}); }} options={(kind === "wireguard" ? ["udp", "ws"] : TRANSPORTS).map(type => ({value: type, label: type === "faketls" ? t("borrowed.name") : type, detail: t(`config.transport.${type}` as PanelKey)}))}/>
 							<TextField label={t("config.listen")} placeholder={problem && row.type !== "tls" ? "127.0.0.1:8081" : "0.0.0.0:443"} value={row.listen} onChange={listen => up({listen})} technical/>
 							<div className="p-wide"><Switch label={t("inbounds.transportEnabled")} hint={t("inbounds.transportEnabledHint")} checked={row.enabled} onChange={enabled => up({enabled})}/></div>
 							{row.type === "faketls" && veilway && <div className="p-stream">
@@ -471,16 +480,6 @@ function ItemForm({section, hidden, item, taken, outbounds, kinds = {}, socks = 
 								<TextField label={t("stream.origin")} hint={t("stream.originHint")} placeholder="http://127.0.0.1:8080" value={row.origin} onChange={origin => up({origin: origin.trim()})} error={shown("origin", row.origin)} technical/>
 								<Switch label={t("stream.proxyProtocol")} hint={t("stream.proxyProtocolHint")} checked={row.proxyProtocol} onChange={proxyProtocol => up({proxyProtocol})}/>
 								{row.type === "tls" && <Switch label={t("stream.http2")} hint={t("stream.http2Hint")} checked={row.http2} onChange={http2 => up({http2})}/>}
-								{row.type !== "tls" && <>
-									<fieldset className="p-proxies">
-										<legend className="vw-label">{t("stream.proxies")}</legend>
-										<p className="vw-muted vw-small">{t("stream.proxiesHint")}</p>
-										{row.proxies.map((proxy, k) => <div key={k} className="p-proxy"><TextField label={t("stream.proxy", {number: k + 1})} placeholder="127.0.0.1" value={proxy} onChange={value => up({proxies: row.proxies.map((p, m) => m === k ? value.trim() : p)})} technical/>{row.proxies.length > 1 && <IconButton icon="close" label={t("stream.removeProxy", {number: k + 1})} onClick={() => up({proxies: row.proxies.filter((_, m) => m !== k)})}/>}</div>)}
-										{problem.errors.proxies && (tried || row.proxies.some(proxy => proxy.trim())) && <Mark tone="danger">{t(problem.errors.proxies)}</Mark>}
-										{row.proxies.length < 64 && <div><Button size="sm" icon="plus" onClick={() => up({proxies: [...row.proxies, ""]})}>{t("stream.addProxy")}</Button></div>}
-									</fieldset>
-									<TextField label={t("stream.header")} hint={t("stream.headerHint")} placeholder="X-Forwarded-For" value={row.header} onChange={header => up({header: header.trim()})} error={shown("header", row.header)} technical optional/>
-								</>}
 								{row.type === "ws-plain" && <>
 									<Mark tone="warning">{t("stream.plainWarn")}</Mark>
 									<div className="p-proxy">
@@ -493,8 +492,18 @@ function ItemForm({section, hidden, item, taken, outbounds, kinds = {}, socks = 
 								{["ws", "fronted", "fronted-shaped"].includes(row.type) && !problem.errors.path && /^(\[[0-9A-Fa-f:.]+\]|[0-9A-Za-z.-]+):[1-9][0-9]{0,4}$/.test(row.listen.trim()) && <WebLines row={row}/>}
 								{problem.warnings.map(key => <Mark key={key} tone="warning">{t(key)}</Mark>)}
 							</div>}
-							{veilway && POOLS[row.type] && <details className="p-details p-wide" open={(POOLS[row.type] ?? []).some(key => outside(row, key)) || undefined}>
+							{veilway && POOLS[row.type] && <details className="p-details p-wide" open={(POOLS[row.type] ?? []).some(key => outside(row, key)) || Boolean(problem?.errors.proxies || problem?.errors.header) || undefined}>
 								<summary>{t("config.advancedLimits")}</summary>
+								{problem && row.type !== "tls" && <>
+									<fieldset className="p-proxies">
+										<legend className="vw-label">{t("stream.proxies")}</legend>
+										<p className="vw-muted vw-small">{t("stream.proxiesHint")}</p>
+										{row.proxies.map((proxy, k) => <div key={k} className="p-proxy"><TextField label={t("stream.proxy", {number: k + 1})} placeholder="127.0.0.1" value={proxy} onChange={value => up({proxies: row.proxies.map((p, m) => m === k ? value.trim() : p)})} technical/>{row.proxies.length > 1 && <IconButton icon="close" label={t("stream.removeProxy", {number: k + 1})} onClick={() => up({proxies: row.proxies.filter((_, m) => m !== k)})}/>}</div>)}
+										{problem.errors.proxies && (tried || row.proxies.some(proxy => proxy.trim())) && <Mark tone="danger">{t(problem.errors.proxies)}</Mark>}
+										{row.proxies.length < 64 && <div><Button size="sm" icon="plus" onClick={() => up({proxies: [...row.proxies, ""]})}>{t("stream.addProxy")}</Button></div>}
+									</fieldset>
+									<TextField label={t("stream.header")} hint={t("stream.headerHint")} placeholder="X-Forwarded-For" value={row.header} onChange={header => up({header: header.trim()})} error={shown("header", row.header)} technical optional/>
+								</>}
 								<p className="vw-muted vw-small">{t("limit.lead")}</p>
 								<div className="p-pair">{POOLS[row.type]!.map(key => <NumberField key={key} label={t((row.type === "faketls" && key === "relayed" ? "limit.relayedSite" : `limit.${key}`) as PanelKey)} unit={t(`unit.${LIMITS[key]![3]}`)} min={LIMITS[key]![0]} max={ceiling(row, key)} placeholder={String(key === "proxy_connections" ? 2 * (Number(row.limits.fronted_sessions) || 1024) : row.type === "faketls" && key === "relayed" ? 256 : key === "undecided_per_source" ? Math.min(64, ceiling(row, key)) : LIMITS[key]![2])} value={row.limits[key] ?? ""} onChange={value => up({limits: {...row.limits, [key]: value}})} error={outside(row, key) ? t("limit.range", {min: number(LIMITS[key]![0]), max: number(ceiling(row, key))}) : undefined} optional/>)}</div>
 							</details>}
@@ -502,31 +511,34 @@ function ItemForm({section, hidden, item, taken, outbounds, kinds = {}, socks = 
 					})}
 					{reorder.live}
 					{rows.length < 8 && <div><Button size="sm" icon="plus" onClick={() => setRows([...rows, toRow({type: "udp-obfs"}, -1)])}>{t("config.addTransport")}</Button></div>}
-					<p className="vw-muted vw-small">{t("inbounds.rating")}</p>
+					<details className="p-details"><summary>{t("inbounds.rating")}</summary><p className="vw-muted vw-small">{t("inbounds.ratingMore")}</p></details>
 				</fieldset>
-				{(proved || cookied) && <fieldset className="p-mirror">
+				{proved && <fieldset className="p-mirror">
 					<legend className="vw-label">{t("stream.keys")}</legend>
-					{proved && <div className="p-proxy">
+					<div className="p-proxy">
 						<SecretField label={t("stream.key")} hint={t((keys[0] ?? "").startsWith("<redacted") ? "stream.keyKeep" : "stream.keyNew")} value={keys[0] ?? ""} onChange={value => set("transport_keys", [value.trim(), ...keys.slice(1)])} error={keyWrong && (tried || keys[0]) ? t("stream.err.key") : undefined} autoComplete="off"/>
 						{!(keys[0] ?? "").startsWith("<redacted") && <Button onClick={() => set("transport_keys", [newKey(false), ...keys.slice(1)])}>{t("config.keyMake")}</Button>}
-					</div>}
-					{proved && keys.length > 1 && <p className="vw-muted vw-small">{t("stream.keyRotating")}</p>}
-					{cookied && <div className="p-proxy">
-						<TextField label={t("stream.cookie")} hint={t("stream.cookieHint")} value={str(draft.upgrade_cookie)} onChange={value => set("upgrade_cookie", value.trim())} error={cookieWrong && (tried || draft.upgrade_cookie) ? t("stream.err.cookie") : undefined} technical/>
-						<Button onClick={() => { const bytes = crypto.getRandomValues(new Uint8Array(17)); set("upgrade_cookie", Array.from(bytes.slice(1, 9 + bytes[0]! % 9), b => "abcdefghijklmnopqrstuvwxyz0123456789_-"[b % 38]).join("")); }}>{t("stream.cookiePick")}</Button>
-					</div>}
+					</div>
+					{keys.length > 1 && <p className="vw-muted vw-small">{t("stream.keyRotating")}</p>}
 				</fieldset>}
-				{veilway && <details className="p-details">
+				<details className="p-details" open={cookieWrong || undefined}>
 					<summary>{t("config.advancedDisguise")}</summary>
 					<div className="p-stack">
-						<p className="vw-muted vw-small">{t("disguise.lead")}</p>
-						<div className="p-pair">
-							<NumberField label={t("disguise.normal")} hint={t("disguise.normalHint")} unit={t("config.bytes")} min={64} max={255} placeholder="255" value={typeof padding.normal === "number" ? padding.normal : ""} onChange={value => { const next = {...padding}; if (value === "") delete next.normal; else next.normal = value; set("padding", Object.keys(next).length ? next : undefined); }} error={paddingWrong("normal") ? t("limit.range", {min: number(64), max: number(255)}) : undefined} optional/>
-							<NumberField label={t("disguise.wide")} hint={t("disguise.wideHint")} unit={t("config.bytes")} min={512} max={1023} placeholder="1023" value={typeof padding.wide === "number" ? padding.wide : ""} onChange={value => { const next = {...padding}; if (value === "") delete next.wide; else next.wide = value; set("padding", Object.keys(next).length ? next : undefined); }} error={paddingWrong("wide") ? t("limit.range", {min: number(512), max: number(1023)}) : undefined} optional/>
-						</div>
-						{upgraded && <Field label={t("disguise.headers")} hint={t("disguise.headersHint")} error={headersWrong ? t(headersWrong) : undefined} optional>{ids => <textarea {...ids} className="vw-input vw-code p-textarea" dir="ltr" spellCheck={false} rows={3} placeholder={rows.some(row => row.type === "tls") ? "Server\nDate" : ""} value={form.headers} onChange={event => patch({headers: event.target.value})}/>}</Field>}
+						<NumberField label={t("config.mtu")} hint={t("config.mtuHint")} unit={t("config.bytes")} min={1280} max={1500} value={typeof draft.mtu === "number" ? draft.mtu : ""} onChange={value => set("mtu", value === "" ? undefined : value)} optional/>
+						{veilway && <>
+							{cookied && <div className="p-proxy">
+								<TextField label={t("stream.cookie")} hint={t("stream.cookieHint")} value={str(draft.upgrade_cookie)} onChange={value => set("upgrade_cookie", value.trim())} error={cookieWrong && (tried || draft.upgrade_cookie) ? t("stream.err.cookie") : undefined} technical/>
+								<Button onClick={() => set("upgrade_cookie", newCookie())}>{t("stream.cookiePick")}</Button>
+							</div>}
+							<p className="vw-muted vw-small">{t("disguise.lead")}</p>
+							<div className="p-pair">
+								<NumberField label={t("disguise.normal")} hint={t("disguise.normalHint")} unit={t("config.bytes")} min={64} max={255} placeholder="255" value={typeof padding.normal === "number" ? padding.normal : ""} onChange={value => { const next = {...padding}; if (value === "") delete next.normal; else next.normal = value; set("padding", Object.keys(next).length ? next : undefined); }} error={paddingWrong("normal") ? t("limit.range", {min: number(64), max: number(255)}) : undefined} optional/>
+								<NumberField label={t("disguise.wide")} hint={t("disguise.wideHint")} unit={t("config.bytes")} min={512} max={1023} placeholder="1023" value={typeof padding.wide === "number" ? padding.wide : ""} onChange={value => { const next = {...padding}; if (value === "") delete next.wide; else next.wide = value; set("padding", Object.keys(next).length ? next : undefined); }} error={paddingWrong("wide") ? t("limit.range", {min: number(512), max: number(1023)}) : undefined} optional/>
+							</div>
+							{upgraded && <Field label={t("disguise.headers")} hint={t("disguise.headersHint")} error={headersWrong ? t(headersWrong) : undefined} optional>{ids => <textarea {...ids} className="vw-input vw-code p-textarea" dir="ltr" spellCheck={false} rows={3} placeholder={rows.some(row => row.type === "tls") ? "Server\nDate" : ""} value={form.headers} onChange={event => patch({headers: event.target.value})}/>}</Field>}
+						</>}
 					</div>
-				</details>}
+				</details>
 				</>}
 			</>}
 			{section === "outbounds" && <>
@@ -590,7 +602,7 @@ function ItemForm({section, hidden, item, taken, outbounds, kinds = {}, socks = 
 			</>}
 			</>}
 			<Issues issues={issues.filter(issue => issue.path !== "json")}/>
-			<div className="vw-dialog-foot"><Button onClick={onClose}>{t("action.cancel")}</Button><Button type="submit" variant="primary">{t("config.review")}</Button></div>
+			<div className="vw-dialog-foot">{attention !== null && attention > 0 && <Mark tone="danger">{t("config.attention", {count: attention})}</Mark>}<Button onClick={onClose}>{t("action.cancel")}</Button><Button type="submit" variant="primary">{t("config.review")}</Button></div>
 		</form>
 	</Dialog>;
 }

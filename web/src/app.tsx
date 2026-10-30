@@ -165,7 +165,7 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 				{node.data?.gateway_switch_due && !node.data.gateway_missing && <Banner tone="info" title={t("banner.gateway.due")} action={<Button size="sm" onClick={() => { location.hash = "#/settings/gateway"; }}>{t("banner.gateway.open")}</Button>}>{t("banner.gateway.dueBody")}</Banner>}
 				{node.data?.clock_synchronized === false && <Banner tone="warning" title={t("banner.clock.title")}>{t("banner.clock.body")}</Banner>}
 				<div className="p-page" key={page === "users" ? page + "/" + sub : page}>
-					{page === "dashboard" && <DashboardPage live={live.data} onLive={live.reload}/>}
+					{page === "dashboard" && <DashboardPage live={live.data} onLive={live.reload} inbounds={counts.data?.inbounds}/>}
 					{page === "traffic" && <TrafficPage/>}
 					{page === "users" && (sub && sub !== "new" && Number.isFinite(Number(sub)) ? <UserPage id={Number(sub)}/> : <UsersPage adding={sub === "new"}/>)}
 					{page === "inbounds" && <InboundsPage/>}

@@ -37,8 +37,9 @@ export function XraySheet({xray, onAdd, onChanged}: {xray: XrayState, onAdd: () 
 // The form sits beside the list, to add an inbound or, given one, to change it. Review shows what applying does before the node is asked, since Xray inbounds go to the node in one step.
 export function XrayForm({inbound, onClose, onDone}: {inbound?: XrayInbound, onClose: () => void, onDone: () => void}) {
 	const {t, number} = useP(), guard = useGuard(), toast = useToast();
-	const [protocol, setProtocol] = useState<string>(inbound?.protocol ?? "vless"), [tag, setTag] = useState(inbound?.tag ?? ""), [port, setPort] = useState<number | "">(inbound?.port ?? 443), [listen, setListen] = useState(inbound ? listenAddress(inbound.listen) : ""), [cert, setCert] = useState(inbound?.cert ?? ""), [key, setKey] = useState(inbound?.key ?? ""), [host, setHost] = useState(inbound?.own_host ?? ""), [decoy, setDecoy] = useState(inbound?.decoy ?? ""), [newKey, setNewKey] = useState(false);
+	const [protocol, setProtocol] = useState<string>(inbound?.protocol ?? "vless"), [tag, setTag] = useState(inbound?.tag ?? ""), [port, setPort] = useState<number | "">(inbound?.port ?? 2053), [listen, setListen] = useState(inbound ? listenAddress(inbound.listen) : ""), [cert, setCert] = useState(inbound?.cert ?? ""), [key, setKey] = useState(inbound?.key ?? ""), [host, setHost] = useState(inbound?.own_host ?? ""), [decoy, setDecoy] = useState(inbound?.decoy ?? ""), [newKey, setNewKey] = useState(false);
 	const [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [review, setReview] = useState(false), tls = protocol !== "shadowsocks";
+	const missing = !tag.trim() ? "xray.needTag" as const : port === "" ? "xray.needPort" as const : tls && (!cert.trim() || !key.trim()) ? "xray.needCert" as const : null;
 	const linksChange = !!inbound && (port !== inbound.port || host.trim() !== inbound.own_host || newKey);
 	const body = {port: port === "" ? 0 : port, listen: listen.trim() || null, cert: tls ? cert.trim() : null, key: tls ? key.trim() : null, host: host.trim() || null, decoy: tls ? decoy.trim() || null : null};
 	const apply = async () => {
@@ -77,7 +78,8 @@ export function XrayForm({inbound, onClose, onDone}: {inbound?: XrayInbound, onC
 			{inbound && !tls && <Switch label={t("xray.newKey")} hint={t("xray.newKeyHint")} checked={newKey} onChange={setNewKey}/>}
 			{inbound ? <Banner tone={linksChange ? "warning" : "info"} title={t("xray.linksChangeTitle")}>{t("xray.linksChangeBody")}</Banner> : <Banner tone="warning" title={t("xray.sharedTitle")}>{t("xray.sharedBody")}</Banner>}
 			{!review && <ErrorNote error={error}/>}
-			<div className="p-form-foot"><Button variant="quiet" onClick={onClose}>{t("action.cancel")}</Button><Button type="submit" variant="primary" disabled={!tag.trim() || port === "" || (tls && (!cert.trim() || !key.trim()))}>{t("xray.review")}</Button></div>
+			<div className="p-form-foot"><Button variant="quiet" onClick={onClose}>{t("action.cancel")}</Button><Button type="submit" variant="primary" disabled={missing !== null}>{t("xray.review")}</Button></div>
+			{missing && <p className="vw-muted vw-small" role="status">{t(missing)}</p>}
 		</form>
 		<Dialog open={review} onOpenChange={setReview} title={t("review.title")} description={t("xray.reviewBody")}>
 			<div className="p-stack">

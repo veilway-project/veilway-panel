@@ -3,6 +3,7 @@ import {useEffect, useMemo, useState} from "react";
 import {api, type Live, type NodeUser} from "../api.ts";
 import {ago, Mark, PageHead, useLoad, useP, useSay} from "../kit.tsx";
 import {NoticesPanel, SubscriptionNoticesPanel} from "./notices.tsx";
+import type {PanelKey} from "../locales/en.ts";
 import {PERIODS} from "./traffic.tsx";
 import {WgHealth, type WgState} from "./wgout.tsx";
 
@@ -10,11 +11,12 @@ type Period = "day" | "week" | "month";
 type Rated = {name: string, up_bytes_per_sec: number, down_bytes_per_sec: number, udp?: boolean | null};
 type ExitState = {tag: string, name: string, backend?: {type?: string}, udp: boolean | null, udp_down_secs: number | null, interface_up: boolean | null, interface_down_secs: number | null, link_up: boolean | null} & WgState;
 const NEAR = 0.85;
+const SETUP_PAGES = {inbounds: "#/inbounds", host: "#/settings", endpoint: "#/settings", profiles: "#/profiles", users: "#/users/new"};
 
 // The one page an operator opens first: speed now, the day's shape, who is about to run out, where traffic leaves, and what changed.
-export function DashboardPage({live, onLive}: {live: Live | null, onLive: () => void}) {
+export function DashboardPage({live, onLive, inbounds: inboundCount}: {live: Live | null, onLive: () => void, inbounds?: number}) {
 	const {t, rate, number, bytes, time, date} = useP(), say = useSay(), [period, setPeriod] = useState<Period>("day");
-	const users = useLoad(() => api("get", "/users"), []), month = useLoad(() => api("get", "/stats/usage", {query: {kind: "inbound", period: "month"}}), []), audit = useLoad(() => api("get", "/audit", {query: {limit: 5}}), []);
+	const users = useLoad(() => api("get", "/users"), []), month = useLoad(() => api("get", "/stats/usage", {query: {kind: "inbound", period: "month"}}), []), audit = useLoad(() => api("get", "/audit", {query: {limit: 5}}), []), settings = useLoad(() => api("get", "/settings"), []);
 	const {resolution, size, span} = PERIODS[period];
 	// The node keeps history per inbound, so the node's own line is the sum of its inbounds' lines.
 	const chart = useLoad(async () => {
@@ -37,11 +39,20 @@ export function DashboardPage({live, onLive}: {live: Live | null, onLive: () => 
 	const totals = chart.data?.usage.reduce((sum, e) => ({down: sum.down + e.down_bytes, up: sum.up + e.up_bytes}), {down: 0, up: 0});
 	const since = (seconds: number | null) => { if (seconds === null) return ""; const found = ago(seconds); return t(found.key, {count: found.count}); };
 	const today = new Date().toDateString();
+	// Each step ticks itself from what the panel already holds. Profiles count as published once publish has written an address range for an inbound.
+	const steps = settings.data && inboundCount !== undefined && users.data ? [{id: "inbounds", done: inboundCount > 0}, {id: "host", done: settings.data.node_host.trim() !== ""}, {id: "endpoint", done: settings.data.endpoints.length > 0}, {id: "profiles", done: Object.keys(settings.data.inbound_ranges).length > 0}, {id: "users", done: list.length > 0}] as const : [];
 	return <>
 		<PageHead title={t("nav.dashboard")} lead={t("dashboard.lead")}>
 			<Segmented label={t("traffic.period")} value={period} onChange={value => setPeriod(value as Period)} options={(["day", "week", "month"] as const).map(p => ({value: p, label: t(`traffic.period.${p}`)}))}/>
 			<Button variant="primary" icon="plus" onClick={() => { location.hash = "#/users/new"; }}>{t("users.add")}</Button>
 		</PageHead>
+		{steps.some(step => !step.done) && <Glass className="p-panel" aria-labelledby="begin-title">
+			<div className="p-sheet-head"><div><h2 className="vw-h2" id="begin-title">{t("begin.title")}</h2><p>{t("begin.lead", {done: number(steps.filter(step => step.done).length), total: number(steps.length)})}</p></div></div>
+			<ul className="p-row-list p-setup" aria-label={t("begin.title")}>{steps.map(step => <li key={step.id}>
+				<Mark tone={step.done ? "success" : "muted"}>{t(`begin.${step.id}` as PanelKey)}</Mark>
+				{!step.done && <Button size="sm" variant="quiet" onClick={() => { location.hash = SETUP_PAGES[step.id]; }}>{t(`begin.${step.id}Go` as PanelKey)}</Button>}
+			</li>)}</ul>
+		</Glass>}
 		<Glass className="p-panel p-figures" aria-labelledby="now-title">
 			<div className="p-sheet-head"><div><h2 className="vw-h2" id="now-title">{t("dashboard.now")}</h2><p>{live ? (live.reachable ? t("dashboard.nowLead", {time: time(new Date(live.at * 1000))}) : t("traffic.unreachableBody")) : t("common.loading")}</p></div></div>
 			<StatRow>
