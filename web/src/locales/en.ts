@@ -1699,7 +1699,7 @@ export const en = {
 	"inbounds.type.wireguard": "Plain WireGuard",
 	"inbounds.type.xray": "Xray {protocol}",
 	"inbounds.typeHint": "Which apps can connect to it.",
-	"inbounds.transportHint": "How the traffic travels to this inbound: udp-obfs, tls, ws, fronted or fronted-shaped for Veilway, udp or ws for plain WireGuard.",
+	"inbounds.transportHint": "How the traffic travels to this inbound: tls, ws, fronted or fronted-shaped for Veilway (tls is the usual pick; UDP transports are easy to spot), udp or ws for plain WireGuard.",
 	"inbounds.mtu": "MTU {mtu}",
 	"inbounds.users": "{count, plural, one {# user} other {# users}}",
 	"inbounds.rating": "Rated Detectable: encrypted, but a censor may tell it is a tunnel.",

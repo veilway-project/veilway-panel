@@ -1700,7 +1700,7 @@ export const fa: Record<PanelKey, string> = {
 	"inbounds.type.wireguard": "WireGuard ساده",
 	"inbounds.type.xray": "Xray {protocol}",
 	"inbounds.typeHint": "کدام برنامه‌ها می‌توانند به آن وصل شوند.",
-	"inbounds.transportHint": "ترافیک چطور به این اینباند می‌رسد: udp-obfs، tls، ws، fronted یا fronted-shaped برای Veilway، و udp یا ws برای WireGuard ساده.",
+	"inbounds.transportHint": "ترافیک چطور به این اینباند می‌رسد: tls، ws، fronted یا fronted-shaped برای Veilway (معمولاً tls؛ ترنسپورت‌های UDP به‌آسانی شناخته می‌شوند)، و udp یا ws برای WireGuard ساده.",
 	"inbounds.mtu": "MTU {mtu}",
 	"inbounds.users": "{count, plural, one {# کاربر} other {# کاربر}}",
 	"inbounds.rating": "رتبهٔ قابل‌شناسایی: رمزگذاری شده، اما سانسورچی ممکن است بفهمد تونل است.",

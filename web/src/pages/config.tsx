@@ -38,7 +38,7 @@ const PICKED = ["user", "group", "inbound", "transport", "link"];
 const RULE_TRANSPORTS = ["udp", "udp-obfs", "tls", "ws", "ws-plain", "fronted", "fronted-shaped", "faketls", "socks5", "http"];
 const loopback = (host: string) => /^\[?(127\.|::1(\]|\/|$))/.test(host);
 const local = (host: string) => loopback(host) || /^\[?(10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|f[cd][0-9a-f]{0,2}:|fe[89ab][0-9a-f]?:)/i.test(host);
-const BLANK: Record<Exclude<Section, "routing">, Item> = {inbounds: {tag: "", type: "veilway", address: [], transports: [{type: "udp-obfs", listen: ""}]}, outbounds: {tag: "", type: "direct"}, exits: {tag: "", backend: {type: "netstack", outbound: ""}}};
+const BLANK: Record<Exclude<Section, "routing">, Item> = {inbounds: {tag: "", type: "veilway", address: [], transports: [{type: "tls", listen: ""}]}, outbounds: {tag: "", type: "direct"}, exits: {tag: "", backend: {type: "netstack", outbound: ""}}};
 let schemaCache: Promise<Schema> | null = null;
 
 // The schema does not change while the panel runs, so every editor shares one copy.
@@ -354,7 +354,7 @@ function ItemJson({value, onChange}: {value: Item, onChange: (item: Item | null,
 
 function ItemForm({section, hidden, item, taken, outbounds, kinds = {}, socks = [], exits = [], chain = [], chained = [], xray = false, onXray, schema, onSave, onClose}: {section: Exclude<Section, "routing">, hidden: boolean, item: Item | null, taken: string[], outbounds: string[], kinds?: Record<string, string>, socks?: string[], exits?: Item[], chain?: Item[], chained?: string[], xray?: boolean, onXray?: () => void, schema: Schema | null, onSave: (item: Item, notes: string[]) => void, onClose: () => void}) {
 	const {t, number} = useP(), say = useIssueText(), read = (from: Item) => ({draft: from, addresses: ((from.address as string[] | undefined) ?? []).join("\n"), links: ((((from.backend ?? {}) as Item).links as string[] | undefined) ?? []).join("\n"), rows: list(from.transports).map(toRow), headers: ((from.upgrade_headers as string[] | undefined) ?? []).join("\n")});
-	const [form, setForm] = useState(() => read(item ?? BLANK[section])), [access, setAccess] = useState<Access>(() => (item?.users as string[] | undefined)?.length || (item?.groups as string[] | undefined)?.length ? "chosen" : "all"), [json, setJson] = useState<string | null>(null), [issues, setIssues] = useState<{path: string, text: string}[]>([]), [tried, setTried] = useState(false), [attention, setAttention] = useState<number | null>(null), [noXray, setNoXray] = useState(false), formRef = useRef<HTMLFormElement>(null);
+	const [form, setForm] = useState(() => read(item ?? (section === "inbounds" ? {...BLANK.inbounds, transport_keys: [newKey(false)], upgrade_cookie: newCookie(), transports: [{type: "tls", listen: "", path: newPath()}]} : BLANK[section]))), [access, setAccess] = useState<Access>(() => (item?.users as string[] | undefined)?.length || (item?.groups as string[] | undefined)?.length ? "chosen" : "all"), [json, setJson] = useState<string | null>(null), [issues, setIssues] = useState<{path: string, text: string}[]>([]), [tried, setTried] = useState(false), [attention, setAttention] = useState<number | null>(null), [noXray, setNoXray] = useState(false), formRef = useRef<HTMLFormElement>(null);
 	const {draft, rows} = form, patch = (change: Partial<typeof form>) => setForm({...form, ...change}), setRows = (next: Row[]) => patch({rows: next});
 	useEffect(() => { if (attention !== null) setAttention(invalid(formRef.current).length); });
 	const set = (key: string, next: unknown) => { const copy = {...draft}; if (next === undefined || next === "") delete copy[key]; else copy[key] = next; patch({draft: copy}); };
@@ -510,7 +510,7 @@ function ItemForm({section, hidden, item, taken, outbounds, kinds = {}, socks = 
 						</div>;
 					})}
 					{reorder.live}
-					{rows.length < 8 && <div><Button size="sm" icon="plus" onClick={() => setRows([...rows, toRow({type: "udp-obfs"}, -1)])}>{t("config.addTransport")}</Button></div>}
+					{rows.length < 8 && <div><Button size="sm" icon="plus" onClick={() => kind === "wireguard" ? setRows([...rows, toRow({type: "udp"}, -1)]) : patch({rows: [...rows, toRow({type: "tls", path: newPath()}, -1)], draft: {...draft, ...(!str(keys[0]) ? {transport_keys: [newKey(false), ...keys.slice(1)]} : {}), ...(!str(draft.upgrade_cookie) ? {upgrade_cookie: newCookie()} : {})}})}>{t("config.addTransport")}</Button></div>}
 					<details className="p-details"><summary>{t("inbounds.rating")}</summary><p className="vw-muted vw-small">{t("inbounds.ratingMore")}</p></details>
 				</fieldset>
 				{proved && <fieldset className="p-mirror">
