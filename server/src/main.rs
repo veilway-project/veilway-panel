@@ -45,6 +45,17 @@ async fn main() -> ExitCode {
 			})();
 			match result {Ok(()) => ExitCode::SUCCESS, Err(error) => {eprintln!("veilway-panel: {error}"); ExitCode::FAILURE}}
 		}
-		_ => {eprintln!("usage: veilway-panel run [--config panel.json] | admins [--config panel.json] | reset-password <username> [--config panel.json] | openapi"); ExitCode::from(2)}
+		Some("first-run") => {
+			let flag = |name: &str| args.iter().position(|arg| arg == name).and_then(|at| args.get(at + 1)).map_or("", String::as_str).to_string();
+			let result = (|| -> Result<(), String> {
+				let cfg = Config::load(args.iter().position(|arg| arg == "--config").and_then(|at| args.get(at + 1)).map_or("panel.json", String::as_str))?;
+				let db = Db::open(&cfg.database).map_err(|error| format!("{}: {error}", cfg.database.display()))?;
+				let (host, url, pin) = (flag("--node-host"), flag("--endpoint-url"), flag("--endpoint-pin"));
+				println!("{}", db.blocking(move |connection| admin::console_first_run(connection, &host, &url, &pin)).map_err(|error| error.to_string())??);
+				Ok(())
+			})();
+			match result {Ok(()) => ExitCode::SUCCESS, Err(error) => {eprintln!("veilway-panel: {error}"); ExitCode::FAILURE}}
+		}
+		_ => {eprintln!("usage: veilway-panel run [--config panel.json] | admins [--config panel.json] | reset-password <username> [--config panel.json] | first-run [--node-host H] [--endpoint-url U] [--endpoint-pin P] [--config panel.json] | openapi"); ExitCode::from(2)}
 	}
 }

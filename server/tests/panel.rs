@@ -3733,3 +3733,23 @@ async fn a_device_has_an_address_in_a_separate_wireguard_inbound_in_the_node_con
 	let text = answer.json()["configs"][0]["content"].as_str().unwrap().to_string();
 	assert!(text.contains("Address = 10.8.0.2/32\n") && text.contains("DNS = 10.8.0.1\n"), "{text}");
 }
+
+#[tokio::test]
+async fn the_installer_first_run_fills_only_what_is_empty() {
+	let h = Harness::new().await;
+	h.app.db.call(|db| db.execute("delete from settings where key = 'settings'", []).unwrap()).await.unwrap();
+	let run = |host: &'static str, url: &'static str, pin: &'static str| h.app.db.call(move |db| admin::console_first_run(db, host, url, pin));
+	let pin = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+	assert!(run("127.0.0.1", "", "").await.unwrap().is_err(), "loopback is no address apps can dial");
+	assert!(run("bad host", "", "").await.unwrap().is_err(), "a name with a space");
+	assert!(run("192.0.2.10", "https://192.0.2.10/sub/main", "").await.unwrap().is_err(), "an IP endpoint needs its pin");
+	assert!(run("192.0.2.10", "ftp://192.0.2.10/sub/main", pin).await.unwrap().is_err(), "not http or https");
+	assert!(h.app.db.call(|db| db.query_row("select count(*) from settings where key = 'settings'", [], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap() == 0, "a refusal stores nothing");
+	assert!(run("192.0.2.10", "https://192.0.2.10/sub/main", pin).await.unwrap().is_ok());
+	let stored = h.app.db.call(|db| db.query_row("select value from settings where key = 'settings'", [], |row| row.get::<_, String>(0)).unwrap()).await.unwrap();
+	let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+	assert_eq!((stored["node_host"].clone(), stored["endpoints"][0]["url"].clone(), stored["endpoints"][0]["pins"][0].clone(), stored["default_endpoint"].clone()), (json!("192.0.2.10"), json!("https://192.0.2.10/sub/main"), json!(pin), json!("main")));
+	assert!(run("198.51.100.7", "https://other.example/sub/main", "").await.unwrap().unwrap().starts_with("nothing to fill"), "values already set stay");
+	let again = h.app.db.call(|db| db.query_row("select value from settings where key = 'settings'", [], |row| row.get::<_, String>(0)).unwrap()).await.unwrap();
+	assert_eq!(serde_json::from_str::<serde_json::Value>(&again).unwrap()["node_host"], "192.0.2.10");
+}
