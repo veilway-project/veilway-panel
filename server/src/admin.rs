@@ -432,6 +432,32 @@ pub fn console_reset(db: &Connection, name: &str, password: &str) -> Result<usiz
 	Ok(ended)
 }
 
+/// Fills the node address and the endpoint main from the installer's first run. A value that is already set is never replaced, and everything is checked as the settings form would check it, so nothing is stored when any part is refused.
+pub fn console_first_run(db: &Connection, host: &str, url: &str, pin: &str) -> Result<String, String> {
+	let stored = db.query_row("select value from settings where key = 'settings'", [], |row| row.get::<_, String>(0)).optional().map_err(|error| error.to_string())?;
+	let before: Settings = stored.map(|text| serde_json::from_str(&text).map_err(|error| format!("the stored settings cannot be read: {error}"))).transpose()?.unwrap_or_default();
+	let (mut settings, mut done) = (before.clone(), Vec::new());
+	settings.migrate();
+	if settings.node_host.is_empty() && !host.is_empty() {
+		let name = host.to_ascii_lowercase();
+		let address = name.parse::<std::net::IpAddr>();
+		if address.as_ref().is_ok_and(|address| address.is_loopback() || address.is_unspecified() || address.is_multicast()) || (address.is_err() && !(name.contains('.') && name.len() <= 253 && name.split('.').all(|label| !label.is_empty() && label.len() <= 63 && !label.starts_with('-') && !label.ends_with('-') && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')))) {return Err(format!("{host:?} is not an address or a host name apps can dial"))}
+		settings.node_host = name;
+		done.push("node address");
+	}
+	if settings.endpoints.is_empty() && !url.is_empty() {
+		settings.endpoints.push(Endpoint {name: "main".into(), url: url.into(), pins: if pin.is_empty() {Vec::new()} else {vec![pin.into()]}});
+		settings.default_endpoint = "main".into();
+		done.push("endpoint main");
+	}
+	if done.is_empty() {return Ok("nothing to fill: the panel already has its node address and an endpoint".into())}
+	crate::endpoints::validate(&settings)?;
+	store_settings(db, &std::sync::RwLock::new(before), |stored| *stored = settings)?;
+	let detail = format!("{} filled in by the installer", done.join(" and "));
+	audit(db, "console", "console", "settings.update", "settings", &detail);
+	Ok(detail)
+}
+
 #[derive(Deserialize, JsonSchema)]
 pub struct AuditQuery {pub limit: Option<i64>, pub before: Option<i64>}
 
