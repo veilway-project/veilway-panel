@@ -572,6 +572,19 @@ async fn a_managed_link_is_offered_and_answered_through_the_api_and_the_node_on_
 }
 
 #[tokio::test]
+async fn a_node_with_no_user_inbound_gets_no_devices_and_still_takes_the_config() {
+	let panel = Panel::start().await;
+	let (_, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;
+	remote.document.lock().unwrap()["inbounds"] = json!([]);
+	let start = *remote.generation.lock().unwrap();
+	let alice = panel.user("alice", json!({})).await;
+	panel.device(alice).await;
+	for _ in 0..50 {panel.settle().await; if *remote.generation.lock().unwrap() > start {break}}
+	assert!(*remote.generation.lock().unwrap() > start, "the node is still given a config");
+	assert_eq!(remote.document.lock().unwrap()["users"], json!([]), "a device with no address in any inbound's range here is left out, since the node refuses the document for it");
+}
+
+#[tokio::test]
 async fn a_remote_node_is_given_only_the_groups_its_config_declares() {
 	let panel = Panel::start().await;
 	let (two, remote) = panel.add_node("n2", "Frankfurt", "10.67.0.0/24").await;

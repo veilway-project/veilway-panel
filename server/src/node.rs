@@ -108,11 +108,13 @@ pub(crate) async fn fill(app: &Arc<App>, node: Node, document: &mut Value) -> Re
 			let mut devices = db.prepare("select devices.id, devices.public_key, device_addresses.address, devices.transport_secret from devices join device_addresses on device_addresses.device_id = devices.id and device_addresses.node_id = ? where devices.user_id = ? and devices.state = 'enrolled' order by devices.id").map_err(|error| error.to_string())?;
 			let devices = devices.query_map([node.0, id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, Vec<u8>>(3)?))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
 			let proxy: Option<Vec<u8>> = db.query_row("select proxy_password from users where id = ?", [id], |row| row.get(0)).map_err(|error| error.to_string())?;
+			// An address in no inbound's range here is dropped, and a device left with none (a node with no user inbound, such as one that only carries an exit) is left out, since the node refuses the whole document for either.
+			let devices: Vec<(i64, String, Vec<String>, Vec<u8>)> = devices.into_iter().map(|(device, public_key, address, sealed)| (device, public_key, subs::node_addresses(&pool, &inbounds, &address, &taken).into_iter().filter(|address| address.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| inbounds.iter().filter_map(subs::range_of).any(|range| range.contains(&ip)))).collect::<Vec<_>>(), sealed)).filter(|(_, _, addresses, _)| !addresses.is_empty()).collect();
 			if devices.is_empty() && proxy.is_none() {continue}
-			let devices: Vec<Value> = devices.into_iter().map(|(device, public_key, address, sealed)| {
+			let devices: Vec<Value> = devices.into_iter().map(|(device, public_key, addresses, sealed)| {
 				let secret = keys.open_secret(&record, &format!("transport_secret:{public_key}"), &sealed).ok_or("a transport secret does not open")?;
 				let secret = if remote {crypto::node_secret(crypto::NODE_TRANSPORT_SALT, &uid, &secret).to_vec()} else {secret};
-				Ok::<_, String>(json!({"name": if remote {keys.node_device(&uid, device)} else {format!("d{device}")}, "public_key": public_key, "transport_secrets": [App::standard(&secret)], "addresses": subs::node_addresses(&pool, &inbounds, &address, &taken)}))
+				Ok::<_, String>(json!({"name": if remote {keys.node_device(&uid, device)} else {format!("d{device}")}, "public_key": public_key, "transport_secrets": [App::standard(&secret)], "addresses": addresses}))
 			}).collect::<Result<_, _>>()?;
 			let given = if remote {keys.node_user(&uid, &record)} else {name.clone()};
 			let mut exits_given = serde_json::from_str::<Value>(&exits).unwrap_or(json!("all"));
