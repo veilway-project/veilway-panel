@@ -955,7 +955,8 @@ async fn a_remote_nodes_relays_reach_its_own_profiles_in_a_subscription_and_no_o
 	let made = panel.device(alice).await;
 	panel.call(Method::PATCH, &format!("/p/api/nodes/{two}"), Some(json!({"relays": [relay("cdn2", "203.0.113.5"), {"name": "mine2", "address": "203.0.113.8", "enabled": true, "users": [alice]}]}))).await;
 	panel.call(Method::PATCH, &format!("/p/api/nodes/{three}"), Some(json!({"relays": [relay("cdn3", "203.0.113.7")]}))).await;
-	panel.settle().await;
+	// A slow runner can need more than one round before both nodes have the device.
+	for _ in 0..50 {panel.settle().await; if panel.call(Method::GET, "/p/api/nodes", None).await["nodes"].as_array().unwrap().iter().all(|node| node["applied_rev"].as_i64() >= node["wanted_rev"].as_i64()) {break}}
 	let payload = signed_payload(&panel, alice, made["id"].as_i64().unwrap()).await;
 	let profiles = payload["profiles"].as_array().unwrap();
 	let endpoints = |id: &str| profiles.iter().find(|profile| profile["id"] == id).map(|profile| profile["transports"][0]["endpoints"].clone()).unwrap_or(Value::Null);
