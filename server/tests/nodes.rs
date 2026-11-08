@@ -955,9 +955,9 @@ async fn a_remote_nodes_relays_reach_its_own_profiles_in_a_subscription_and_no_o
 	let made = panel.device(alice).await;
 	panel.call(Method::PATCH, &format!("/p/api/nodes/{two}"), Some(json!({"relays": [relay("cdn2", "203.0.113.5"), {"name": "mine2", "address": "203.0.113.8", "enabled": true, "users": [alice]}]}))).await;
 	panel.call(Method::PATCH, &format!("/p/api/nodes/{three}"), Some(json!({"relays": [relay("cdn3", "203.0.113.7")]}))).await;
-	// A slow runner can need more than one round before both nodes have the device.
-	for _ in 0..50 {panel.settle().await; if panel.call(Method::GET, "/p/api/nodes", None).await["nodes"].as_array().unwrap().iter().all(|node| node["applied_rev"].as_i64() >= node["wanted_rev"].as_i64()) {break}}
-	let payload = signed_payload(&panel, alice, made["id"].as_i64().unwrap()).await;
+	// A slow runner can need more than one round before both nodes have the device, and a node can look caught up before its push is even queued, so this waits for the profiles themselves.
+	let mut payload = Value::Null;
+	for _ in 0..50 {panel.settle().await; payload = signed_payload(&panel, alice, made["id"].as_i64().unwrap()).await; if payload["profiles"].as_array().is_some_and(|profiles| profiles.len() >= 3) {break}}
 	let profiles = payload["profiles"].as_array().unwrap();
 	let endpoints = |id: &str| profiles.iter().find(|profile| profile["id"] == id).map(|profile| profile["transports"][0]["endpoints"].clone()).unwrap_or(Value::Null);
 	assert_eq!(endpoints("main"), json!(["192.0.2.10:51820", "198.51.100.1:51820"]), "node 1's relay reaches node 1's profile only");
