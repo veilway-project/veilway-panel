@@ -4414,6 +4414,14 @@
             "format": "int64",
             "type": "integer"
           },
+          "last_seen": {
+            "description": "When one of the user's devices last fetched its subscription or was enrolled, as unix seconds: the newest over all devices. Null when none ever has. Unlike `node`, this outlives a node restart and covers devices that use other nodes.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "name": {
             "type": "string"
           },

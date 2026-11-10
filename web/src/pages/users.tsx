@@ -70,7 +70,9 @@ export function UsersPage({adding}: {adding: boolean}) {
 		// WireGuard makes a new session every two minutes while traffic flows, so an older one means the device went quiet.
 		if (age !== null && age < 180) return <Mark tone="success">{t("users.online")}</Mark>;
 		if (u.pending_devices) return <Mark tone="info">{t("users.pending", {count: u.pending_devices})}</Mark>;
-		return <Mark tone="muted">{age === null ? t("users.notSeen") : (span => t("users.seen", {time: t(span.key, {count: span.count})}))(ago(age))}</Mark>;
+		// The node forgets a session a few minutes after it goes quiet and at every restart, so the panel's own record of the last subscription fetch fills in.
+		const fetched = u.last_seen ? Math.max(0, Math.floor(Date.now() / 1000) - u.last_seen) : null, last = age === null ? fetched : fetched === null ? age : Math.min(age, fetched);
+		return <Mark tone="muted">{last === null ? t("users.notSeen") : (span => t("users.seen", {time: t(span.key, {count: span.count})}))(ago(last))}</Mark>;
 	};
 	return <>
 		<PageHead title={t("users.title")} lead={users.data ? t("users.lead", {count: all.length}) : undefined}><Button variant="primary" icon="plus" onClick={() => setForm("new")}>{t("users.add")}</Button></PageHead>

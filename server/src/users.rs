@@ -45,6 +45,8 @@ pub struct UserOut {
 	/// 0 is no limit beyond the node's own 64.
 	pub device_limit: i64, pub note: String, pub created: i64, pub subscription_id: String,
 	pub devices: i64, pub pending_devices: i64,
+	/// When one of the user's devices last fetched its subscription or was enrolled, as unix seconds: the newest over all devices. Null when none ever has. Unlike `node`, this outlives a node restart and covers devices that use other nodes.
+	pub last_seen: Option<i64>,
 	/// Whether the user has a proxy password. The password itself is only at `/users/{id}/proxy/show`.
 	pub proxy_login: bool,
 	/// The node's own record of the user: usage, denial and traffic. Null when the node cannot be reached.
@@ -59,12 +61,15 @@ pub struct UserOut {
 	pub usage: Option<usage::Across>,
 }
 
-fn out(user: &UserRow, devices: i64, pending: i64, node: Option<Value>) -> UserOut {
-	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), endpoint: user.endpoint.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, speed_up: user.speed_up, speed_down: user.speed_down, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, proxy_login: user.proxy, node, nodes: serde_json::from_str(&user.nodes).ok(), profile_order: user.profile_order.as_deref().and_then(|text| serde_json::from_str(text).ok()), usage: None}
+/// Devices, pending devices and the newest device `last_seen` of one user.
+type Counted = (i64, i64, Option<i64>);
+
+fn out(user: &UserRow, (devices, pending, last_seen): Counted, node: Option<Value>) -> UserOut {
+	UserOut {id: user.id, name: user.name.clone(), enabled: user.enabled, groups: serde_json::from_str(&user.groups).unwrap_or_default(), exits: serde_json::from_str(&user.exits).unwrap_or(json!("all")), exit: user.default_exit.clone(), endpoint: user.endpoint.clone(), quota_bytes: user.quota_bytes, quota_period: user.quota_period.clone(), expires_at: user.expires_at, speed_up: user.speed_up, speed_down: user.speed_down, device_limit: user.device_limit, note: user.note.clone(), created: user.created, subscription_id: user.sub_id.clone(), devices, pending_devices: pending, last_seen, proxy_login: user.proxy, node, nodes: serde_json::from_str(&user.nodes).ok(), profile_order: user.profile_order.as_deref().and_then(|text| serde_json::from_str(text).ok()), usage: None}
 }
 
-async fn counts(app: &App, id: i64) -> Result<(i64, i64), Failure> {
-	Ok(app.db.call(move |db| db.query_row("select count(*), coalesce(sum(state = 'pending'), 0) from devices where user_id = ?", [id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))).await??)
+async fn counts(app: &App, id: i64) -> Result<Counted, Failure> {
+	Ok(app.db.call(move |db| db.query_row("select count(*), coalesce(sum(state = 'pending'), 0), max(last_seen) from devices where user_id = ?", [id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))).await??)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -74,24 +79,23 @@ pub struct UserQuery {pub q: Option<String>, pub group: Option<String>, pub enab
 pub struct UsersOut {pub users: Vec<UserOut>}
 
 pub async fn list(State(app): State<Arc<App>>, Query(query): Query<UserQuery>) -> Result<Response, Failure> {
-	let (rows, counted) = app.db.call(|db| -> rusqlite::Result<(Vec<UserRow>, HashMap<i64, (i64, i64)>)> {
+	let (rows, counted) = app.db.call(|db| -> rusqlite::Result<(Vec<UserRow>, HashMap<i64, Counted>)> {
 		let rows = db.prepare(&format!("select {USER_COLUMNS} from users order by name"))?.query_map([], UserRow::read)?.collect::<Result<Vec<_>, _>>()?;
-		let counted = db.prepare("select user_id, count(*), coalesce(sum(state = 'pending'), 0) from devices group by user_id")?.query_map([], |row| Ok((row.get::<_, i64>(0)?, (row.get::<_, i64>(1)?, row.get::<_, i64>(2)?))))?.collect::<Result<HashMap<_, _>, _>>()?;
+		let counted = db.prepare("select user_id, count(*), coalesce(sum(state = 'pending'), 0), max(last_seen) from devices group by user_id")?.query_map([], |row| Ok((row.get::<_, i64>(0)?, (row.get(1)?, row.get(2)?, row.get(3)?))))?.collect::<Result<HashMap<_, _>, _>>()?;
 		Ok((rows, counted))
 	}).await??;
 	let nodes = node::usage(&app, LOCAL).await;
 	let mut users = Vec::new();
 	for user in rows.iter().filter(|user| query.q.as_ref().is_none_or(|q| user.name.contains(q.as_str())) && query.enabled.is_none_or(|enabled| user.enabled == enabled) && query.group.as_ref().is_none_or(|group| serde_json::from_str::<Vec<String>>(&user.groups).unwrap_or_default().contains(group))) {
-		let (devices, pending) = counted.get(&user.id).copied().unwrap_or((0, 0));
-		users.push(out(user, devices, pending, nodes.get(&user.name).cloned()));
+		users.push(out(user, counted.get(&user.id).copied().unwrap_or((0, 0, None)), nodes.get(&user.name).cloned()));
 	}
 	ok(&UsersOut {users})
 }
 
 pub async fn get(State(app): State<Arc<App>>, Path(id): Path<i64>) -> Result<Response, Failure> {
 	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
-	let (devices, pending) = counts(&app, id).await?;
-	let mut shown = out(&user, devices, pending, node::usage(&app, LOCAL).await.remove(&user.name));
+	let counted = counts(&app, id).await?;
+	let mut shown = out(&user, counted, node::usage(&app, LOCAL).await.remove(&user.name));
 	shown.usage = app.db.call(move |db| usage::across(db, id, now())).await??;
 	ok(&shown)
 }
@@ -235,7 +239,7 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	}).await??;
 	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
 	let (link, link_error) = match view(&app, &user, &token) {Ok(link) => (Some(link), None), Err(error) => (None, Some(error))};
-	ok(&Created {user: out(&user, 0, 0, None), link, link_error})
+	ok(&Created {user: out(&user, (0, 0, None), None), link, link_error})
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -271,8 +275,8 @@ pub async fn patch(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	}).await??;
 	let node = push(&app).await;
 	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
-	let (devices, pending) = counts(&app, id).await?;
-	ok(&Changed {user: out(&user, devices, pending, None), node})
+	let counted = counts(&app, id).await?;
+	ok(&Changed {user: out(&user, counted, None), node})
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -626,8 +630,8 @@ pub async fn proxy_set(State(app): State<Arc<App>>, Extension(ctx): Extension<Ct
 	}).await??;
 	let node = push(&app).await;
 	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
-	let (devices, pending) = counts(&app, id).await?;
-	ok(&ProxyChanged {user: out(&user, devices, pending, None), node})
+	let counted = counts(&app, id).await?;
+	ok(&ProxyChanged {user: out(&user, counted, None), node})
 }
 
 pub async fn proxy_remove(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(id): Path<i64>) -> Result<Response, Failure> {
@@ -641,8 +645,8 @@ pub async fn proxy_remove(State(app): State<Arc<App>>, Extension(ctx): Extension
 	}).await??;
 	let node = push(&app).await;
 	let user = app.db.call(move |db| UserRow::load(db, id)).await??;
-	let (devices, pending) = counts(&app, id).await?;
-	ok(&ProxyChanged {user: out(&user, devices, pending, None), node})
+	let counted = counts(&app, id).await?;
+	ok(&ProxyChanged {user: out(&user, counted, None), node})
 }
 
 /// Opening the password is an export of a secret, so the route needs a recent re-authentication and the audit log says that it was shown, not what it was.

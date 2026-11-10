@@ -41,6 +41,7 @@
         "office"
       ],
       "id": 1,
+      "last_seen": 1700000300,
       "name": "alice",
       "node": {
         "down_bytes": 1034,
@@ -112,6 +113,7 @@
       "expires_at": 4102444800,
       "groups": [],
       "id": 2,
+      "last_seen": null,
       "name": "bob",
       "node": {
         "down_bytes": 4,
@@ -145,6 +147,7 @@
       "expires_at": null,
       "groups": [],
       "id": 3,
+      "last_seen": null,
       "name": "carol",
       "node": null,
       "note": "",

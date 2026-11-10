@@ -3419,6 +3419,11 @@ export interface components {
             groups: string[];
             /** Format: int64 */
             id: number;
+            /**
+             * Format: int64
+             * @description When one of the user's devices last fetched its subscription or was enrolled, as unix seconds: the newest over all devices. Null when none ever has. Unlike `node`, this outlives a node restart and covers devices that use other nodes.
+             */
+            last_seen?: number | null;
             name: string;
             /** @description The node's own record of the user: usage, denial and traffic. Null when the node cannot be reached. */
             node?: unknown;
