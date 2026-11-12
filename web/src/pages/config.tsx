@@ -425,7 +425,7 @@ function ItemForm({section, hidden, item, taken, outbounds, kinds = {}, socks = 
 					<SecretField label={t("config.privateKey")} hint={t(item ? "config.privateKeyKeep" : "config.privateKeyNew")} value={str(draft.private_key)} onChange={value => set("private_key", value.trim())} autoComplete="off"/>
 					{!str(draft.private_key).startsWith("<redacted") && <Button onClick={() => set("private_key", newKey(true))}>{t("config.keyMake")}</Button>}
 				</div>
-				<LinesField label={t("config.addresses")} hint={t("config.addressesHint")} value={form.addresses} onChange={addresses => patch({addresses})} rows={2}/>
+				<LinesField label={t("config.addresses")} hint={t("config.addressesHint")} value={form.addresses} onChange={addresses => patch({addresses})} rows={2} optional={false}/>
 				<fieldset className="p-mirror">
 					<legend className="vw-label">{t("config.col.transports")}</legend>
 					<p className="vw-muted vw-small">{t("inbounds.transportHint")}</p>
