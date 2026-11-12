@@ -2407,6 +2407,8 @@ export interface components {
             gateway_switch_due: boolean;
             keys_missing: boolean;
             last_sync?: string | null;
+            /** @description True while users exist and no profile is published: the subscription endpoint answers every app as an unknown path, so no app can add a link. */
+            profiles_missing: boolean;
             /** @description Why the node refused the last users the panel sent, null while pushes work or fail only for another reason (the node cannot be reached). No user change reaches the node until this is fixed. */
             push_refused?: string | null;
             reachable: boolean;

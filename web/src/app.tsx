@@ -163,6 +163,7 @@ function Frame({hash, username, httpBanner, twoStep, prefs, onPrefs, onLogout}: 
 				<NodeBanner node={node.data} onPushed={node.reload}/>
 				{node.data?.gateway_missing && <Banner tone="danger" title={t("banner.gateway.missing")} action={<Button size="sm" onClick={() => { location.hash = "#/settings/gateway"; }}>{t("banner.gateway.open")}</Button>}>{t("banner.gateway.missingBody")}</Banner>}
 				{node.data?.gateway_switch_due && !node.data.gateway_missing && <Banner tone="info" title={t("banner.gateway.due")} action={<Button size="sm" onClick={() => { location.hash = "#/settings/gateway"; }}>{t("banner.gateway.open")}</Button>}>{t("banner.gateway.dueBody")}</Banner>}
+				{node.data?.profiles_missing && !node.data.gateway_missing && <Banner tone="danger" title={t("banner.profiles.missing")} action={<Button size="sm" onClick={() => { location.hash = "#/profiles"; }}>{t("banner.profiles.open")}</Button>}>{t("banner.profiles.missingBody")}</Banner>}
 				{node.data?.clock_synchronized === false && <Banner tone="warning" title={t("banner.clock.title")}>{t("banner.clock.body")}</Banner>}
 				<div className="p-page" key={page === "users" ? page + "/" + sub : page}>
 					{page === "dashboard" && <DashboardPage live={live.data} onLive={live.reload} inbounds={counts.data?.inbounds}/>}
