@@ -1172,6 +1172,13 @@
       "InboundEdit": {
         "additionalProperties": false,
         "properties": {
+          "all_users": {
+            "description": "true for every user, false to serve only `users`. The choice stays as it is when both are left out. A user taken out loses their credential here.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "cert": {
             "description": "As on create: needed for vless and trojan, refused for shadowsocks.",
             "type": [
@@ -1206,6 +1213,13 @@
               "null"
             ]
           },
+          "name": {
+            "description": "The name of a self-signed certificate, which links put in `sni`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "new_server_key": {
             "default": false,
             "description": "For shadowsocks: a new server key. Every share link of the inbound holds the old one, so every user needs a new link.",
@@ -1216,6 +1230,30 @@
             "maximum": 65535,
             "minimum": 0,
             "type": "integer"
+          },
+          "self_signed": {
+            "description": "vless and trojan: true for a certificate the node makes, false or left out for the certificate files.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "users": {
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "vision": {
+            "description": "vless only: whether every client carries the Vision flow. Left as it is when left out. A client app that holds an old link needs the new one.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1226,6 +1264,13 @@
       "InboundIn": {
         "additionalProperties": false,
         "properties": {
+          "all_users": {
+            "description": "false to serve only the users in `users`. Every user when left out.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "cert": {
             "description": "Paths of the certificate and key files on the node. Needed for vless and trojan, refused for shadowsocks.",
             "type": [
@@ -1260,6 +1305,13 @@
               "null"
             ]
           },
+          "name": {
+            "description": "The name a self-signed certificate and the links carry in `sni`. The link's host when left out.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "port": {
             "format": "uint16",
             "maximum": 65535,
@@ -1270,8 +1322,33 @@
             "description": "vless, trojan or shadowsocks.",
             "type": "string"
           },
+          "self_signed": {
+            "description": "vless and trojan: the node makes the certificate (it lasts about ten years) and links carry its pin, in the place of certificate files.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "tag": {
             "type": "string"
+          },
+          "users": {
+            "description": "The ids of the users that get a credential and a link here.",
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "vision": {
+            "description": "vless only: every client carries the Vision flow (`xtls-rprx-vision`). Off when left out.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -4818,6 +4895,10 @@
       },
       "XrayInboundOut": {
         "properties": {
+          "all_users": {
+            "description": "Whether every user gets a credential here. When false, `users` lists the ids of the users that do.",
+            "type": "boolean"
+          },
           "cert": {
             "type": [
               "string",
@@ -4861,6 +4942,13 @@
             "description": "The host the panel was given for this inbound, empty when links name the node's address.",
             "type": "string"
           },
+          "pin": {
+            "description": "The SHA-256 of the certificate the node serves, in hex, as the node reports it. Links carry it as `pcs`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "port": {
             "format": "uint16",
             "maximum": 65535,
@@ -4875,8 +4963,30 @@
             "description": "\"tls\" or \"none\".",
             "type": "string"
           },
+          "self_signed": {
+            "description": "Whether the node makes the certificate and its pin goes into links.",
+            "type": "boolean"
+          },
           "tag": {
             "type": "string"
+          },
+          "tls_name": {
+            "description": "The name of a self-signed certificate, which links put in `sni`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "users": {
+            "items": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "vision": {
+            "description": "Whether the VLESS clients carry the Vision flow.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -4889,7 +4999,11 @@
           "host",
           "own_host",
           "managed",
-          "certificate_missing"
+          "certificate_missing",
+          "all_users",
+          "users",
+          "vision",
+          "self_signed"
         ],
         "type": "object"
       },
@@ -4898,6 +5012,13 @@
           "link": {
             "description": "A secret, like the subscription link.",
             "type": "string"
+          },
+          "pin": {
+            "description": "The pin of the node's certificate in hex, for apps that ignore `pcs` in the link and take it in their TLS settings. Vless and trojan only.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "protocol": {
             "type": "string"

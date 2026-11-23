@@ -22,9 +22,14 @@ fn node_decoy(document: &Value) -> Option<String> {
 	document["inbounds"].as_array()?.iter().flat_map(|inbound| inbound["transports"].as_array().into_iter().flatten()).find(|transport| transport["type"] == "tls").and_then(|transport| transport["decoy"]["origin"].as_str().map(str::to_string))
 }
 
+/// The node's status, or null when it does not answer.
+async fn status(app: &App) -> Value {
+	match node::request(app, LOCAL, "GET", "/v1/status", None, None).await {Ok((200, body)) => serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null), _ => Value::Null}
+}
+
 /// Whether the node has the add-on, and its release. A node that says nothing of add-ons has none.
 async fn addon(app: &App) -> (bool, Option<String>) {
-	let status = match node::request(&app, LOCAL, "GET", "/v1/status", None, None).await {Ok((200, body)) => serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null), _ => Value::Null};
+	let status = status(app).await;
 	let xray = &status["addons"]["xray"];
 	(xray["installed"] == true, xray["release"].as_str().map(str::to_string))
 }
@@ -55,6 +60,17 @@ pub struct XrayInboundOut {
 	pub cert: Option<String>, pub key: Option<String>,
 	/// The origin of the web server a stranger is handed to, for vless and trojan.
 	pub decoy: Option<String>,
+	/// Whether every user gets a credential here. When false, `users` lists the ids of the users that do.
+	pub all_users: bool,
+	pub users: Vec<i64>,
+	/// Whether the VLESS clients carry the Vision flow.
+	pub vision: bool,
+	/// Whether the node makes the certificate and its pin goes into links.
+	pub self_signed: bool,
+	/// The name of a self-signed certificate, which links put in `sni`.
+	pub tls_name: Option<String>,
+	/// The SHA-256 of the certificate the node serves, in hex, as the node reports it. Links carry it as `pcs`.
+	pub pin: Option<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -62,12 +78,18 @@ pub struct XrayOut {pub installed: bool, pub release: Option<String>, pub inboun
 
 pub async fn get(State(app): State<Arc<App>>) -> Result<Response, Failure> {
 	let ((installed, release), (_, _, document)) = (addon(&app).await, nodecfg::running(&app, LOCAL).await?);
-	let made = app.db.call(|db| inbound_hosts(db)).await??;
+	let (made, all, chosen) = app.db.call(|db| -> rusqlite::Result<_> {
+		let mut chosen: HashMap<String, Vec<i64>> = HashMap::new();
+		for row in db.prepare("select tag, user_id from xray_inbound_users order by user_id")?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {let (tag, id) = row?; chosen.entry(tag).or_default().push(id);}
+		let all = db.prepare("select tag, all_users from xray_inbounds")?.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)))?.collect::<rusqlite::Result<HashMap<_, _>>>()?;
+		Ok((inbound_hosts(db)?, all, chosen))
+	}).await??;
+	let pins = status(&app).await["xray_pins"].clone();
 	let node_host = host_of(&app, &document, "").await;
 	let inbounds = document["xray"]["inbounds"].as_array().into_iter().flatten().map(|inbound| {
 		let (tag, listen) = (inbound["tag"].as_str().unwrap_or_default().to_string(), inbound["listen"].as_str().unwrap_or_default().to_string());
-		let own = made.iter().find(|(made, _)| *made == tag);
-		XrayInboundOut {protocol: inbound["protocol"].as_str().unwrap_or_default().to_string(), port: listen.rsplit_once(':').and_then(|(_, port)| port.parse().ok()).unwrap_or(0), security: if inbound.get("tls").is_some() {"tls"} else {"none"}.into(), clients: inbound["clients"].as_array().map_or(0, Vec::len), host: own.map(|(_, host)| host.clone()).filter(|host| !host.is_empty()).unwrap_or_else(|| node_host.clone()), own_host: own.map_or(String::new(), |(_, host)| host.clone()), managed: own.is_some(), certificate_missing: inbound["protocol"] != "shadowsocks" && inbound.get("tls").is_none(), cert: inbound["tls"]["cert"].as_str().map(str::to_string), key: inbound["tls"]["key"].as_str().map(str::to_string), decoy: inbound["decoy"].as_str().map(str::to_string), tag, listen}
+		let own = made.iter().find(|(made, _, _)| *made == tag);
+		XrayInboundOut {protocol: inbound["protocol"].as_str().unwrap_or_default().to_string(), port: listen.rsplit_once(':').and_then(|(_, port)| port.parse().ok()).unwrap_or(0), security: if inbound.get("tls").is_some() {"tls"} else {"none"}.into(), clients: inbound["clients"].as_array().map_or(0, Vec::len), host: own.map(|(_, host, _)| host.clone()).filter(|host| !host.is_empty()).unwrap_or_else(|| node_host.clone()), own_host: own.map_or(String::new(), |(_, host, _)| host.clone()), managed: own.is_some(), certificate_missing: inbound["protocol"] != "shadowsocks" && inbound.get("tls").is_none(), cert: inbound["tls"]["cert"].as_str().map(str::to_string), key: inbound["tls"]["key"].as_str().map(str::to_string), decoy: inbound["decoy"].as_str().map(str::to_string), all_users: all.get(&tag).copied().unwrap_or(true), users: chosen.get(&tag).cloned().unwrap_or_default(), vision: own.is_some_and(|(_, _, vision)| *vision), self_signed: inbound["tls"]["self_signed"] == true, tls_name: inbound["tls"]["name"].as_str().map(str::to_string), pin: pins[&tag].as_str().map(str::to_string), tag, listen}
 	}).collect();
 	ok(&XrayOut {installed, release, inbounds})
 }
@@ -87,21 +109,37 @@ pub struct InboundIn {
 	pub host: Option<String>,
 	/// For vless and trojan, the origin of the operator's own web server (http://127.0.0.1:8080) that anything that is not a user's connection is handed to. Taken from the node's `tls` transport when left out; the inbound is refused when the node has none.
 	pub decoy: Option<String>,
+	/// vless and trojan: the node makes the certificate (it lasts about ten years) and links carry its pin, in the place of certificate files.
+	pub self_signed: Option<bool>,
+	/// The name a self-signed certificate and the links carry in `sni`. The link's host when left out.
+	pub name: Option<String>,
+	/// vless only: every client carries the Vision flow (`xtls-rprx-vision`). Off when left out.
+	pub vision: Option<bool>,
+	/// false to serve only the users in `users`. Every user when left out.
+	pub all_users: Option<bool>,
+	/// The ids of the users that get a credential and a link here.
+	pub users: Option<Vec<i64>>,
 }
 
 /// The checks create and edit share: the listen address with the port, the certificate files and the host. Shadowsocks takes no certificate; vless and trojan need both files.
-fn checked(protocol: &str, port: u16, listen: Option<&str>, cert: &Option<String>, key: &Option<String>, host: Option<String>) -> Result<(String, Option<Value>, String), Failure> {
+fn checked(protocol: &str, port: u16, listen: Option<&str>, cert: &Option<String>, key: &Option<String>, self_signed: bool, name: Option<String>, host: Option<String>) -> Result<(String, Option<Value>, String), Failure> {
 	if port == 0 {return Err(Failure::bad("port is 1 to 65535."))}
 	let listen: IpAddr = listen.unwrap_or("0.0.0.0").parse().map_err(|_| Failure::bad("listen is an IP address."))?;
 	let path_ok = |path: &Option<String>| path.as_ref().is_some_and(|path| path.starts_with('/') && path.len() <= 4096 && !path.contains('\0'));
-	let tls = match (protocol == "shadowsocks", cert.is_some() || key.is_some()) {
-		(true, true) => return Err(Failure::bad("shadowsocks takes no certificate: it encrypts itself.")),
-		(true, false) => None,
-		(false, _) if path_ok(cert) && path_ok(key) => Some(json!({"cert": cert, "key": key})),
-		_ => return Err(Failure::bad("vless and trojan need the absolute paths of the certificate and key files on the node.")),
+	let name = name.filter(|name| !name.is_empty());
+	let host_ok = |text: &str| text.len() <= 253 && text.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-:".contains(&byte));
+	if name.as_ref().is_some_and(|name| !host_ok(name)) {return Err(Failure::bad("name is a domain name or an IP address."))}
+	if name.is_some() && !self_signed {return Err(Failure::bad("name goes with a self-signed certificate."))}
+	let tls = match (protocol == "shadowsocks", self_signed, cert.is_some() || key.is_some()) {
+		(true, false, false) => None,
+		(true, _, _) => return Err(Failure::bad("shadowsocks takes no certificate: it encrypts itself.")),
+		(false, true, true) => return Err(Failure::bad("a self-signed certificate takes no certificate files.")),
+		(false, true, false) => Some(match name {Some(name) => json!({"self_signed": true, "name": name}), None => json!({"self_signed": true})}),
+		(false, false, _) if path_ok(cert) && path_ok(key) => Some(json!({"cert": cert, "key": key})),
+		_ => return Err(Failure::bad("vless and trojan need the absolute paths of the certificate and key files on the node, or a self-signed certificate.")),
 	};
 	let host = host.unwrap_or_default();
-	if host.len() > 253 || !host.bytes().all(|byte| byte.is_ascii_alphanumeric() || b".-:".contains(&byte)) {return Err(Failure::bad("host is a domain name or an IP address."))}
+	if !host_ok(&host) {return Err(Failure::bad("host is a domain name or an IP address."))}
 	Ok((if listen.is_ipv6() {format!("[{listen}]:{port}")} else {format!("{listen}:{port}")}, tls, host))
 }
 
@@ -119,10 +157,32 @@ fn decoy_ok(decoy: Option<String>) -> Result<String, Failure> {
 }
 
 /// The host each Xray inbound the panel made names in its links, by tag.
-pub fn inbound_hosts(db: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
-	let mut statement = db.prepare("select tag, host from xray_inbounds")?;
-	let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect();
+pub fn inbound_hosts(db: &Connection) -> rusqlite::Result<Vec<(String, String, bool)>> {
+	let mut statement = db.prepare("select tag, host, vision from xray_inbounds")?;
+	let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect();
 	rows
+}
+
+/// What a request says about the users of an inbound: `None` leaves the choice as it is, `Some(None)` is every user, `Some(Some(ids))` the users named, each of which must exist.
+async fn choice(app: &App, all_users: Option<bool>, users: Option<Vec<i64>>) -> Result<Option<Option<Vec<i64>>>, Failure> {
+	let ids = match (all_users, users) {
+		(Some(true), _) => return Ok(Some(None)),
+		(None, None) => return Ok(None),
+		(Some(false), None) => return Err(Failure::bad("users names the users of the inbound when all_users is false.")),
+		(_, Some(ids)) => ids,
+	};
+	if ids.len() > 100_000 {return Err(Failure::bad("users is too long."))}
+	let ids: Vec<i64> = ids.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
+	let wanted = ids.clone();
+	if app.db.call(move |db| -> rusqlite::Result<bool> {for id in wanted {if db.query_row("select 1 from users where id = ?", [id], |_| Ok(())).optional()?.is_none() {return Ok(false)}} Ok(true)}).await?? {Ok(Some(Some(ids)))} else {Err(Failure::bad("users names a user that does not exist."))}
+}
+
+/// Writes who an inbound serves and whether it uses Vision. `users` is `None` for every user.
+fn store_choice(db: &Connection, tag: &str, users: &Option<Vec<i64>>, vision: bool) -> rusqlite::Result<()> {
+	db.execute("update xray_inbounds set all_users = ?, vision = ? where tag = ?", params![users.is_none(), vision, tag])?;
+	db.execute("delete from xray_inbound_users where tag = ?", [tag])?;
+	for id in users.iter().flatten() {db.execute("insert into xray_inbound_users (tag, user_id) values (?, ?)", params![tag, id])?;}
+	Ok(())
 }
 
 /// The address without its port, with the brackets of an IPv6 address taken off.
@@ -159,16 +219,18 @@ impl Exposure {
 	}
 }
 
-/// The exposure of a document. `hosts` are the inbounds' own host names by tag, and `node_host` stands in for one that is not set. Every name in `names` is looked up at once, and each lookup waits at most two seconds.
-pub async fn exposure(document: &Value, hosts: &[(String, String)], node_host: &str, names: Vec<String>) -> Exposure {
+/// The exposure of a document. `hosts` are the inbounds' own host names by tag, with whether each uses Vision, and `node_host` stands in for one that is not set. Every name in `names` is looked up at once, and each lookup waits at most two seconds.
+pub async fn exposure(document: &Value, hosts: &[(String, String, bool)], node_host: &str, names: Vec<String>) -> Exposure {
 	let mut exposure = Exposure::default();
 	for inbound in document["xray"]["inbounds"].as_array().into_iter().flatten() {
+		let tag = inbound["tag"].as_str().unwrap_or_default();
+		// A VLESS inbound with Vision and a decoy answers a stranger as the decoy's web server does, so it gives the address away no more than any web server.
+		if inbound["protocol"] == "vless" && inbound["decoy"].is_string() && hosts.iter().any(|(held, _, vision)| held == tag && *vision) {continue}
 		match bare_host(inbound["listen"].as_str().unwrap_or_default()).parse::<IpAddr>() {
 			Ok(ip) if !ip.is_unspecified() => exposure.ips.push(ip),
 			_ => exposure.all = true,
 		}
-		let tag = inbound["tag"].as_str().unwrap_or_default();
-		let host = hosts.iter().find(|(held, host)| held == tag && !host.is_empty()).map_or(node_host, |(_, host)| host.as_str()).to_ascii_lowercase();
+		let host = hosts.iter().find(|(held, host, _)| held == tag && !host.is_empty()).map_or(node_host, |(_, host, _)| host.as_str()).to_ascii_lowercase();
 		if let Ok(ip) = host.parse::<IpAddr>() {exposure.ips.push(ip)} else if !host.is_empty() {exposure.names.push(host)}
 	}
 	let mut lookups = tokio::task::JoinSet::new();
@@ -188,7 +250,10 @@ pub async fn exposure(document: &Value, hosts: &[(String, String)], node_host: &
 pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Body(input): Body<InboundIn>) -> Result<Response, Failure> {
 	if !name_ok(&input.tag, false) {return Err(Failure::bad("tag is 1 to 64 characters of a-z, 0-9, dash and underscore, starting with a letter or digit."))}
 	if !PROTOCOLS.contains(&input.protocol.as_str()) {return Err(Failure::bad("protocol is vless, trojan or shadowsocks."))}
-	let (listen, tls, host) = checked(&input.protocol, input.port, input.listen.as_deref(), &input.cert, &input.key, input.host)?;
+	let (listen, tls, host) = checked(&input.protocol, input.port, input.listen.as_deref(), &input.cert, &input.key, input.self_signed.unwrap_or(false), input.name.clone(), input.host)?;
+	let vision = input.vision.unwrap_or(false);
+	if vision && input.protocol != "vless" {return Err(Failure::bad("Only a vless inbound can use Vision."))}
+	let users = choice(&app, input.all_users, input.users.clone()).await?.flatten();
 	if app.keys.is_none() {return Err(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))}
 	if !addon(&app).await.0 {return Err(Failure::new(StatusCode::CONFLICT, "addon_missing", "The Xray add-on is not installed on the node. Run sudo bash veilway.sh addon xray install on the server."))}
 	let _turn = app.turn(LOCAL).await;
@@ -207,7 +272,7 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 	document["xray"] = json!({"inbounds": inbounds});
 	let sealed = server_key.as_ref().and_then(|key| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&input.tag), key.as_bytes())));
 	let mut hosts = app.db.call(|db| inbound_hosts(db)).await??;
-	hosts.push((input.tag.clone(), host.clone()));
+	hosts.push((input.tag.clone(), host.clone(), vision));
 	let templates = nodecfg::rated(&app.settings(), &document, &[], None, &hosts, nodecfg::node_pins(&app, LOCAL).await, true).await;
 	let shared: Vec<Value> = templates.iter().filter(|template| template["profile"]["rating_cap"] == "detectable").map(|template| template["profile"]["id"].clone()).collect();
 	let derived: Vec<Value> = templates.iter().map(|template| template["profile"]["id"].clone()).collect();
@@ -217,6 +282,7 @@ pub async fn create(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>,
 		let tx = db.transaction().map_err(|error| error.to_string())?;
 		tx.execute("delete from xray_inbounds where tag = ?", [&tag]).map_err(|error| error.to_string())?;
 		tx.execute("insert into xray_inbounds (tag, protocol, host, created, server_key) values (?, ?, ?, ?, ?)", params![tag, protocol, host, now(), sealed]).map_err(|error| error.to_string())?;
+		store_choice(&tx, &tag, &users, vision).map_err(|error| error.to_string())?;
 		let mut touched = Vec::new();
 		let stored = store_settings(&tx, &cache, |settings| for profile in settings.profiles.iter_mut().filter(|profile| profile["type"] == "veilway" && profile["rating_cap"] != "unsafe" && (shared.contains(&profile["id"]) || !derived.contains(&profile["id"]))) {
 			touched.push((profile["id"].clone(), profile["rating_cap"].clone()));
@@ -260,6 +326,15 @@ pub struct InboundEdit {
 	pub host: Option<String>,
 	/// For vless and trojan. The inbound's own decoy stays when left out.
 	pub decoy: Option<String>,
+	/// vless and trojan: true for a certificate the node makes, false or left out for the certificate files.
+	pub self_signed: Option<bool>,
+	/// The name of a self-signed certificate, which links put in `sni`.
+	pub name: Option<String>,
+	/// vless only: whether every client carries the Vision flow. Left as it is when left out. A client app that holds an old link needs the new one.
+	pub vision: Option<bool>,
+	/// true for every user, false to serve only `users`. The choice stays as it is when both are left out. A user taken out loses their credential here.
+	pub all_users: Option<bool>,
+	pub users: Option<Vec<i64>>,
 	/// For shadowsocks: a new server key. Every share link of the inbound holds the old one, so every user needs a new link.
 	#[serde(default)] pub new_server_key: bool,
 }
@@ -268,7 +343,9 @@ pub struct InboundEdit {
 pub async fn edit(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, Path(tag): Path<String>, Body(input): Body<InboundEdit>) -> Result<Response, Failure> {
 	let lookup = tag.clone();
 	let (protocol, old_host) = app.db.call(move |db| -> rusqlite::Result<Option<(String, String)>> {db.query_row("select protocol, host from xray_inbounds where tag = ?", [&lookup], |row| Ok((row.get(0)?, row.get(1)?))).optional()}).await??.ok_or_else(|| Failure::missing("Xray inbound the panel made"))?;
-	let (listen, tls, host) = checked(&protocol, input.port, input.listen.as_deref(), &input.cert, &input.key, input.host)?;
+	let (listen, tls, host) = checked(&protocol, input.port, input.listen.as_deref(), &input.cert, &input.key, input.self_signed.unwrap_or(false), input.name.clone(), input.host)?;
+	if input.vision == Some(true) && protocol != "vless" {return Err(Failure::bad("Only a vless inbound can use Vision."))}
+	let picked = choice(&app, input.all_users, input.users.clone()).await?;
 	if input.new_server_key && protocol != "shadowsocks" {return Err(Failure::bad("Only a shadowsocks inbound has a server key."))}
 	if input.new_server_key && app.keys.is_none() {return Err(Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))}
 	if input.new_server_key {reauthed(&app, &ctx).await?}
@@ -296,11 +373,28 @@ pub async fn edit(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, P
 	if new_key.is_some() {changed.push("new server key".into())}
 	document["xray"]["inbounds"] = Value::Array(inbounds);
 	let sealed = new_key.as_ref().and_then(|key| app.keys.as_ref().map(|keys| keys.seal_secret(&[0; 16], &server_label(&tag), key.as_bytes())));
-	nodecfg::apply(&app, LOCAL, &ctx, document, &revision, &format!("xray:{tag}")).await?;
+	// The credentials the node is given come from the panel's choice, so it is stored before the apply and put back when the node refuses.
+	let (old_users, old_vision, wanted_users, wanted_vision) = app.db.call({
+		let (tag, picked, wants) = (tag.clone(), picked.clone(), input.vision);
+		move |db| -> rusqlite::Result<_> {
+			let (all, vision): (bool, bool) = db.query_row("select all_users, vision from xray_inbounds where tag = ?", [&tag], |row| Ok((row.get(0)?, row.get(1)?)))?;
+			let old = if all {None} else {Some(db.prepare("select user_id from xray_inbound_users where tag = ? order by user_id")?.query_map([&tag], |row| row.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?)};
+			let (users, now_vision) = (picked.unwrap_or_else(|| old.clone()), wants.unwrap_or(vision));
+			store_choice(db, &tag, &users, now_vision)?;
+			Ok((old, vision, users, now_vision))
+		}
+	}).await??;
+	if let Err(error) = nodecfg::apply(&app, LOCAL, &ctx, document, &revision, &format!("xray:{tag}")).await {
+		app.db.call({let tag = tag.clone(); move |db| store_choice(db, &tag, &old_users, old_vision)}).await??;
+		return Err(error)
+	}
+	if old_users != wanted_users {changed.push("users changed".into())}
+	if old_vision != wanted_vision {changed.push(format!("vision {wanted_vision}"))}
 	app.db.call({
 		let tag = tag.clone();
 		move |db| -> rusqlite::Result<()> {
 			db.execute("update xray_inbounds set host = ? where tag = ?", params![host, tag])?;
+			db.execute("delete from xray_clients where tag = ? and user_id not in (select user_id from xray_inbound_users where tag = ?) and (select all_users from xray_inbounds where tag = ?) = 0", params![tag, tag, tag])?;
 			if let Some(sealed) = &sealed {db.execute("update xray_inbounds set server_key = ? where tag = ?", params![sealed, tag])?;}
 			Ok(())
 		}
@@ -334,6 +428,8 @@ pub struct XrayLink {
 	pub link: String,
 	/// The same link as an SVG QR code.
 	pub qr_svg: String,
+	/// The pin of the node's certificate in hex, for apps that ignore `pcs` in the link and take it in their TLS settings. Vless and trojan only.
+	pub pin: Option<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -344,24 +440,29 @@ pub async fn links(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 	let keys = app.keys.as_ref().ok_or_else(|| Failure::new(StatusCode::SERVICE_UNAVAILABLE, "keys_missing", "The key file is missing."))?;
 	let (user, held) = app.db.call(move |db| -> rusqlite::Result<_> {
 		let user = UserRow::load(db, id)?;
-		let mut statement = db.prepare("select i.tag, i.protocol, i.host, c.secret, i.server_key from xray_clients c join xray_inbounds i on i.tag = c.tag where c.user_id = ? order by i.tag")?;
-		let held: Vec<(String, String, String, Vec<u8>, Option<Vec<u8>>)> = statement.query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?.collect::<Result<_, _>>()?;
+		let mut statement = db.prepare("select i.tag, i.protocol, i.host, c.secret, i.server_key, i.vision from xray_clients c join xray_inbounds i on i.tag = c.tag where c.user_id = ? and (i.all_users = 1 or exists (select 1 from xray_inbound_users u where u.tag = i.tag and u.user_id = c.user_id)) order by i.tag")?;
+		let held: Vec<(String, String, String, Vec<u8>, Option<Vec<u8>>, bool)> = statement.query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))?.collect::<Result<_, _>>()?;
 		Ok((user, held))
 	}).await??;
 	let (_, _, document) = nodecfg::running(&app, LOCAL).await?;
-	let provider = app.settings().provider_name;
+	let (provider, pins) = (app.settings().provider_name, status(&app).await["xray_pins"].clone());
 	let mut links = Vec::new();
-	for (tag, protocol, own, sealed, server) in held {
-		let Some(port) = document["xray"]["inbounds"].as_array().into_iter().flatten().find(|inbound| inbound["tag"] == tag.as_str()).and_then(|inbound| inbound["listen"].as_str()?.rsplit_once(':').map(|(_, port)| port.to_string())) else {continue};
+	for (tag, protocol, own, sealed, server, vision) in held {
+		let Some(inbound) = document["xray"]["inbounds"].as_array().into_iter().flatten().find(|inbound| inbound["tag"] == tag.as_str()) else {continue};
+		let Some(port) = inbound["listen"].as_str().and_then(|listen| listen.rsplit_once(':').map(|(_, port)| port.to_string())) else {continue};
+		let pin = pins[&tag].as_str().filter(|_| protocol != "shadowsocks").map(str::to_string);
 		let secret = keys.open_secret(&user.record_id, &format!("xray:{tag}"), &sealed).and_then(|plain| String::from_utf8(plain).ok()).ok_or_else(|| Failure::internal("an Xray secret does not open"))?;
 		let host = host_of(&app, &document, &own).await;
 		if host.is_empty() {return Err(Failure::conflict("No host to put in links: set the node's public_addresses, the panel's node host or the inbound's host."))}
 		let address = if host.contains(':') {format!("[{host}]:{port}")} else {format!("{host}:{port}")};
 		let escape = |text: &str| -> String {text.bytes().map(|byte| if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {(byte as char).to_string()} else {format!("%{byte:02X}")}).collect()};
 		let name = escape(&format!("{provider} {tag}"));
+		// A self-signed certificate is made for the name the operator gave it, so that is the name the link asks for.
+		let sni = inbound["tls"]["name"].as_str().filter(|_| inbound["tls"]["self_signed"] == true).map_or(host.clone(), str::to_string);
+		let pcs = pin.as_ref().map_or(String::new(), |pin| format!("&pcs={pin}"));
 		let link = match protocol.as_str() {
-			"vless" => format!("vless://{secret}@{address}?encryption=none&security=tls&sni={host}&type=tcp#{name}"),
-			"trojan" => format!("trojan://{secret}@{address}?security=tls&sni={host}&type=tcp#{name}"),
+			"vless" => format!("vless://{secret}@{address}?encryption=none&security=tls&sni={sni}&type=tcp{}{pcs}#{name}", if vision {"&flow=xtls-rprx-vision"} else {""}),
+			"trojan" => format!("trojan://{secret}@{address}?security=tls&sni={sni}&type=tcp{pcs}#{name}"),
 			// The userinfo of a 2022 cipher is the method and the password in the clear, and the password of a multi-user server is its key and the user's, each escaped.
 			_ => {
 				let server = server.and_then(|sealed| keys.open_secret(&[0; 16], &server_label(&tag), &sealed)).and_then(|plain| String::from_utf8(plain).ok()).ok_or_else(|| Failure::internal("the server key of a Shadowsocks inbound does not open"))?;
@@ -369,7 +470,7 @@ pub async fn links(State(app): State<Arc<App>>, Extension(ctx): Extension<Ctx>, 
 			}
 		};
 		let qr_svg = qrcode::QrCode::new(link.as_bytes()).map_err(Failure::internal)?.render::<qrcode::render::svg::Color>().min_dimensions(240, 240).build();
-		links.push(XrayLink {tag, protocol, link, qr_svg});
+		links.push(XrayLink {tag, protocol, link, qr_svg, pin});
 	}
 	app.db.audit(&ctx.actor, &ctx.source, "xray.links.show", &format!("user:{id}"), "").await;
 	ok(&XrayLinks {links})
@@ -407,13 +508,27 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn only_a_vless_inbound_with_vision_and_a_decoy_leaves_its_address_alone() {
+		let hardened = vec![("x".to_string(), String::new(), true)];
+		let inbound = |protocol: &str, decoy: bool| {
+			let mut inbound = json!({"tag": "x", "protocol": protocol, "listen": "0.0.0.0:443"});
+			if decoy {inbound["decoy"] = json!("http://127.0.0.1:8080");}
+			json!({"xray": {"inbounds": [inbound]}})
+		};
+		assert!(!exposure(&inbound("vless", true), &hardened, "192.0.2.10", Vec::new()).await.shares(&names(&["192.0.2.10:443"])));
+		assert!(exposure(&inbound("vless", true), &[("x".to_string(), String::new(), false)], "192.0.2.10", Vec::new()).await.shares(&names(&["192.0.2.10:443"])), "no Vision");
+		assert!(exposure(&inbound("vless", false), &hardened, "192.0.2.10", Vec::new()).await.shares(&names(&["192.0.2.10:443"])), "no decoy");
+		for protocol in ["trojan", "shadowsocks"] {assert!(exposure(&inbound(protocol, true), &hardened, "192.0.2.10", Vec::new()).await.shares(&names(&["192.0.2.10:443"])), "{protocol}");}
+	}
+
+	#[tokio::test]
 	async fn no_inbound_caps_nothing() {
 		assert!(!Exposure::default().shares(&names(&["localhost:443"])));
 	}
 
 	#[tokio::test]
 	async fn a_separate_address_and_host_leave_other_profiles_uncapped() {
-		let hosts = vec![("Xray".to_string(), "xray.example.net".to_string())];
+		let hosts = vec![("Xray".to_string(), "xray.example.net".to_string(), false)];
 		let exposure = exposure(&document("192.0.2.20:443"), &hosts, "192.0.2.10", names(&["192.0.2.10", "localhost"])).await;
 		assert!(!exposure.shares(&names(&["192.0.2.10:443"])));
 		assert!(!exposure.shares(&names(&["localhost:443"])));
@@ -421,7 +536,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn the_same_address_or_host_name_caps() {
-		let hosts = vec![("Xray".to_string(), "xray.example.net".to_string())];
+		let hosts = vec![("Xray".to_string(), "xray.example.net".to_string(), false)];
 		let exposure = exposure(&document("192.0.2.20:443"), &hosts, "192.0.2.10", names(&["192.0.2.20", "XRAY.example.net"])).await;
 		assert!(exposure.shares(&names(&["192.0.2.20:8443"])));
 		assert!(exposure.shares(&names(&["xray.example.net:443"])));

@@ -1638,6 +1638,64 @@ async fn xray_inbounds_keep_a_credential_per_user_and_make_share_links() {
 }
 
 #[tokio::test]
+async fn an_xray_inbound_serves_chosen_users_with_a_self_signed_pin_and_vision() {
+	let mut document = node_document("10.66.0.1/24");
+	document["public_addresses"] = json!(["vpn.example.org"]);
+	let (fake, socket) = Fake::start(document).await;
+	let h = Harness::with_socket(Some(socket)).await;
+	let session = h.login("10.0.0.1").await;
+	h.configure(&session, json!({})).await;
+	let pin = "ab".repeat(32);
+	*fake.status.lock().unwrap() = json!({"version": "0.0.0", "addons": {"xray": {"installed": true, "release": "v26.3.27"}}, "xray_pins": {"only": pin, "all": "cd".repeat(32)}});
+	let mut ids = Vec::new();
+	for name in ["ann", "bob"] {
+		let (id, _) = h.user(&session, name, json!({})).await;
+		assert_eq!(h.call(Method::POST, &format!("/p/api/users/{id}/devices"), Some(&session), Some(json!({"name": "phone"})), "10.0.0.1").await.status, StatusCode::OK);
+		ids.push(id);
+	}
+	let (ann, bob) = (ids[0], ids[1]);
+	let refused = h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(json!({"tag": "bad", "protocol": "trojan", "port": 8445, "self_signed": true, "cert": "/a", "key": "/b", "decoy": "http://127.0.0.1:8080"})), "10.0.0.1").await;
+	assert_eq!(refused.status, StatusCode::BAD_REQUEST, "files and a self-signed certificate do not mix");
+	let unknown = h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(json!({"tag": "bad", "protocol": "trojan", "port": 8445, "self_signed": true, "decoy": "http://127.0.0.1:8080", "all_users": false, "users": [9999]})), "10.0.0.1").await;
+	assert_eq!(unknown.status, StatusCode::BAD_REQUEST, "a user that does not exist");
+	let vision_trojan = h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(json!({"tag": "bad", "protocol": "trojan", "port": 8445, "self_signed": true, "decoy": "http://127.0.0.1:8080", "vision": true})), "10.0.0.1").await;
+	assert_eq!(vision_trojan.status, StatusCode::BAD_REQUEST, "only vless has Vision");
+	let only = h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(json!({"tag": "only", "protocol": "vless", "port": 8444, "self_signed": true, "decoy": "http://127.0.0.1:8080", "vision": true, "all_users": false, "users": [ann]})), "10.0.0.1").await;
+	assert_eq!(only.status, StatusCode::OK, "{}", String::from_utf8_lossy(&only.body));
+	let all = h.call(Method::POST, "/p/api/xray/inbounds", Some(&session), Some(json!({"tag": "all", "protocol": "trojan", "port": 8445, "self_signed": true, "name": "cdn.example.net", "decoy": "http://127.0.0.1:8080"})), "10.0.0.1").await;
+	assert_eq!(all.status, StatusCode::OK, "{}", String::from_utf8_lossy(&all.body));
+	let applied = fake.applied.lock().unwrap().last().unwrap().clone();
+	let inbounds = applied["xray"]["inbounds"].as_array().unwrap().clone();
+	assert_eq!((inbounds[0]["tls"].clone(), inbounds[1]["tls"].clone()), (json!({"self_signed": true}), json!({"self_signed": true, "name": "cdn.example.net"})));
+	let users = |inbound: &Value| inbound["clients"].as_array().unwrap().iter().map(|client| client["user"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+	assert_eq!((users(&inbounds[0]), users(&inbounds[1])), (vec!["ann".to_string()], vec!["ann".to_string(), "bob".to_string()]), "only the chosen user, and every user where none were chosen");
+	assert_eq!((inbounds[0]["clients"][0]["flow"].clone(), inbounds[1]["clients"][0].get("flow").is_none()), (json!("xtls-rprx-vision"), true));
+	let uuid = inbounds[0]["clients"][0]["secret"].as_str().unwrap().to_string();
+	let listed = h.call(Method::GET, "/p/api/xray", Some(&session), None, "10.0.0.1").await.json();
+	assert_eq!((listed["inbounds"][0]["all_users"].clone(), listed["inbounds"][0]["users"].clone(), listed["inbounds"][0]["vision"].clone(), listed["inbounds"][0]["self_signed"].clone(), listed["inbounds"][0]["pin"].clone(), listed["inbounds"][1]["all_users"].clone()), (json!(false), json!([ann]), json!(true), json!(true), json!(pin), json!(true)));
+	let links = h.call(Method::GET, &format!("/p/api/users/{ann}/xray"), Some(&session), None, "10.0.0.1").await.json()["links"].as_array().unwrap().clone();
+	let trojan = inbounds[1]["clients"][0]["secret"].as_str().unwrap().to_string();
+	assert_eq!(links[0]["link"], json!(format!("trojan://{trojan}@vpn.example.org:8445?security=tls&sni=cdn.example.net&type=tcp&pcs={}#Test%20Net%20all", "cd".repeat(32))));
+	assert_eq!(links[1]["link"], json!(format!("vless://{uuid}@vpn.example.org:8444?encryption=none&security=tls&sni=vpn.example.org&type=tcp&flow=xtls-rprx-vision&pcs={pin}#Test%20Net%20only")));
+	assert_eq!((links[1]["pin"].clone(), links.len()), (json!(pin), 2));
+	let bobs = h.call(Method::GET, &format!("/p/api/users/{bob}/xray"), Some(&session), None, "10.0.0.1").await.json()["links"].as_array().unwrap().clone();
+	assert_eq!(bobs.len(), 1, "bob has a link for the inbound that serves everyone only");
+	let edited = h.call(Method::PATCH, "/p/api/xray/inbounds/only", Some(&session), Some(json!({"port": 8444, "self_signed": true, "all_users": false, "users": [bob]})), "10.0.0.1").await;
+	assert_eq!(edited.status, StatusCode::OK, "{}", String::from_utf8_lossy(&edited.body));
+	let applied = fake.applied.lock().unwrap().last().unwrap().clone();
+	assert_eq!(users(&applied["xray"]["inbounds"][0]), vec!["bob".to_string()], "a user taken out loses the credential");
+	assert_eq!(applied["xray"]["inbounds"][0]["clients"][0]["flow"], json!("xtls-rprx-vision"), "Vision stays when an edit leaves it out");
+	let anns = h.call(Method::GET, &format!("/p/api/users/{ann}/xray"), Some(&session), None, "10.0.0.1").await.json()["links"].as_array().unwrap().clone();
+	assert_eq!(anns.len(), 1);
+	let held = h.app.db.call(move |db| db.query_row("select count(*) from xray_clients where tag = 'only' and user_id = ?", [ann], |row| row.get::<_, i64>(0)).unwrap()).await.unwrap();
+	assert_eq!(held, 0);
+	let everyone = h.call(Method::PATCH, "/p/api/xray/inbounds/only", Some(&session), Some(json!({"port": 8444, "self_signed": true, "all_users": true, "vision": false})), "10.0.0.1").await;
+	assert_eq!(everyone.status, StatusCode::OK, "{}", String::from_utf8_lossy(&everyone.body));
+	let applied = fake.applied.lock().unwrap().last().unwrap().clone();
+	assert_eq!((users(&applied["xray"]["inbounds"][0]), applied["xray"]["inbounds"][0]["clients"][0].get("flow").is_none()), (vec!["ann".to_string(), "bob".to_string()], true));
+}
+
+#[tokio::test]
 async fn a_backup_is_downloaded_and_restored_with_the_panel_restarting_on_the_old_state() {
 	let h = Harness::new().await;
 	let session = h.login("10.0.0.1").await;

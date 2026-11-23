@@ -19,7 +19,8 @@ create table nodes (id integer primary key, uid blob not null unique, name text 
 create table device_addresses (node_id integer not null references nodes(id) on delete cascade, device_id integer not null references devices(id) on delete cascade, address text not null, added_rev integer not null default 0, primary key (node_id, device_id), unique (node_id, address)) without rowid;
 create table node_usage (node_id integer not null references nodes(id) on delete cascade, user_id integer not null references users(id) on delete cascade, period_start integer not null, used_bytes integer not null, up_bytes integer not null default 0, down_bytes integer not null default 0, banked_bytes integer not null default 0, reported_at integer not null, primary key (node_id, user_id)) without rowid;
 create table node_resets (node_id integer not null references nodes(id) on delete cascade, user_id integer not null references users(id) on delete cascade, totals integer not null default 0, wanted_at integer not null, primary key (node_id, user_id)) without rowid;
-create table xray_inbounds (tag text primary key, protocol text not null, host text not null default '', created integer not null, server_key blob);
+create table xray_inbounds (tag text primary key, protocol text not null, host text not null default '', created integer not null, server_key blob, all_users integer not null default 1, vision integer not null default 0);
+create table xray_inbound_users (tag text not null references xray_inbounds(tag) on delete cascade, user_id integer not null references users(id) on delete cascade, primary key (tag, user_id)) without rowid;
 create table xray_clients (tag text not null references xray_inbounds(tag) on delete cascade, user_id integer not null references users(id) on delete cascade, secret blob not null, primary key (tag, user_id)) without rowid;
 create table gateway_use (key_id integer not null, user_id integer not null references users(id) on delete cascade, first_at integer not null, last_at integer not null, primary key (key_id, user_id)) without rowid;
 create table endpoint_use (endpoint text not null, user_id integer not null references users(id) on delete cascade, last_at integer not null, primary key (endpoint, user_id)) without rowid;
@@ -32,7 +33,12 @@ insert into nodes (id, uid, name, slug, pool_v4, created) values (1, randomblob(
 /// Entry 4 keeps the relays of a remote node in `nodes.relays`, as the list that node 1 keeps in its settings.
 /// Entry 5 gives a user their own order of the profiles, a JSON list of profile ids, or null to follow the global order of the settings.
 /// Entry 6 gives a user a rate cap in bytes per second up and down, or null for none, which the node keeps one bucket for per user.
-pub const MIGRATIONS: &[&str] = &["alter table users add column proxy_password blob", NODES, SEVERAL, "alter table nodes add column emptied integer not null default 0", "alter table nodes add column relays text not null default '[]'", "alter table users add column profile_order text", "alter table users add column speed_up integer;\nalter table users add column speed_down integer"];
+/// Entry 7 lets an Xray inbound serve chosen users only: `all_users` is 1 for every inbound that exists, and `xray_inbound_users` holds the users of one that is not. `vision` is 1 when its VLESS clients carry the Vision flow, 0 for every inbound that exists.
+pub const MIGRATIONS: &[&str] = &["alter table users add column proxy_password blob", NODES, SEVERAL, "alter table nodes add column emptied integer not null default 0", "alter table nodes add column relays text not null default '[]'", "alter table users add column profile_order text", "alter table users add column speed_up integer;\nalter table users add column speed_down integer", XRAY_USERS];
+
+const XRAY_USERS: &str = "alter table xray_inbounds add column all_users integer not null default 1;
+alter table xray_inbounds add column vision integer not null default 0;
+create table xray_inbound_users (tag text not null references xray_inbounds(tag) on delete cascade, user_id integer not null references users(id) on delete cascade, primary key (tag, user_id)) without rowid";
 
 const NODES: &str = "create table if not exists nodes (id integer primary key, uid blob not null unique, name text not null unique, slug text not null unique, link_id text, place integer not null default 0, pool_v4 text not null, settings text not null default '{}', wanted_rev integer not null default 0, applied_rev integer not null default 0, config_rev text, last_seen integer, last_error text, version text, counted integer not null default 1, max_rate integer, created integer not null);
 insert or ignore into nodes (id, uid, name, slug, pool_v4, created) values (1, randomblob(16), 'Node 1', 'node-1', coalesce((select json_extract(value, '$.pool_v4') from settings where key = 'settings'), '10.66.0.0/16'), cast(strftime('%s', 'now') as integer));
@@ -175,9 +181,9 @@ mod tests {
 	fn a_fresh_database_gets_the_schema_and_version_1() {
 		let mut connection = memory();
 		migrate(&mut connection, MIGRATIONS).unwrap();
-		assert_eq!(SCHEMA_VERSION, 8);
-		assert_eq!(version(&connection), 8);
-		assert_eq!(connection.query_row("select count(*) from sqlite_master where type = 'table'", [], |row| row.get::<_, i64>(0)).unwrap(), 17);
+		assert_eq!(SCHEMA_VERSION, 9);
+		assert_eq!(version(&connection), 9);
+		assert_eq!(connection.query_row("select count(*) from sqlite_master where type = 'table'", [], |row| row.get::<_, i64>(0)).unwrap(), 18);
 		assert_eq!(connection.query_row("select id, name, pool_v4 from nodes", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).unwrap(), (1, "Node 1".into(), "10.66.0.0/16".into()));
 	}
 
@@ -202,7 +208,7 @@ mod tests {
 		connection.execute("insert into users (id, name, device_limit, created, record_id, sub_id, token_lookup, token_created) values (1, 'a', 3, 1, x'00', 's', x'01', 1)", []).unwrap();
 		for (id, address) in [(1, "10.7.0.2"), (2, "10.7.0.9")] {connection.execute("insert into devices (id, user_id, name, public_key, secret_hash, address, transport_secret, state, token_gen, created) values (?, 1, 'd', ?, x'00', ?, x'00', 'enrolled', 1, 1)", params![id, format!("key{id}"), address]).unwrap();}
 		migrate(&mut connection, MIGRATIONS).unwrap();
-		assert_eq!(version(&connection), 8);
+		assert_eq!(version(&connection), 9);
 		assert_eq!(connection.query_row("select id, pool_v4, link_id, place, counted from nodes", [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?, row.get::<_, i64>(3)?, row.get::<_, i64>(4)?))).unwrap(), (1, "10.7.0.0/24".into(), None, 0, 1));
 		let addresses: Vec<(i64, i64, String)> = connection.prepare("select node_id, device_id, address from device_addresses order by device_id").unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap().collect::<Result<_, _>>().unwrap();
 		assert_eq!(addresses, vec![(1, 1, "10.7.0.2".to_string()), (1, 2, "10.7.0.9".to_string())]);
@@ -213,6 +219,16 @@ mod tests {
 		assert_eq!(connection.query_row("select count(*) from device_addresses", [], |row| row.get::<_, i64>(0)).unwrap(), 1, "an address goes with its device");
 		migrate(&mut connection, MIGRATIONS).unwrap();
 		assert_eq!(connection.query_row("select count(*) from nodes", [], |row| row.get::<_, i64>(0)).unwrap(), 1, "a second run changes nothing");
+	}
+
+	#[test]
+	fn an_xray_inbound_from_before_stays_on_every_user_without_vision() {
+		let mut connection = memory();
+		connection.execute_batch(SCHEMA_V2).unwrap();
+		connection.pragma_update(None, "user_version", 2).unwrap();
+		connection.execute("insert into xray_inbounds (tag, protocol, host, created) values ('xr', 'vless', '', 1)", []).unwrap();
+		migrate(&mut connection, MIGRATIONS).unwrap();
+		assert_eq!(connection.query_row("select all_users, vision from xray_inbounds", [], |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?))).unwrap(), (true, false));
 	}
 
 	#[test]

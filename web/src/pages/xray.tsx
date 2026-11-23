@@ -1,13 +1,16 @@
-import {Banner, Button, Dialog, Glass, Icon, IconButton, NumberField, Switch, TextField, useToast} from "@veilway/ui";
+import {Banner, Button, Checkbox, Dialog, Glass, Icon, IconButton, NumberField, Switch, TextField, useToast} from "@veilway/ui";
 import {useState} from "react";
 import {api, type XrayInbound, type XrayLink} from "../api.ts";
-import {Copyable, ErrorNote, Mark, Qr, useGuard, useP} from "../kit.tsx";
+import {Copyable, ErrorNote, Mark, Qr, useGuard, useLoad, useP} from "../kit.tsx";
 
 const PROTOCOLS = ["vless", "trojan", "shadowsocks"] as const;
 export type XrayState = {installed: boolean, release?: string | null, inbounds: ({tag: string, managed: boolean} & Partial<XrayInbound>)[]};
 
 // The address part of a listen value, "0.0.0.0:8443" or "[::]:8443". Every address is shown as empty, as create leaves it out.
 const listenAddress = (listen: string) => { const address = listen.slice(0, listen.lastIndexOf(":")).replace(/^\[|\]$/g, ""); return address === "0.0.0.0" ? "" : address; };
+
+// A port in the range the OS hands out to programs, so it does not look like a service somebody chose on purpose.
+const randomPort = () => 10000 + crypto.getRandomValues(new Uint32Array(1))[0]! % 50000;
 
 // The add-on itself: whether the node has it, the inbounds the panel made with their edit action, and the one way to add an inbound. Editing replaces the sheet with the form, in the same place.
 export function XraySheet({xray, onAdd, onChanged}: {xray: XrayState, onAdd: () => void, onChanged?: () => void}) {
@@ -37,11 +40,14 @@ export function XraySheet({xray, onAdd, onChanged}: {xray: XrayState, onAdd: () 
 // The form sits beside the list, to add an inbound or, given one, to change it. Review shows what applying does before the node is asked, since Xray inbounds go to the node in one step.
 export function XrayForm({inbound, onClose, onDone}: {inbound?: XrayInbound, onClose: () => void, onDone: () => void}) {
 	const {t, number} = useP(), guard = useGuard(), toast = useToast();
-	const [protocol, setProtocol] = useState<string>(inbound?.protocol ?? "vless"), [tag, setTag] = useState(inbound?.tag ?? ""), [port, setPort] = useState<number | "">(inbound?.port ?? 2053), [listen, setListen] = useState(inbound ? listenAddress(inbound.listen) : ""), [cert, setCert] = useState(inbound?.cert ?? ""), [key, setKey] = useState(inbound?.key ?? ""), [host, setHost] = useState(inbound?.own_host ?? ""), [decoy, setDecoy] = useState(inbound?.decoy ?? ""), [newKey, setNewKey] = useState(false);
+	const [protocol, setProtocol] = useState<string>(inbound?.protocol ?? "vless"), [tag, setTag] = useState(inbound?.tag ?? ""), [port, setPort] = useState<number | "">(() => inbound?.port ?? randomPort()), [listen, setListen] = useState(inbound ? listenAddress(inbound.listen) : ""), [cert, setCert] = useState(inbound?.cert ?? ""), [key, setKey] = useState(inbound?.key ?? ""), [host, setHost] = useState(inbound?.own_host ?? ""), [decoy, setDecoy] = useState(inbound?.decoy ?? ""), [newKey, setNewKey] = useState(false);
+	const [selfSigned, setSelfSigned] = useState(inbound ? inbound.self_signed : true), [tlsName, setTlsName] = useState(inbound?.tls_name ?? ""), [vision, setVision] = useState(inbound ? inbound.vision : true), [allUsers, setAllUsers] = useState(inbound?.all_users ?? true), [chosen, setChosen] = useState<number[]>(inbound?.users ?? []);
+	const people = useLoad(() => api("get", "/users"), []).data?.users ?? [];
 	const [busy, setBusy] = useState(false), [error, setError] = useState<unknown>(null), [review, setReview] = useState(false), tls = protocol !== "shadowsocks";
-	const missing = !tag.trim() ? "xray.needTag" as const : port === "" ? "xray.needPort" as const : tls && (!cert.trim() || !key.trim()) ? "xray.needCert" as const : null;
+	const missing = !tag.trim() ? "xray.needTag" as const : port === "" ? "xray.needPort" as const : tls && !selfSigned && (!cert.trim() || !key.trim()) ? "xray.needCert" as const : !allUsers && chosen.length === 0 ? "xray.needUsers" as const : null;
 	const linksChange = !!inbound && (port !== inbound.port || host.trim() !== inbound.own_host || newKey);
-	const body = {port: port === "" ? 0 : port, listen: listen.trim() || null, cert: tls ? cert.trim() : null, key: tls ? key.trim() : null, host: host.trim() || null, decoy: tls ? decoy.trim() || null : null};
+	const hardened = protocol === "vless" && vision;
+	const body = {port: port === "" ? 0 : port, listen: listen.trim() || null, cert: tls && !selfSigned ? cert.trim() : null, key: tls && !selfSigned ? key.trim() : null, self_signed: tls ? selfSigned : null, name: tls && selfSigned ? tlsName.trim() || null : null, vision: protocol === "vless" ? vision : null, all_users: allUsers, users: allUsers ? null : chosen, host: host.trim() || null, decoy: tls ? decoy.trim() || null : null};
 	const apply = async () => {
 		setBusy(true);
 		setError(null);
@@ -71,12 +77,23 @@ export function XrayForm({inbound, onClose, onDone}: {inbound?: XrayInbound, onC
 				<NumberField label={t("xray.port")} hint={t("xray.portHint")} unit={tls ? "TCP" : "TCP+UDP"} min={1} max={65535} value={port} onChange={setPort}/>
 				<TextField label={t("xray.listen")} hint={t("xray.listenHint")} placeholder="0.0.0.0" value={listen} onChange={setListen} technical optional/>
 			</div>
-			{tls && <TextField label={t("xray.cert")} hint={t("xray.certHint")} placeholder="/etc/ssl/node/fullchain.pem" value={cert} onChange={setCert} technical required/>}
-			{tls && <TextField label={t("xray.key")} placeholder="/etc/ssl/node/privkey.pem" value={key} onChange={setKey} technical required/>}
+			{tls && <fieldset className="p-choices">
+				<legend className="vw-label">{t("xray.certMode")}</legend>
+				{([true, false] as const).map(value => <label key={String(value)} className="p-choice"><input type="radio" name="xray-cert-mode" checked={selfSigned === value} onChange={() => setSelfSigned(value)}/><span className="p-choice-head">{t(value ? "xray.selfSigned" : "xray.certFiles")}{selfSigned === value && <Icon name="check"/>}</span><span>{t(value ? "xray.selfSignedBody" : "xray.certFilesBody")}</span></label>)}
+			</fieldset>}
+			{tls && selfSigned && <TextField label={t("xray.certName")} hint={t("xray.certNameHint")} value={tlsName} onChange={setTlsName} technical optional/>}
+			{tls && !selfSigned && <TextField label={t("xray.cert")} hint={t("xray.certHint")} placeholder="/etc/ssl/node/fullchain.pem" value={cert} onChange={setCert} technical required/>}
+			{tls && !selfSigned && <TextField label={t("xray.key")} placeholder="/etc/ssl/node/privkey.pem" value={key} onChange={setKey} technical required/>}
+			{protocol === "vless" && <Switch label={t("xray.vision")} hint={t("xray.visionHint")} checked={vision} onChange={setVision}/>}
+			<fieldset className="p-choices">
+				<legend className="vw-label">{t("xray.who")}</legend>
+				{([true, false] as const).map(value => <label key={String(value)} className="p-choice"><input type="radio" name="xray-who" checked={allUsers === value} onChange={() => setAllUsers(value)}/><span className="p-choice-head">{t(value ? "xray.whoAll" : "xray.whoSome")}{allUsers === value && <Icon name="check"/>}</span><span>{t(value ? "xray.whoAllBody" : "xray.whoSomeBody")}</span></label>)}
+			</fieldset>
+			{!allUsers && <div className="p-cluster" role="group" aria-label={t("xray.whoSome")}>{people.map(person => <Checkbox key={person.id} label={person.name} checked={chosen.includes(person.id)} onChange={on => setChosen(on ? [...chosen, person.id] : chosen.filter(id => id !== person.id))}/>)}</div>}
 			<TextField label={t("xray.host")} hint={t("xray.hostHint")} value={host} onChange={setHost} technical optional/>
 			{tls && <TextField label={t("xray.decoy")} hint={t(inbound ? "xray.decoyEditHint" : "xray.decoyHint")} placeholder="http://127.0.0.1:8080" value={decoy} onChange={setDecoy} technical optional/>}
 			{inbound && !tls && <Switch label={t("xray.newKey")} hint={t("xray.newKeyHint")} checked={newKey} onChange={setNewKey}/>}
-			{inbound ? <Banner tone={linksChange ? "warning" : "info"} title={t("xray.linksChangeTitle")}>{t("xray.linksChangeBody")}</Banner> : <Banner tone="warning" title={t("xray.sharedTitle")}>{t("xray.sharedBody")}</Banner>}
+			{inbound ? <Banner tone={linksChange ? "warning" : "info"} title={t("xray.linksChangeTitle")}>{t("xray.linksChangeBody")}</Banner> : hardened ? <Banner tone="info" title={t("xray.hardenedTitle")}>{t("xray.hardenedBody")}</Banner> : <Banner tone="warning" title={t("xray.sharedTitle")}>{t("xray.sharedBody")}</Banner>}
 			{!review && <ErrorNote error={error}/>}
 			<div className="p-form-foot"><Button variant="quiet" onClick={onClose}>{t("action.cancel")}</Button><Button type="submit" variant="primary" disabled={missing !== null}>{t("xray.review")}</Button></div>
 			{missing && <p className="vw-muted vw-small" role="status">{t(missing)}</p>}
@@ -85,8 +102,8 @@ export function XrayForm({inbound, onClose, onDone}: {inbound?: XrayInbound, onC
 			<div className="p-stack">
 				<ul className="p-changes">
 					<li><Mark tone={inbound ? "info" : "success"}>{t(inbound ? "review.changed" : "review.added")}</Mark><span>{t("xray.reviewInbound", {protocol: t(`xray.name.${protocol as "vless"}`), port: port === "" ? "" : number(port, {useGrouping: false})})}</span><span className="vw-code">{tag.trim()}</span></li>
-					<li><Mark tone="info">{t(inbound ? "review.kept" : "review.changed")}</Mark><span>{t(inbound ? "xray.reviewKept" : "xray.reviewUsers")}</span></li>
-					{inbound ? linksChange && <li><Mark tone={newKey ? "danger" : "warning"}>{t("review.changed")}</Mark><span>{t(newKey ? "xray.reviewNewKey" : "xray.reviewLinks")}</span></li> : <li><Mark tone="warning">{t("review.changed")}</Mark><span>{t("xray.reviewCap")}</span></li>}
+					<li><Mark tone="info">{t(inbound ? "review.kept" : "review.changed")}</Mark><span>{t(!allUsers ? "xray.reviewSome" : inbound ? "xray.reviewKept" : "xray.reviewUsers", {count: number(chosen.length)})}</span></li>
+					{inbound ? linksChange && <li><Mark tone={newKey ? "danger" : "warning"}>{t("review.changed")}</Mark><span>{t(newKey ? "xray.reviewNewKey" : "xray.reviewLinks")}</span></li> : <li><Mark tone={hardened ? "info" : "warning"}>{t("review.changed")}</Mark><span>{t(hardened ? "xray.reviewNoCap" : "xray.reviewCap")}</span></li>}
 				</ul>
 				<ErrorNote error={error}/>
 				<div className="vw-dialog-foot"><Button onClick={() => setReview(false)}>{t("action.cancel")}</Button><Button variant="primary" disabled={busy} onClick={() => void apply()}>{t("review.apply")}</Button></div>
@@ -102,6 +119,7 @@ export function XrayLinksDialog({name, links, onClose}: {name: string, links: Xr
 			<h3 className="vw-h3"><span className="vw-code">{link.tag}</span> <span className="vw-muted vw-small">{link.protocol}</span></h3>
 			<Qr svg={link.qr_svg} label={t("link.qr")}/>
 			<Copyable label={t("xray.link")} value={link.link}/>
+			{link.pin && <><Copyable label={t("xray.pin")} value={link.pin}/><p className="vw-muted vw-small">{t("xray.pinNote")}</p></>}
 		</div>)}</div>)}
 	</Dialog>;
 }

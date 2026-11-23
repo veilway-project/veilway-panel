@@ -476,7 +476,7 @@ fn derive(settings: &Settings, document: &Value, relays: &[Relay], user: Option<
 }
 
 /// The templates with each profile's rating decided by the Xray inbounds it shares an address with. The names the profiles carry are looked up first, so the derivation itself does no lookup.
-pub async fn rated(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, hosts: &[(String, String)], pins: (BTreeMap<String, String>, BTreeMap<String, String>), skeleton: bool) -> Vec<Value> {
+pub async fn rated(settings: &Settings, document: &Value, relays: &[Relay], user: Option<(i64, &[String])>, hosts: &[(String, String, bool)], pins: (BTreeMap<String, String>, BTreeMap<String, String>), skeleton: bool) -> Vec<Value> {
 	let names: Vec<String> = derive(settings, document, relays, user, &Exposure::default(), skeleton).iter().flat_map(|template| addresses(&template["profile"])).collect();
 	let mut exposure = xray::exposure(document, hosts, &settings.node_host, names).await;
 	(exposure.pins, exposure.file_pins) = pins;

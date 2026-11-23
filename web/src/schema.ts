@@ -2170,6 +2170,8 @@ export interface components {
             transport_public_key?: string | null;
         };
         InboundEdit: {
+            /** @description true for every user, false to serve only `users`. The choice stays as it is when both are left out. A user taken out loses their credential here. */
+            all_users?: boolean | null;
             /** @description As on create: needed for vless and trojan, refused for shadowsocks. */
             cert?: string | null;
             /** @description For vless and trojan. The inbound's own decoy stays when left out. */
@@ -2179,6 +2181,8 @@ export interface components {
             key?: string | null;
             /** @description The address Xray listens on. 0.0.0.0 when left out. */
             listen?: string | null;
+            /** @description The name of a self-signed certificate, which links put in `sni`. */
+            name?: string | null;
             /**
              * @description For shadowsocks: a new server key. Every share link of the inbound holds the old one, so every user needs a new link.
              * @default false
@@ -2186,8 +2190,15 @@ export interface components {
             new_server_key: boolean;
             /** Format: uint16 */
             port: number;
+            /** @description vless and trojan: true for a certificate the node makes, false or left out for the certificate files. */
+            self_signed?: boolean | null;
+            users?: number[] | null;
+            /** @description vless only: whether every client carries the Vision flow. Left as it is when left out. A client app that holds an old link needs the new one. */
+            vision?: boolean | null;
         };
         InboundIn: {
+            /** @description false to serve only the users in `users`. Every user when left out. */
+            all_users?: boolean | null;
             /** @description Paths of the certificate and key files on the node. Needed for vless and trojan, refused for shadowsocks. */
             cert?: string | null;
             /** @description For vless and trojan, the origin of the operator's own web server (http://127.0.0.1:8080) that anything that is not a user's connection is handed to. Taken from the node's `tls` transport when left out; the inbound is refused when the node has none. */
@@ -2197,11 +2208,19 @@ export interface components {
             key?: string | null;
             /** @description The address Xray listens on. 0.0.0.0 when left out. */
             listen?: string | null;
+            /** @description The name a self-signed certificate and the links carry in `sni`. The link's host when left out. */
+            name?: string | null;
             /** Format: uint16 */
             port: number;
             /** @description vless, trojan or shadowsocks. */
             protocol: string;
+            /** @description vless and trojan: the node makes the certificate (it lasts about ten years) and links carry its pin, in the place of certificate files. */
+            self_signed?: boolean | null;
             tag: string;
+            /** @description The ids of the users that get a credential and a link here. */
+            users?: number[] | null;
+            /** @description vless only: every client carries the Vision flow (`xtls-rprx-vision`). Off when left out. */
+            vision?: boolean | null;
         };
         Inbounds: {
             inbounds: components["schemas"]["Inbound"][];
@@ -3556,6 +3575,8 @@ export interface components {
             configs: components["schemas"]["WireguardConfig"][];
         };
         XrayInboundOut: {
+            /** @description Whether every user gets a credential here. When false, `users` lists the ids of the users that do. */
+            all_users: boolean;
             cert?: string | null;
             /** @description A vless or trojan inbound without certificate files, which the node refuses. */
             certificate_missing: boolean;
@@ -3571,17 +3592,28 @@ export interface components {
             managed: boolean;
             /** @description The host the panel was given for this inbound, empty when links name the node's address. */
             own_host: string;
+            /** @description The SHA-256 of the certificate the node serves, in hex, as the node reports it. Links carry it as `pcs`. */
+            pin?: string | null;
             /** Format: uint16 */
             port: number;
             /** @description vless, trojan or shadowsocks. */
             protocol: string;
             /** @description "tls" or "none". */
             security: string;
+            /** @description Whether the node makes the certificate and its pin goes into links. */
+            self_signed: boolean;
             tag: string;
+            /** @description The name of a self-signed certificate, which links put in `sni`. */
+            tls_name?: string | null;
+            users: number[];
+            /** @description Whether the VLESS clients carry the Vision flow. */
+            vision: boolean;
         };
         XrayLink: {
             /** @description A secret, like the subscription link. */
             link: string;
+            /** @description The pin of the node's certificate in hex, for apps that ignore `pcs` in the link and take it in their TLS settings. Vless and trojan only. */
+            pin?: string | null;
             protocol: string;
             /** @description The same link as an SVG QR code. */
             qr_svg: string;

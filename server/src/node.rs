@@ -144,10 +144,10 @@ pub(crate) async fn fill(app: &Arc<App>, node: Node, document: &mut Value) -> Re
 		}
 		document["users"] = Value::Array(out);
 		// The Xray inbounds the panel made are node 1's.
-		let made: HashMap<String, String> = if remote {HashMap::new()} else {db.prepare("select tag, protocol from xray_inbounds").and_then(|mut statement| statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect()).map_err(|error| error.to_string())?};
+		let made: HashMap<String, (String, bool, bool)> = if remote {HashMap::new()} else {db.prepare("select tag, protocol, all_users, vision from xray_inbounds").and_then(|mut statement| statement.query_map([], |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?, row.get(3)?))))?.collect()).map_err(|error| error.to_string())?};
 		for inbound in document.get_mut("xray").and_then(|xray| xray.get_mut("inbounds")).and_then(Value::as_array_mut).into_iter().flatten() {
 			let tag = inbound["tag"].as_str().unwrap_or_default().to_string();
-			let Some(protocol) = made.get(&tag) else {
+			let Some((protocol, all_users, vision)) = made.get(&tag) else {
 				if let Some(clients) = inbound["clients"].as_array_mut() {clients.retain(|client| present.iter().any(|(_, name, _)| client["user"] == name.as_str()));}
 				continue
 			};
@@ -157,7 +157,9 @@ pub(crate) async fn fill(app: &Arc<App>, node: Node, document: &mut Value) -> Re
 				let marked = inbound["server_key"].as_str().is_none_or(|sent| sent.starts_with("<redacted"));
 				if let Some(key) = sealed.and_then(|sealed| keys.open_secret(&[0; 16], &server_label(&tag), &sealed)).filter(|_| marked) {inbound["server_key"] = json!(String::from_utf8(key).map_err(|error| error.to_string())?);}
 			}
-			let clients = present.iter().map(|(id, name, record)| {
+			// An inbound made for chosen users gives a credential to them alone.
+			let chosen: HashSet<i64> = if *all_users {HashSet::new()} else {db.prepare("select user_id from xray_inbound_users where tag = ?").and_then(|mut statement| statement.query_map([&tag], |row| row.get(0))?.collect()).map_err(|error| error.to_string())?};
+			let clients = present.iter().filter(|(id, _, _)| *all_users || chosen.contains(id)).map(|(id, name, record)| {
 				let sealed: Option<Vec<u8>> = db.query_row("select secret from xray_clients where tag = ? and user_id = ?", params![tag, id], |row| row.get(0)).optional().map_err(|error| error.to_string())?;
 				let secret = match sealed {
 					Some(sealed) => String::from_utf8(keys.open_secret(record, &format!("xray:{tag}"), &sealed).ok_or("an Xray secret does not open")?).map_err(|error| error.to_string())?,
@@ -172,7 +174,7 @@ pub(crate) async fn fill(app: &Arc<App>, node: Node, document: &mut Value) -> Re
 						secret
 					}
 				};
-				Ok(json!({"user": name, "secret": secret}))
+				Ok(if *vision && protocol == "vless" {json!({"user": name, "secret": secret, "flow": "xtls-rprx-vision"})} else {json!({"user": name, "secret": secret})})
 			}).collect::<Result<Vec<_>, String>>()?;
 			inbound["clients"] = Value::Array(clients);
 		}
