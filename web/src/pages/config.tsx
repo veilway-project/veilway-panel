@@ -35,7 +35,7 @@ const REFUSED_HEADERS = ["upgrade", "connection", "sec-websocket-accept", "set-c
 // What an exit does with traffic its outbound cannot carry, and the default of each kind. Only ping may be answered by the node, and only UDP may leave from the node's own address.
 const POLICIES: Record<string, string[]> = {icmp_echo: ["local", "reject", "drop", "direct", "via"], udp: ["reject", "drop", "direct", "via"], other: ["reject", "drop", "via"]};
 const PICKED = ["user", "group", "inbound", "transport", "link"];
-const RULE_TRANSPORTS = ["udp", "udp-obfs", "tls", "ws", "ws-plain", "fronted", "fronted-shaped", "faketls", "socks5", "http"];
+const RULE_TRANSPORTS = ["udp", "udp-obfs", "tls", "ws", "ws-plain", "fronted", "fronted-shaped", "faketls", "socks5", "http", "xray"];
 const loopback = (host: string) => /^\[?(127\.|::1(\]|\/|$))/.test(host);
 const local = (host: string) => loopback(host) || /^\[?(10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|f[cd][0-9a-f]{0,2}:|fe[89ab][0-9a-f]?:)/i.test(host);
 const BLANK: Record<Exclude<Section, "routing">, Item> = {inbounds: {tag: "", type: "veilway", address: [], transports: [{type: "tls", listen: ""}]}, outbounds: {tag: "", type: "direct"}, exits: {tag: "", backend: {type: "netstack", outbound: ""}}};
